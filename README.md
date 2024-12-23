@@ -12,18 +12,17 @@ Software package for geological and geophysical modeling of ground and aerial su
 - Минимальное значение цветового отображения
 - Максимальное значение цветового отображения
 - Цветовая шкала:
-  -hsv
-  -bwr
-  -colorwarm
-  -gist_rainbow
-  -ocean
-  -rainbow
-  -seismic
-  -tab20c
-  -terrain
-  -twilight
-  -twilight_shifted
-  
+1) hsv
+2) bwr
+3) colorwarm
+4) gist_rainbow
+5) ocean
+6) rainbow
+7) seismic
+8) tab20c
+9) terrain
+10) twilight
+11) twilight_shifted
 ![image](https://github.com/user-attachments/assets/35c4becd-260b-4b18-a758-65778f58f4cf)
 - Название карты
 - Подпись цветовой шкалы (справа от цветовой шкалы; rotate = 90)
