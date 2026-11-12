@@ -16,6 +16,8 @@ Linux/macOS: активация `source .venv/bin/activate`. Optional extras:
 `geo` (GeoPandas для SHP/GeoJSON). Недоступные optional-модели не показываются
 в списке; после установки перезапустите приложение. Размер загрузки PyTorch
 существенен. Базовый MLP доступен без него.
+LightGBM закреплён на 4.6.0: при проверке 4.7.0 обнаружен нативный access violation
+в полном наборе Windows-тестов; на 4.6.0 тот же набор проходит.
 
 `grids.py` — чтение и сетки; `coordinates.py` — CRS; `fields.py` — вычисления;
 `models.py` — обучение; `neural.py` — сети; `plotting.py` — карты;
