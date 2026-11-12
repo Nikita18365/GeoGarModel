@@ -3,12 +3,14 @@ import json
 from pathlib import Path
 import sys
 import traceback
+from threading import Event
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QFormLayout, QPushButton, QComboBox, QLineEdit, QCheckBox, QLabel,
     QFileDialog, QMessageBox, QListWidget, QSplitter, QPlainTextEdit, QDoubleSpinBox,
-    QSpinBox, QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem)
+    QSpinBox, QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem,
+    QScrollArea, QGroupBox, QProgressBar, QGridLayout, QSizePolicy)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from .grids import load_grid, save_grid, points_to_grid
@@ -16,19 +18,28 @@ from .fields import TRANSFORMS, transform
 from .models import read_table, available_models, train_horizon
 from .plotting import draw_map
 from .coordinates import gsk2011_zones, validate_crs
+from .dashboard import TrainingDashboard
+from .theme import STYLE
+from .compute import GPU_MODELS, ComputationCancelled
+from .optimization import default_space
 
 
 class Worker(QThread):
     result = pyqtSignal(object)
     failed = pyqtSignal(str)
+    progress = pyqtSignal(object)
+    cancelled = pyqtSignal()
 
     def __init__(self, function, parent=None):
         super().__init__(parent)
         self.function = function
+        self.cancel_event = Event()
 
     def run(self):
         try:
             self.result.emit(self.function())
+        except ComputationCancelled:
+            self.cancelled.emit()
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -36,13 +47,40 @@ class Worker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GeoGarModel 2 · горизонты и потенциальные поля")
-        self.resize(1350, 850)
+        self.setWindowTitle("GeoGarModel 2.1 · интерпретация и моделирование")
+        self.resize(1480, 940)
+        self.setStyleSheet(STYLE)
         self.grids, self.overlays = [], []
         self.training = self.prediction = self.result = self.output = None
         self.worker = None
+        self.job_outcome = ""
         self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
+        root = QWidget()
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(12, 0, 12, 10)
+        header = QWidget()
+        header.setObjectName("header")
+        header_layout = QHBoxLayout(header)
+        logo = QLabel("G")
+        logo.setObjectName("logo")
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setFixedSize(46, 46)
+        header_layout.addWidget(logo)
+        brand_layout = QVBoxLayout()
+        brand = QLabel("GeoGarModel")
+        brand.setObjectName("brand")
+        subtitle = QLabel("Геофизическая интерпретация · горизонты · потенциальные поля")
+        subtitle.setObjectName("muted")
+        brand_layout.addWidget(brand)
+        brand_layout.addWidget(subtitle)
+        header_layout.addLayout(brand_layout)
+        header_layout.addStretch()
+        self.compute_badge = QLabel("CPU  /  OPTUNA TPE")
+        self.compute_badge.setObjectName("muted")
+        header_layout.addWidget(self.compute_badge)
+        root_layout.addWidget(header)
+        root_layout.addWidget(self.tabs)
+        self.setCentralWidget(root)
         self.make_maps()
         self.make_training()
         menu = self.menuBar().addMenu("Данные")
@@ -126,35 +164,44 @@ class MainWindow(QMainWindow):
         self.transform_button = self.button("Рассчитать → новый слой", self.apply_transform, panel)
         self.button("Сохранить сетку NPZ", self.export_grid, panel)
         self.button("Экспорт XYZ CSV", self.export_xyz, panel)
-        controls.setMaximumWidth(420)
+        controls.setMinimumWidth(320)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(controls)
+        scroll.setMinimumWidth(350)
+        scroll.setMaximumWidth(470)
         splitter = QSplitter()
         splitter.addWidget(plot)
-        splitter.addWidget(controls)
+        splitter.addWidget(scroll)
+        splitter.setStretchFactor(0, 1)
         layout.addWidget(splitter)
-        self.tabs.addTab(tab, "Карты и трансформанты")
+        self.tabs.addTab(tab, "01  ·  Карты и трансформанты")
 
     def make_training(self):
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        layout = QHBoxLayout(tab)
+        controls = QWidget()
+        panel = QVBoxLayout(controls)
+        data_group = QGroupBox("01 · Данные и признаки")
+        data_layout = QVBoxLayout(data_group)
+        self.train_load = self.button("Загрузить обучение · XLSX / CSV", self.open_training, data_layout)
+        self.pred_load = self.button("Загрузить прогноз · XLSX / CSV", self.open_prediction, data_layout)
         row = QHBoxLayout()
-        layout.addLayout(row)
-        self.train_load = self.button("Обучающая таблица XLSX / CSV", self.open_training, row)
-        self.pred_load = self.button("Прогнозная таблица XLSX / CSV", self.open_prediction, row)
-        self.button("Просмотр / редактирование обучения", self.edit_training, row)
-        self.button("Статистика обучения", self.show_statistics, row)
+        data_layout.addLayout(row)
+        self.button("Таблица", self.edit_training, row)
+        self.button("Статистика", self.show_statistics, row)
         self.table_info = QLabel("Формат по умолчанию: X, Y, признаки…, глубина")
-        layout.addWidget(self.table_info)
+        self.table_info.setWordWrap(True)
+        self.table_info.setObjectName("muted")
+        data_layout.addWidget(self.table_info)
         form = QFormLayout()
-        layout.addLayout(form)
+        data_layout.addLayout(form)
         self.x_column, self.y_column, self.target = QComboBox(), QComboBox(), QComboBox()
         self.feature_list = QListWidget()
-        self.feature_list.setMaximumHeight(140)
+        self.feature_list.setFixedHeight(100)
         self.target.currentTextChanged.connect(self.update_features)
         self.x_column.currentTextChanged.connect(self.update_features)
         self.y_column.currentTextChanged.connect(self.update_features)
-        self.model_choice = QComboBox()
-        self.model_choice.addItems(available_models())
-        self.model_choice.setCurrentText("Histogram Boosting")
         self.spatial = QCheckBox("Пространственные блоки (X/Y в метрах)")
         self.spatial.setChecked(True)
         self.block = QDoubleSpinBox()
@@ -174,27 +221,131 @@ class MainWindow(QMainWindow):
             self.table_crs.addItem(f"{code} | {name}")
         self.table_crs.setCurrentText("EPSG:20910 | GSK-2011 / Gauss-Kruger zone 10")
         self.north_first = QCheckBox("Таблица: X = север, Y = восток (геодезический порядок)")
+        self.north_first.setText("X — север, Y — восток")
+        self.north_first.setToolTip("Геодезический порядок таблиц: X=Northing, Y=Easting. Снимите флажок для X=Easting, Y=Northing.")
         self.north_first.setChecked(True)
-        self.parameters.setPlaceholderText('{"max_iter": 300}')
-        self.search.setPlaceholderText('{"max_leaf_nodes": [15, 31]}')
         for label, widget in [("X", self.x_column), ("Y", self.y_column), ("Глубина / горизонт", self.target),
-                              ("Признаки (отметьте нужные)", self.feature_list), ("CRS таблиц", self.table_crs),
-                              ("Порядок координат", self.north_first), ("Метод", self.model_choice),
-                              ("Валидация", self.spatial), ("Размер блока, м", self.block), ("Доля контроля", self.test_fraction),
-                              ("Seed", self.seed), ("Параметры модели (JSON)", self.parameters), ("Сетка подбора (JSON, необязательно)", self.search)]:
+                              ("Признаки", self.feature_list), ("CRS таблиц", self.table_crs),
+                              ("Порядок координат", self.north_first)]:
             form.addRow(label, widget)
+        panel.addWidget(data_group)
+        model_group = QGroupBox("02 · Модель и контроль")
+        model_form = QFormLayout(model_group)
+        self.spatial.setText("Пространственные блоки")
+        self.model_choice = QComboBox()
+        self.model_choice.addItems(available_models())
+        self.model_choice.setCurrentText("Histogram Boosting")
+        self.device_choice = QComboBox()
+        self.device_choice.addItem("CPU", "cpu")
+        self.device_choice.addItem("GPU · CUDA / OpenCL", "gpu")
+        self.gpu_id = QSpinBox()
+        self.gpu_id.setRange(0, 31)
+        self.device_hint = QLabel()
+        self.device_hint.setWordWrap(True)
+        self.device_hint.setObjectName("muted")
+        self.parameters.setToolTip('Фиксированные параметры модели, например {"max_iter": 200}')
+        for label, widget in [("Метод", self.model_choice), ("Вычисления", self.device_choice), ("GPU ID", self.gpu_id),
+                              ("", self.device_hint), ("Валидация", self.spatial), ("Размер блока, м", self.block),
+                              ("Доля контроля", self.test_fraction), ("Seed", self.seed), ("Параметры · JSON", self.parameters)]:
+            model_form.addRow(label, widget)
+        panel.addWidget(model_group)
+        optimization = QGroupBox("03 · Optuna TPE")
+        opt_form = QFormLayout(optimization)
+        self.optimize_check = QCheckBox("Включить оптимизацию")
+        self.trials = QSpinBox()
+        self.trials.setRange(1, 10000)
+        self.trials.setValue(30)
+        self.folds = QSpinBox()
+        self.folds.setRange(2, 10)
+        self.folds.setValue(3)
+        self.timeout = QSpinBox()
+        self.timeout.setRange(0, 86400)
+        self.timeout.setSpecialValueText("Без ограничения")
+        self.search.setToolTip('Пустой объект {} = диапазоны для выбранной модели. Пример: {"alpha": {"type":"float","low":0.001,"high":10,"log":true}}')
+        for label, widget in [("Поиск", self.optimize_check), ("Trials", self.trials), ("CV фолды", self.folds),
+                              ("Лимит времени, с", self.timeout), ("Диапазоны · JSON", self.search)]:
+            opt_form.addRow(label, widget)
+        preset = QPushButton("Заполнить диапазоны для модели")
+        preset.clicked.connect(lambda: self.search.setText(json.dumps(default_space(self.model_choice.currentText()))))
+        opt_form.addRow(preset)
+        panel.addWidget(optimization)
         actions = QHBoxLayout()
-        layout.addLayout(actions)
+        panel.addLayout(actions)
         self.fit_button = self.button("Обучить и оценить", self.fit, actions)
+        self.fit_button.setObjectName("primary")
         self.predict_button = self.button("Прогнозировать", self.predict, actions)
-        self.button("Экспорт прогноза CSV", self.export_prediction, actions)
-        self.button("Экспорт контроля CSV", self.export_validation, actions)
-        self.button("Прогноз → карта", self.prediction_map, actions)
-        self.button("Отчёт JSON", self.export_report, actions)
+        self.stop_button = self.button("Остановить расчёт", self.cancel_job, panel)
+        self.stop_button.setObjectName("stop")
+        self.stop_button.setEnabled(False)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        panel.addWidget(self.progress_bar)
+        export = QGroupBox("04 · Экспорт и результаты")
+        export_layout = QGridLayout(export)
+        for n, (text, function) in enumerate([
+            ("Прогноз CSV", self.export_prediction), ("Контроль CSV", self.export_validation),
+            ("Trials CSV", self.export_trials), ("Отчёт JSON", self.export_report),
+            ("Прогноз → карта", self.prediction_map), ("Невязки → карта", self.validation_map)]):
+            button = QPushButton(text)
+            button.clicked.connect(lambda checked=False, fn=function: self.guard(fn))
+            export_layout.addWidget(button, n // 2, n % 2)
+        panel.addWidget(export)
+        panel.addStretch()
+        for combo in controls.findChildren(QComboBox):
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(10)
+            combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for item_form in (form, model_form, opt_form):
+            item_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            item_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(controls)
+        scroll.setMinimumWidth(390)
+        scroll.setMaximumWidth(560)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        self.dashboard = TrainingDashboard()
+        right_layout.addWidget(self.dashboard, 1)
+        export_row = QHBoxLayout()
+        self.plot_export_choice = QComboBox()
+        self.plot_export_choice.addItems(self.dashboard.plots)
+        export_row.addWidget(self.plot_export_choice)
+        self.button("Сохранить график PNG", self.export_chart, export_row)
+        right_layout.addLayout(export_row)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        layout.addWidget(self.log)
-        self.tabs.addTab(tab, "Прогноз глубин горизонтов")
+        self.log.setMaximumBlockCount(2000)
+        self.log.setMaximumHeight(110)
+        self.log.setPlaceholderText("Журнал расчётов и лучшие параметры…")
+        right_layout.addWidget(self.log)
+        splitter = QSplitter()
+        splitter.addWidget(scroll)
+        splitter.addWidget(right)
+        splitter.setSizes([450, 1000])
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter)
+        self.model_choice.currentTextChanged.connect(self.update_device_controls)
+        self.device_choice.currentIndexChanged.connect(self.update_device_controls)
+        self.update_device_controls()
+        self.tabs.addTab(tab, "02  ·  Прогноз и оптимизация")
+
+    def update_device_controls(self):
+        name = self.model_choice.currentText()
+        supports_gpu = name in GPU_MODELS
+        self.device_choice.model().item(1).setEnabled(supports_gpu)
+        if not supports_gpu:
+            self.device_choice.setCurrentIndex(0)
+        gpu = self.device_choice.currentData() == "gpu"
+        self.gpu_id.setEnabled(gpu)
+        self.compute_badge.setText(f"{'GPU' if gpu else 'CPU'}  /  OPTUNA TPE")
+        if not supports_gpu:
+            text = "Метод выполняется на CPU. GPU доступен для бустингов и PyTorch-сетей."
+        elif name == "LightGBM":
+            text = "GPU: OpenCL-сборка LightGBM и подходящий драйвер. CPU доступен в обычной установке."
+        else:
+            text = "GPU: CUDA-совместимая сборка библиотеки и NVIDIA GPU; ID нумеруется с 0."
+        self.device_hint.setText(text)
 
     def selected_grid(self):
         row = self.layers.currentRow()
@@ -290,24 +441,55 @@ class MainWindow(QMainWindow):
                  hillshade=self.shade.isChecked(), overlays=self.overlays)
         self.canvas.draw_idle()
 
-    def run_job(self, function, callback):
+    def run_job(self, function, callback, with_context=False):
         if self.worker is not None:
             raise ValueError("Дождитесь текущего расчёта.")
-        self.worker = Worker(function, self)
+        worker = Worker(function, self)
+        if with_context:
+            worker.function = lambda: function(worker.progress.emit, worker.cancel_event)
+        self.worker = worker
+        self.job_outcome = "Расчёт завершён."
         self.worker.result.connect(lambda value: self.guard(lambda: callback(value)))
-        self.worker.failed.connect(lambda message: QMessageBox.warning(self, "Ошибка расчёта", message))
+        self.worker.failed.connect(self.job_failed)
+        self.worker.cancelled.connect(self.job_cancelled)
+        self.worker.progress.connect(self.trial_progress)
         self.worker.finished.connect(self.job_finished)
         for widget in (self.fit_button, self.predict_button, self.transform_button, self.train_load, self.pred_load):
             widget.setEnabled(False)
         self.statusBar().showMessage("Выполняется расчёт…")
+        self.stop_button.setEnabled(with_context)
         self.worker.start()
+
+    def trial_progress(self, record):
+        self.dashboard.update_trial(record)
+        self.progress_bar.setValue(record["trial"] + 1)
+        self.log.appendPlainText(f"Trial {record['trial'] + 1} · {record['state']} · CV RMSE={record['rmse']}\n"
+                                 + json.dumps(record["parameters"], ensure_ascii=False))
+
+    def job_failed(self, message):
+        self.job_outcome = "Ошибка расчёта; подробности в журнале."
+        self.log.appendPlainText(message)
+        self.dashboard.status.setText(self.job_outcome)
+        QMessageBox.warning(self, "Ошибка расчёта", message.splitlines()[-1])
+
+    def job_cancelled(self):
+        self.job_outcome = "Расчёт отменён. Историю завершённых trials можно экспортировать."
+        self.dashboard.status.setText(self.job_outcome)
+        self.log.appendPlainText(self.job_outcome)
+
+    def cancel_job(self):
+        if self.worker:
+            self.worker.cancel_event.set()
+            self.stop_button.setEnabled(False)
+            self.statusBar().showMessage("Остановка после текущего обучения / фолда…")
 
     def job_finished(self):
         self.worker.deleteLater()
         self.worker = None
         for widget in (self.fit_button, self.predict_button, self.transform_button, self.train_load, self.pred_load):
             widget.setEnabled(True)
-        self.statusBar().showMessage("Расчёт завершён.")
+        self.stop_button.setEnabled(False)
+        self.statusBar().showMessage(self.job_outcome)
 
     def apply_transform(self):
         grid, operation = self.selected_grid(), self.operation.currentData()
@@ -405,23 +587,32 @@ class MainWindow(QMainWindow):
                     if self.feature_list.item(i).checkState() == Qt.Checked]
         params, search = json.loads(self.parameters.text()), json.loads(self.search.text())
         if not isinstance(params, dict) or not isinstance(search, dict):
-            raise ValueError("Параметры и сетка подбора должны быть объектами JSON.")
+            raise ValueError("Параметры и диапазоны Optuna должны быть объектами JSON.")
         args = dict(target=self.target.currentText(), coordinates=[self.x_column.currentText(), self.y_column.currentText()],
                     features=features, test_size=self.test_fraction.value(), spatial=self.spatial.isChecked(),
-                    block_size=self.block.value(), seed=self.seed.value(), parameters=params, search=search)
+                    block_size=self.block.value(), seed=self.seed.value(), parameters=params,
+                    search=search if self.optimize_check.isChecked() else None,
+                    optimize=self.optimize_check.isChecked(), n_trials=self.trials.value(), cv_folds=self.folds.value(),
+                    timeout=self.timeout.value() or None, device=self.device_choice.currentData(), gpu_id=self.gpu_id.value())
         table, name = self.training.copy(), self.model_choice.currentText()
         if self.spatial.isChecked():
             validate_crs(self.table_crs.currentText().split("|")[0].strip(), "m")
         self.fitted_crs = self.table_crs.currentText().split("|")[0].strip()
         self.fitted_north_first = self.north_first.isChecked()
         self.result = self.output = None
-        self.run_job(lambda: train_horizon(table, name, **args), self.trained)
+        self.dashboard.reset()
+        self.progress_bar.setRange(0, self.trials.value() if self.optimize_check.isChecked() else 1)
+        self.progress_bar.setValue(0)
+        self.run_job(lambda progress, cancel: train_horizon(table, name, **args, progress=progress, cancel_event=cancel),
+                     self.trained, with_context=True)
 
     def trained(self, result):
         self.result = result
         self.log.setPlainText(json.dumps({"model": result.model_name, "metrics": result.metrics,
                                          "best_parameters": result.settings["best_parameters"]}, ensure_ascii=False, indent=2))
         self.log.appendPlainText("Контроль: отдельные точки/блоки. Итоговая модель переобучена на всех размеченных данных.")
+        self.dashboard.show_result(result, self.fitted_north_first)
+        self.progress_bar.setValue(self.progress_bar.maximum())
 
     def predict(self):
         if self.result is None or self.prediction is None:
@@ -446,6 +637,34 @@ class MainWindow(QMainWindow):
     def export_validation(self):
         self.save_csv(None if self.result is None else self.result.validation, "Контроль и невязки")
 
+    def export_trials(self):
+        import pandas as pd
+        history = self.result.optimization_history if self.result is not None else self.dashboard.history
+        if not history:
+            raise ValueError("Нет истории Optuna. Включите оптимизацию и выполните расчёт.")
+        rows = [{**r, "parameters": json.dumps(r["parameters"], ensure_ascii=False),
+                 "fold_rmse": json.dumps(r["fold_rmse"])} for r in history]
+        self.save_csv(pd.DataFrame(rows), "История Optuna")
+
+    def export_chart(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить график", "", "PNG (*.png)")
+        if path:
+            self.dashboard.export_plot(self.plot_export_choice.currentText(), path)
+
+    def validation_map(self):
+        if self.result is None:
+            raise ValueError("Сначала обучите модель.")
+        data = self.result.validation
+        grid = points_to_grid(data.iloc[:, 1 if self.fitted_north_first else 0],
+                              data.iloc[:, 0 if self.fitted_north_first else 1],
+                              data["residual_pred_minus_observed"], name="Контроль · прогноз − наблюдения", unit="m",
+                              crs=self.fitted_crs, coordinate_unit="m")
+        self.add_grid(grid)
+        self.palette.setCurrentText("RdBu_r")
+        self.norm.setCurrentIndex(2)
+        self.redraw()
+        self.tabs.setCurrentIndex(0)
+
     def prediction_map(self):
         if self.output is None:
             raise ValueError("Сначала рассчитайте прогноз.")
@@ -461,10 +680,12 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Отчёт обучения", "", "JSON (*.json)")
         if path:
             import sklearn
+            import optuna
             report = dict(model=self.result.model_name, features=self.result.features, target=self.result.target,
                           coordinates=self.result.coordinates, metrics=self.result.metrics, settings=self.result.settings,
                           crs=self.fitted_crs, northing_first=self.fitted_north_first,
-                          versions={"numpy": np.__version__, "sklearn": sklearn.__version__})
+                          optimization_history=self.result.optimization_history,
+                          versions={"numpy": np.__version__, "sklearn": sklearn.__version__, "optuna": optuna.__version__})
             Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def closeEvent(self, event):
