@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geogarmodel"
+version = "2.0.0"
+description = "PyQt5 workbench for horizon regression and potential-field interpretation"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26,<3", "scipy>=1.12,<2", "pandas>=2.2,<4", "scikit-learn>=1.5,<2", "matplotlib>=3.8,<4", "PyQt5>=5.15.10,<6", "openpyxl>=3.1,<4", "pyproj>=3.6,<4"]
+
+[project.optional-dependencies]
+boosting = ["xgboost>=2.1,<4", "lightgbm>=4.5,<5", "catboost>=1.2.7,<2"]
+neural = ["torch>=2.5,<3"]
+geo = ["geopandas>=1.0,<2"]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+geogarmodel = "geogarmodel.app:main"
+
+[tool.setuptools.packages.find]
+include = ["geogarmodel*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
