@@ -95,6 +95,7 @@ class MainWindow(QMainWindow):
         self.button("CRS и единицы карты…", self.metadata, panel)
         self.button("Добавить SHP / GeoJSON", self.open_vector, panel)
         self.button("Убрать векторные наложения", self.clear_overlays, panel)
+        self.button("Обрезать по текущему виду карты", self.crop_view, panel)
         form = QFormLayout()
         panel.addLayout(form)
         self.palette = QComboBox()
@@ -272,6 +273,13 @@ class MainWindow(QMainWindow):
         self.overlays.clear()
         self.redraw()
 
+    def crop_view(self):
+        grid = self.selected_grid()
+        if not self.figure.axes:
+            raise ValueError("Сначала отобразите карту.")
+        ax = self.figure.axes[0]
+        self.add_grid(grid.crop(*ax.get_xlim(), *ax.get_ylim()))
+
     def redraw(self):
         if self.layers.currentRow() < 0:
             return
@@ -382,7 +390,7 @@ class MainWindow(QMainWindow):
             import pandas as pd
             edited = pd.DataFrame([[widget.item(i, j).text() for j in range(widget.columnCount())]
                                    for i in range(widget.rowCount())], columns=self.training.columns)
-            self.training = edited.apply(pd.to_numeric, errors="raise")
+            self.training = edited.replace({"": np.nan, "nan": np.nan}).apply(pd.to_numeric, errors="raise")
             self.result = self.output = None
 
     def show_statistics(self):

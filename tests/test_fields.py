@@ -92,3 +92,11 @@ def test_xyz_convex_hull_and_duplicates():
     grid = points_to_grid([0, 1, 0, 0], [0, 0, 1, 0], [2, 2, 2, 4], nx=3, ny=3)
     assert grid.values[0, 0] == 3
     assert np.isnan(grid.values[-1, -1])
+
+
+def test_crop_preserves_coordinates(wave):
+    cropped = wave.crop(100, 400, 150, 600)
+    np.testing.assert_allclose(cropped.x, [100, 200, 300, 400])
+    np.testing.assert_allclose(cropped.y, [150, 300, 450, 600])
+    np.testing.assert_allclose(cropped.values, wave.values[1:5, 1:5])
+    assert cropped.crs == wave.crs

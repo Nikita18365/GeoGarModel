@@ -1,6 +1,7 @@
 """Qt-independent map renderer, shared with headless tests."""
 import numpy as np
 from matplotlib.colors import Normalize, TwoSlopeNorm, LightSource
+from matplotlib.ticker import MaxNLocator
 
 
 def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=None,
@@ -46,6 +47,8 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
     ax.set_xlabel(f"X ({grid.coordinate_unit})")
     ax.set_ylabel(f"Y ({grid.coordinate_unit})")
     ax.ticklabel_format(style="plain", useOffset=False)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     figure.colorbar(image, ax=ax, label=grid.unit)
     figure.tight_layout()
     return ax

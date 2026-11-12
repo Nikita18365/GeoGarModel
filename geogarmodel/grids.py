@@ -45,6 +45,13 @@ class Grid:
                     self.unit if unit is None else unit, self.crs, self.coordinate_unit,
                     self.history + [{"operation": name, "parameters": parameters or {}}])
 
+    def crop(self, xmin, xmax, ymin, ymax):
+        ix = (self.x >= min(xmin, xmax)) & (self.x <= max(xmin, xmax))
+        iy = (self.y >= min(ymin, ymax)) & (self.y <= max(ymin, ymax))
+        return Grid(self.x[ix], self.y[iy], self.values[np.ix_(iy, ix)].copy(),
+                    self.name + " · область", self.unit, self.crs, self.coordinate_unit,
+                    self.history + [{"operation": "crop", "bounds": [xmin, xmax, ymin, ymax]}])
+
 
 def save_grid(grid, path):
     """Lossless NPZ includes mask, CRS, units and processing provenance."""

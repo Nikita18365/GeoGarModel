@@ -44,7 +44,8 @@ def make_model(name, parameters=None, seed=42):
         estimator = XGBRegressor(n_estimators=400, max_depth=5, learning_rate=.05, random_state=seed, n_jobs=-1)
     elif name == "LightGBM":
         from lightgbm import LGBMRegressor
-        estimator = LGBMRegressor(n_estimators=400, verbosity=-1, random_state=seed)
+        estimator = LGBMRegressor(n_estimators=400, verbosity=-1, random_state=seed,
+                                  n_jobs=1, force_col_wise=True)
     elif name == "CatBoost":
         from catboost import CatBoostRegressor
         estimator = CatBoostRegressor(iterations=400, verbose=False, random_seed=seed, allow_writing_files=False)
@@ -65,6 +66,7 @@ def read_table(path):
         table = pd.read_excel(path)
     else:
         table = pd.read_csv(path, sep=None, engine="python")
+    table.columns = table.columns.map(str)
     if table.columns.duplicated().any() or not table.index.is_unique:
         raise ValueError("Имена столбцов и индексы должны быть уникальны.")
     return table
