@@ -95,9 +95,12 @@ class MainWindow(QMainWindow):
         grid, training, prediction = demo_survey()
         self.training, self.prediction = training, prediction
         self.result = self.output = None
+        self.dashboard.reset("Синтетический пример загружен. Выберите модель и запустите расчёт.")
+        self.progress_bar.setValue(0)
         self.configure_columns()
         self.block.setValue(3000)
         self.table_crs.setCurrentText("EPSG:20910 | GSK-2011 / Gauss-Kruger zone 10")
+        self.table_crs.lineEdit().setCursorPosition(0)
         self.north_first.setChecked(True)
         self.table_info.setText("DEMO: 320 обучающих точек, 1280 прогнозных; глубина в метрах")
         self.add_grid(grid)
@@ -270,16 +273,19 @@ class MainWindow(QMainWindow):
         opt_form.addRow(preset)
         panel.addWidget(optimization)
         actions = QHBoxLayout()
-        panel.addLayout(actions)
+        footer = QWidget()
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 4, 0, 0)
+        footer_layout.addLayout(actions)
         self.fit_button = self.button("Обучить и оценить", self.fit, actions)
         self.fit_button.setObjectName("primary")
         self.predict_button = self.button("Прогнозировать", self.predict, actions)
-        self.stop_button = self.button("Остановить расчёт", self.cancel_job, panel)
+        self.stop_button = self.button("Остановить расчёт", self.cancel_job, footer_layout)
         self.stop_button.setObjectName("stop")
         self.stop_button.setEnabled(False)
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        panel.addWidget(self.progress_bar)
+        footer_layout.addWidget(self.progress_bar)
         export = QGroupBox("04 · Экспорт и результаты")
         export_layout = QGridLayout(export)
         for n, (text, function) in enumerate([
@@ -303,6 +309,13 @@ class MainWindow(QMainWindow):
         scroll.setWidget(controls)
         scroll.setMinimumWidth(390)
         scroll.setMaximumWidth(560)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(scroll, 1)
+        left_layout.addWidget(footer)
+        left.setMinimumWidth(390)
+        left.setMaximumWidth(560)
         right = QWidget()
         right_layout = QVBoxLayout(right)
         self.dashboard = TrainingDashboard()
@@ -320,7 +333,7 @@ class MainWindow(QMainWindow):
         self.log.setPlaceholderText("Журнал расчётов и лучшие параметры…")
         right_layout.addWidget(self.log)
         splitter = QSplitter()
-        splitter.addWidget(scroll)
+        splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.setSizes([450, 1000])
         splitter.setStretchFactor(1, 1)
@@ -484,6 +497,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Остановка после текущего обучения / фолда…")
 
     def job_finished(self):
+        self.worker.function = None
         self.worker.deleteLater()
         self.worker = None
         for widget in (self.fit_button, self.predict_button, self.transform_button, self.train_load, self.pred_load):
@@ -515,6 +529,8 @@ class MainWindow(QMainWindow):
             if len(data.columns) < 4:
                 raise ValueError("Нужны X, Y, минимум один признак и глубина.")
             self.training, self.result, self.output = data, None, None
+            self.dashboard.reset()
+            self.progress_bar.setValue(0)
             self.configure_columns()
             self.table_info.setText(f"{Path(path).name}: {data.shape[0]} строк, {data.shape[1]} столбцов")
 
@@ -574,6 +590,8 @@ class MainWindow(QMainWindow):
                                    for i in range(widget.rowCount())], columns=self.training.columns)
             self.training = edited.replace({"": np.nan, "nan": np.nan}).apply(pd.to_numeric, errors="raise")
             self.result = self.output = None
+            self.dashboard.reset()
+            self.progress_bar.setValue(0)
 
     def show_statistics(self):
         if self.training is None:
@@ -600,7 +618,7 @@ class MainWindow(QMainWindow):
         self.fitted_crs = self.table_crs.currentText().split("|")[0].strip()
         self.fitted_north_first = self.north_first.isChecked()
         self.result = self.output = None
-        self.dashboard.reset()
+        self.dashboard.reset("Расчёт запущен. Контрольные точки не участвуют в подборе.")
         self.progress_bar.setRange(0, self.trials.value() if self.optimize_check.isChecked() else 1)
         self.progress_bar.setValue(0)
         self.run_job(lambda progress, cancel: train_horizon(table, name, **args, progress=progress, cancel_event=cancel),

@@ -12,8 +12,16 @@ ACCENT = "#38bdf8"
 GREEN = "#2dd4bf"
 
 
-def plot_widget(title, xlabel="", ylabel=""):
-    widget = pg.PlotWidget(background=BACKGROUND)
+class LocalCoordinateAxis(pg.AxisItem):
+    origin = 0.
+
+    def tickStrings(self, values, scale, spacing):
+        return [f"{(v - self.origin) / 1000:.3g}" for v in values]
+
+
+def plot_widget(title, xlabel="", ylabel="", local_coordinates=False):
+    axes = {axis: LocalCoordinateAxis(orientation=axis) for axis in ("bottom", "left")} if local_coordinates else None
+    widget = pg.PlotWidget(background=BACKGROUND, axisItems=axes)
     widget.setTitle(title, color=FOREGROUND, size="11pt")
     widget.setLabel("bottom", xlabel, color=FOREGROUND)
     widget.setLabel("left", ylabel, color=FOREGROUND)
@@ -89,7 +97,7 @@ class TrainingDashboard(QWidget):
         map_layout = QGridLayout(maps)
         self.map_plots = []
         for n, title in enumerate(("Наблюдения · контроль", "Прогноз · контроль", "Невязка: прогноз − наблюдения", "Абсолютная ошибка")):
-            widget = plot_widget(title, "Восток, м", "Север, м")
+            widget = plot_widget(title, "Восток, м", "Север, м", local_coordinates=True)
             widget.setAspectLocked(True)
             self.map_plots.append(widget)
             map_layout.addWidget(widget, n // 2, n % 2)
@@ -110,7 +118,7 @@ class TrainingDashboard(QWidget):
                       "Параметр / ошибка": self.parameter_plot}
         self.plots.update({f"Карта {i + 1}": p for i, p in enumerate(self.map_plots)})
 
-    def reset(self):
+    def reset(self, status="Данные готовы к обучению. Выберите настройки и запустите расчёт."):
         self.history.clear()
         self.trials_table.setRowCount(0)
         self.parameter_table.setRowCount(0)
@@ -123,7 +131,7 @@ class TrainingDashboard(QWidget):
         self.duration_curve.setData([], [])
         for name, widget in self.metric_labels.items():
             widget.setText(f"{name}\n—")
-        self.status.setText("Расчёт запущен. Контрольные точки не участвуют в подборе.")
+        self.status.setText(status)
 
     def update_trial(self, record):
         self.history.append(record)
@@ -166,7 +174,7 @@ class TrainingDashboard(QWidget):
         self.residual_plot.clear()
         self.residual_plot.plot(observed, residual, pen=None, symbol="o", symbolSize=5, symbolPen=None, symbolBrush="#a78bfa")
         self.residual_plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("#52647c")))
-        counts, bins = np.histogram(data["residual_pred_minus_observed"], bins="auto")
+        counts, bins = np.histogram(data["residual_pred_minus_observed"], bins=min(80, max(10, int(np.sqrt(len(data))))))
         self.histogram.clear()
         self.histogram.addItem(pg.BarGraphItem(x=(bins[:-1] + bins[1:]) / 2, height=counts,
                                               width=np.diff(bins) * .9, brush=ACCENT, pen=None))
@@ -184,6 +192,10 @@ class TrainingDashboard(QWidget):
                 (limits, limits, (-error_limit, error_limit), (0, error_limit)),
                 ("viridis", "viridis", "CET-D1", "viridis")):
             plot.clear()
+            for axis_name, values, label in (("bottom", east, "E"), ("left", north, "N")):
+                axis = plot.getAxis(axis_name)
+                axis.origin = float(np.floor(values.min() / 1000) * 1000)
+                axis.setLabel(f"{label} − {axis.origin:.0f} м · км")
             cmap = pg.colormap.get(palette)
             denominator = max(levels[1] - levels[0], 1e-12)
             colors = cmap.mapToQColor(np.clip((z - levels[0]) / denominator, 0, 1))
@@ -195,7 +207,7 @@ class TrainingDashboard(QWidget):
                                    colorMap=cmap, interactive=False, label="м")
             plot.plotItem.layout.addItem(bar, 2, 5)
             self.map_items.append((plot, scatter, bar))
-        self.status.setText(f"Контроль: {len(data)} точек · на графиках до 25 000 точек · "
+        self.status.setText(f"{result.model_name} · контроль: {len(data)} точек · на графиках до 25 000 точек · "
                             f"устройство: {result.settings.get('device', 'cpu').upper()}. Метрики и экспорт — по всем точкам.")
         self.draw_parameter()
         self.tabs.setCurrentIndex(1)

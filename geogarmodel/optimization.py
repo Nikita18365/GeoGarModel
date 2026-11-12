@@ -69,8 +69,11 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
     if not isinstance(n_trials, int) or n_trials < 1 or (timeout is not None and (not np.isfinite(timeout) or timeout <= 0)):
         raise ValueError("Число trials и лимит времени должны быть > 0.")
     # Validate the distribution schema before starting expensive trials.
-    suggest_parameters(optuna.trial.FixedTrial({key: (value[0] if isinstance(value, list) else value["low"])
-                                               for key, value in space.items()}), space)
+    try:
+        initial = {key: (value[0] if isinstance(value, list) else value["low"]) for key, value in space.items()}
+        suggest_parameters(optuna.trial.FixedTrial(initial), space)
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        raise ValueError("Некорректное пространство Optuna: используйте список или объект type/low/high.") from exc
     study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed),
                                 pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1))
     history = []

@@ -1,4 +1,5 @@
 from threading import Event
+import os
 import numpy as np
 import pytest
 from geogarmodel.demo import demo_survey
@@ -67,3 +68,15 @@ def test_xgboost_silent_fallback_is_rejected():
             return [("model", self)]
     with pytest.raises(RuntimeError, match="CPU"):
         verify_device(Fake(), "XGBoost", "gpu")
+
+
+@pytest.mark.skipif(os.environ.get("GEOGARMODEL_GPU_TESTS") != "1", reason="Explicit GPU smoke test")
+def test_real_xgboost_gpu_optuna():
+    import json
+    pytest.importorskip("xgboost")
+    _, table, prediction = demo_survey()
+    result = train_horizon(table, "XGBoost", block_size=3000, device="gpu", optimize=True,
+                           n_trials=2, cv_folds=2, parameters={"n_estimators": 10}, search={"max_depth": [2, 3]})
+    estimator = result.model.regressor_.steps[-1][1]
+    assert json.loads(estimator.get_booster().save_config())["learner"]["generic_param"]["device"].startswith("cuda")
+    assert np.isfinite(result.predict(prediction).to_numpy()).all()
