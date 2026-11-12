@@ -1,4 +1,4 @@
-"""Optional CPU PyTorch tabular regressors: residual MLP and feature-token Transformer."""
+"""Optional CPU/CUDA tabular regressors: residual MLP and feature-token Transformer."""
 import numpy as np
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_array, check_X_y, check_is_fitted
@@ -34,7 +34,7 @@ class FeatureTransformer(nn.Module):
 class TorchRegressor(RegressorMixin, BaseEstimator):
     def __init__(self, architecture="transformer", width=32, layers=2, heads=4,
                  dropout=.1, epochs=100, batch_size=128, learning_rate=.001,
-                 weight_decay=.0001, random_state=42):
+                 weight_decay=.0001, random_state=42, device="cpu"):
         self.architecture = architecture
         self.width = width
         self.layers = layers
@@ -45,6 +45,7 @@ class TorchRegressor(RegressorMixin, BaseEstimator):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.random_state = random_state
+        self.device = device
 
     def fit(self, X, y):
         X, y = check_X_y(X, y, dtype=np.float32)
@@ -53,6 +54,13 @@ class TorchRegressor(RegressorMixin, BaseEstimator):
         if self.heads < 1 or self.width % self.heads:
             raise ValueError("width должен делиться на heads.")
         torch.manual_seed(self.random_state)
+        if self.device != "cpu" and not self.device.startswith("cuda:"):
+            raise ValueError("PyTorch device: cpu или cuda:N.")
+        if self.device.startswith("cuda"):
+            if not torch.cuda.is_available() or int(self.device.split(":")[1]) >= torch.cuda.device_count():
+                raise ValueError("Выбранный CUDA GPU недоступен. Проверьте драйвер и CUDA-сборку PyTorch.")
+            torch.cuda.manual_seed_all(self.random_state)
+        self.device_ = torch.device(self.device)
         self.n_features_in_ = X.shape[1]
         if self.architecture == "transformer":
             self.network_ = FeatureTransformer(X.shape[1], self.width, self.layers, self.heads, self.dropout)
@@ -62,6 +70,7 @@ class TorchRegressor(RegressorMixin, BaseEstimator):
                                           nn.LayerNorm(self.width), nn.Linear(self.width, 1), nn.Flatten(0))
         else:
             raise ValueError("Неизвестная нейросетевая архитектура.")
+        self.network_.to(self.device_)
         generator = torch.Generator().manual_seed(self.random_state)
         loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(torch.from_numpy(X.copy()),
                                              torch.from_numpy(y.copy())), batch_size=self.batch_size,
@@ -72,6 +81,7 @@ class TorchRegressor(RegressorMixin, BaseEstimator):
         for _ in range(self.epochs):
             total = 0.
             for xb, yb in loader:
+                xb, yb = xb.to(self.device_), yb.to(self.device_)
                 optimizer.zero_grad()
                 loss = nn.functional.mse_loss(self.network_(xb), yb)
                 if not torch.isfinite(loss):
@@ -90,5 +100,5 @@ class TorchRegressor(RegressorMixin, BaseEstimator):
         if X.shape[1] != self.n_features_in_:
             raise ValueError("Число признаков отличается от обучения.")
         with torch.inference_mode():
-            return np.concatenate([self.network_(torch.from_numpy(X[i:i + self.batch_size].copy())).numpy()
+            return np.concatenate([self.network_(torch.from_numpy(X[i:i + self.batch_size].copy()).to(self.device_)).cpu().numpy()
                                    for i in range(0, len(X), self.batch_size)])
