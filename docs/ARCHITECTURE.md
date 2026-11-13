@@ -23,7 +23,7 @@ geogarmodel/
   coordinates.py    CRS и зоны ГСК-2011
   plotting.py       отображение регулярных карт и векторных наложений
   demo.py           воспроизводимый синтетический пример
-  inversion.py      призмы, CPU/CUDA, точная ΔT, ограниченная 3D-инверсия, NPZ
+  inversion.py      призмы, CPU/CUDA, прямые задачи и решение обратных задач, NPZ
   inversion_ui.py   третья вкладка, импорт, отдельный Worker, графики и экспорт
   inversion_view.py ленивый VTK/PyVistaQt: объём, срезы, изоповерхности
 tests/              вычисления, Optuna, Qt, графики, optional-модели

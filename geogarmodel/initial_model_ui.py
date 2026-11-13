@@ -13,7 +13,7 @@ class InitialModelPanel(QGroupBox):
         self.source=QComboBox(); self.source.addItems(['Константа на новой сетке','Загруженная / отредактированная модель'])
         layout.addWidget(self.source)
         self.info=QLabel('Без файла: новая сетка заполняется полем «Начальное значение».'); self.info.setWordWrap(True); layout.addWidget(self.info)
-        for label,callback in [('Загрузить воксель / UBC / VTK / центры…',self.load),('Загрузить отдельно JE, JN, JD…',self.components),('Использовать результат последней инверсии',self.previous),('Предпросмотр модели и поля',self.preview),('Показать начальную модель в 3D',self.preview3d),('Редактор вокселя…',self.open_editor)]:
+        for label,callback in [('Загрузить воксель / UBC / VTK / центры…',self.load),('Загрузить отдельно JE, JN, JD…',self.components),('Использовать результат последнего моделирования',self.previous),('Предпросмотр модели и поля',self.preview),('Показать начальную модель в 3D',self.preview3d),('Редактор вокселя…',self.open_editor)]:
             tab.button(label,callback,layout)
 
     def open_editor(self):

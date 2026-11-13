@@ -120,7 +120,7 @@ class FieldOperator:
                  field_strength=50000., inclination=60., declination=0., cache_mb=128,
                  cancel_event=None):
         if mode not in ('gravity', 'induced', 'vector'):
-            raise ValueError('Неизвестный тип инверсии.')
+            raise ValueError('Неизвестный режим 3D-моделирования.')
         self.mesh, self.mode, self.cancel_event = mesh, mode, cancel_event
         self.observations = np.asarray(observations, dtype=float)
         if self.observations.ndim != 2 or self.observations.shape[1] != 3 or not len(self.observations) or not np.isfinite(self.observations).all():

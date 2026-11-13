@@ -1,4 +1,4 @@
-"""Third workbench tab: independent gravity / induced / vector magnetic inversion."""
+"""Third workbench tab: density, susceptibility and magnetization modelling."""
 from pathlib import Path
 import json
 import numpy as np
@@ -39,7 +39,7 @@ class InversionTab(QWidget):
         left=QWidget(); panel=QVBoxLayout(left)
         self.parameter_panel=left
         self.mode=QComboBox()
-        for label,key in [('Гравитация · Δρ, g/cm³','gravity'),('Магнитная · индуцированная χ, SI','induced'),('Магнитная · векторная J, A/m','vector')]: self.mode.addItem(label,key)
+        for label,key in [('Плотностное моделирование · Δρ, g/cm³','gravity'),('Моделирование магнитной восприимчивости · χ, SI','induced'),('Моделирование векторной намагниченности · J, A/m','vector')]: self.mode.addItem(label,key)
         panel.addWidget(self.mode)
         self.hint=QLabel(); self.hint.setWordWrap(True); panel.addWidget(self.hint)
         self.load_button=self.button('Наблюдения XLSX / CSV…',self.load_table,panel)
@@ -48,7 +48,7 @@ class InversionTab(QWidget):
         self.button('Показать наблюдённое поле',self.preview_field,panel)
         self.demo_button=self.button('Синтетический пример для режима',self.demo,panel)
         self.model_load=self.button('Открыть сохранённый результат NPZ…',self.load_result,panel)
-        self.data_info=QLabel('Загрузите аномалию Δg (mGal) или ΔT (nT), не полное поле.'); self.data_info.setWordWrap(True); panel.addWidget(self.data_info)
+        self.data_info=QLabel('Загрузите аномалии силы тяжести в редукции Буге (mGal) или аномальное магнитное поле (nT).'); self.data_info.setWordWrap(True); panel.addWidget(self.data_info)
         data=QGroupBox('01 · Координаты и наблюдения'); form=QFormLayout(data)
         self.east,self.north,self.height,self.value,self.error=[QComboBox() for _ in range(5)]
         self.crs=QComboBox(); self.crs.setEditable(True)
@@ -103,12 +103,12 @@ class InversionTab(QWidget):
             combo.setMinimumContentsLength(10); combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(left)
         controls=QWidget(); cl=QVBoxLayout(controls); cl.addWidget(scroll)
-        self.run_button=self.button('Запустить 3D-инверсию',self.run,cl); self.run_button.setObjectName('primary')
+        self.run_button=self.button('Запустить 3D-моделирование',self.run,cl); self.run_button.setObjectName('primary')
         self.stop=self.button('Остановить',self.cancel,cl); self.stop.setEnabled(False)
         self.progress=QProgressBar(); cl.addWidget(self.progress)
         controls.setMinimumWidth(400); controls.setMaximumWidth(540); splitter.addWidget(controls)
         right=QWidget(); rl=QVBoxLayout(right)
-        self.status=QLabel('Прямоугольные призмы · точная ΔT · ограниченная градиентная инверсия'); self.status.setWordWrap(True); rl.addWidget(self.status)
+        self.status=QLabel('Прямоугольные призмы · прямая задача · решение обратной задачи с ограничениями'); self.status.setWordWrap(True); rl.addWidget(self.status)
         self.tabs=QTabWidget(); rl.addWidget(self.tabs,1)
         self.scene=ModelView(); self.tabs.addTab(self.scene,'3D-модель')
         self.figure=Figure(); self.canvas=FigureCanvasQTAgg(self.figure)
@@ -136,9 +136,9 @@ class InversionTab(QWidget):
 
     def mode_changed(self):
         mode=self.mode.currentData()
-        self.hint.setText({'gravity':'Контраст плотности Δρ в g/cm³; Δg положительно вниз. Поправки Буге/рельефа и региональное поле готовятся до импорта.',
-            'induced':'Восприимчивость χ в СИ (без множителя 10⁻⁵); J=χH вдоль заданного главного поля.',
-            'vector':'Суммарная J=(JE, JN, JD), A/m: допускает остаточную намагниченность. Разделить её на индуцированную и остаточную по одной ΔT нельзя. Границы задаются для каждой компоненты.'}[mode])
+        self.hint.setText({'gravity':'Плотностное моделирование: контраст плотности Δρ в g/cm³ по аномалиям силы тяжести. Поправки, редукция Буге и региональный фон готовятся до импорта.',
+            'induced':'Моделирование магнитной восприимчивости χ в СИ (без множителя 10⁻⁵); индуцированная J=χH направлена вдоль главного поля.',
+            'vector':'Моделирование суммарной векторной намагниченности J=(JE, JN, JD), A/m с возможным остаточным вкладом. Разделить индуцированную и остаточную части по одной карте аномального магнитного поля нельзя.'}[mode])
         self.lower.setValue(0 if mode=='induced' else -1)
         self.upper.setValue(.1 if mode=='induced' else 1)
         for w in (self.field,self.inc,self.dec): w.setEnabled(mode!='gravity')
@@ -327,11 +327,11 @@ class InversionTab(QWidget):
             ax.set_title(title); self.figure.colorbar(im,ax=ax,label=field_unit)
         style_figure(self.figure); self.figure.tight_layout(); self.canvas.draw_idle(); self.tabs.setCurrentIndex(1)
     def require_result(self):
-        if self.result is None: raise ValueError('Сначала завершите инверсию.')
+        if self.result is None: raise ValueError('Сначала завершите 3D-моделирование.')
         return self.result
     def open_3d(self): self.scene.render(self.require_result()); self.tabs.setCurrentIndex(0)
     def load_result(self):
-        path,_=QFileDialog.getOpenFileName(self,'Сохранённая 3D-инверсия','','NPZ (*.npz)')
+        path,_=QFileDialog.getOpenFileName(self,'Сохранённый результат 3D-моделирования','','NPZ (*.npz)')
         if path:
             result=InversionResult.load(path)
             self.history=list(result.history)

@@ -18,5 +18,5 @@ def demo_survey(seed=42):
                           "Magnetic": magnetic.ravel(), "Seismic": seismic.ravel()})
     training = table.iloc[rng.choice(len(table), 320, replace=False)].copy()
     training["Depth"] = depth.ravel()[training.index] + rng.normal(0, 5, len(training))
-    return (Grid(east, north, gravity, "DEMO · гравитационное поле", "mGal", "EPSG:20910", "m"),
+    return (Grid(east, north, gravity, "DEMO · аномалии силы тяжести", "mGal", "EPSG:20910", "m"),
             training.reset_index(drop=True), table)

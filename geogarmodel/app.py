@@ -88,7 +88,7 @@ class MainWindow(QMainWindow):
         self.make_training()
         from .inversion_ui import InversionTab
         self.inversion = InversionTab(self)
-        self.tabs.addTab(self.inversion, "03 · 3D-инверсия")
+        self.tabs.addTab(self.inversion, "03 · 3D-моделирование")
         menu = self.menuBar().addMenu("Данные")
         action = menu.addAction("Открыть синтетический пример")
         action.triggered.connect(lambda: self.guard(self.load_demo))
@@ -477,7 +477,7 @@ class MainWindow(QMainWindow):
 
     def run_job(self, function, callback, with_context=False):
         if self.inversion.worker is not None:
-            raise ValueError("Дождитесь окончания 3D-инверсии.")
+            raise ValueError("Дождитесь окончания 3D-моделирования.")
         if self.worker is not None:
             raise ValueError("Дождитесь текущего расчёта.")
         worker = Worker(function, self)

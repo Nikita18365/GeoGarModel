@@ -55,6 +55,10 @@ def test_vtk_coordinates_and_vector_order(tmp_path):
 
 def test_workflow_and_separate_editor(monkeypatch):
     window=MainWindow(); tab=window.inversion; tab.demo()
+    assert [tab.mode.itemText(i) for i in range(3)]==[
+        'Плотностное моделирование · Δρ, g/cm³',
+        'Моделирование магнитной восприимчивости · χ, SI',
+        'Моделирование векторной намагниченности · J, A/m']
     assert tab.workflow.count()==3
     for i in range(2):
         tab.workflow.setCurrentIndex(i)
