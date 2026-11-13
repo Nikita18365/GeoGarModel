@@ -18,6 +18,7 @@ from .coordinates import gsk2011_zones,validate_crs
 from .compute import ComputationCancelled
 from .initial_model_ui import InitialModelPanel
 from .theme import style_figure
+from .inversion_workflow_ui import arrange_workflow
 
 
 class InversionWorker(QThread):
@@ -44,6 +45,7 @@ class InversionTab(QWidget):
         self.load_button=self.button('Наблюдения XLSX / CSV…',self.load_table,panel)
         self.button('Наблюдённое поле ZMAP…',self.load_field,panel)
         self.grid_button=self.button('Взять выбранную карту',self.load_grid,panel)
+        self.button('Показать наблюдённое поле',self.preview_field,panel)
         self.demo_button=self.button('Синтетический пример для режима',self.demo,panel)
         self.model_load=self.button('Открыть сохранённый результат NPZ…',self.load_result,panel)
         self.data_info=QLabel('Загрузите аномалию Δg (mGal) или ΔT (nT), не полное поле.'); self.data_info.setWordWrap(True); panel.addWidget(self.data_info)
@@ -96,7 +98,7 @@ class InversionTab(QWidget):
         for f in forms:
             f.setRowWrapPolicy(QFormLayout.WrapLongRows)
             f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        panel.addStretch()
+        self.workflow=arrange_workflow(panel,self.initial_panel,mesh_group,settings,self.magnetic_group,solver,compute)
         for combo in left.findChildren(QComboBox):
             combo.setMinimumContentsLength(10); combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(left)

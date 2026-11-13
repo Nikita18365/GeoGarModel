@@ -2,7 +2,7 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 import pytest
 import numpy as np
-from PyQt5.QtWidgets import QApplication,QMessageBox
+from PyQt5.QtWidgets import QApplication,QMessageBox,QPushButton,QDialog,QInputDialog
 from PyQt5.QtCore import QEventLoop,QTimer
 from geogarmodel.app import MainWindow
 
@@ -51,3 +51,27 @@ def test_vtk_coordinates_and_vector_order(tmp_path):
         np.testing.assert_allclose(grid['M_END'][index],vector)
         assert grid['property'][index]==np.linalg.norm(vector)
     grid.save(tmp_path/'model.vtr')
+
+
+def test_workflow_and_separate_editor(monkeypatch):
+    window=MainWindow(); tab=window.inversion; tab.demo()
+    assert tab.workflow.count()==3
+    for i in range(2):
+        tab.workflow.setCurrentIndex(i)
+        button=next(b for b in tab.workflow.widget(i).findChildren(QPushButton) if b.text().startswith('Далее'))
+        button.click(); assert tab.workflow.currentIndex()==i+1
+    assert not any(b.text()=='Операции со свойствами…' for b in tab.initial_panel.findChildren(QPushButton))
+    monkeypatch.setattr(QInputDialog,'getItem',lambda *args,**kwargs:('Заполнить константой (a)',True))
+    monkeypatch.setattr(QInputDialog,'getText',lambda *args,**kwargs:('0.25, 1, 42',True))
+    observed=[]
+    def edit_and_close():
+        dialog=QApplication.activeModalWidget()
+        try:
+            assert isinstance(dialog,QDialog)
+            button=next(b for b in dialog.findChildren(QPushButton) if b.text()=='Операции со свойствами…')
+            button.click(); observed.append(tab.initial_panel.current().values.copy())
+        finally: dialog.accept()
+    QTimer.singleShot(0,edit_and_close); tab.initial_panel.open_editor()
+    assert len(observed)==1
+    np.testing.assert_allclose(observed[0],.25)
+    window.close(); QApplication.processEvents()

@@ -1,7 +1,7 @@
 """Initial-model controls kept separate from observation and solver settings."""
 from pathlib import Path
 import numpy as np
-from PyQt5.QtWidgets import (QGroupBox,QVBoxLayout,QComboBox,QLabel,QFileDialog,QInputDialog)
+from PyQt5.QtWidgets import (QGroupBox,QVBoxLayout,QComboBox,QLabel,QFileDialog,QInputDialog,QDialog,QDialogButtonBox)
 from .voxel import VoxelModel,load_voxel,combine_components,edit,resample,clip_surface
 from .grids import load_grid
 
@@ -13,8 +13,21 @@ class InitialModelPanel(QGroupBox):
         self.source=QComboBox(); self.source.addItems(['Константа на новой сетке','Загруженная / отредактированная модель'])
         layout.addWidget(self.source)
         self.info=QLabel('Без файла: новая сетка заполняется полем «Начальное значение».'); self.info.setWordWrap(True); layout.addWidget(self.info)
-        for label,callback in [('Загрузить воксель / UBC / VTK / центры…',self.load),('Загрузить отдельно JE, JN, JD…',self.components),('Использовать результат последней инверсии',self.previous),('Предпросмотр модели и поля',self.preview),('Показать начальную модель в 3D',self.preview3d),('Операции со свойствами…',self.operation),('Обрезать по поверхности…',self.clip),('Обрезать по прямоугольной области…',self.crop),('Перенести на сетку Nx / Ny / Nz…',self.transfer),('Отменить последнюю операцию',self.undo),('Сохранить начальную модель NPZ…',self.save)]:
+        for label,callback in [('Загрузить воксель / UBC / VTK / центры…',self.load),('Загрузить отдельно JE, JN, JD…',self.components),('Использовать результат последней инверсии',self.previous),('Предпросмотр модели и поля',self.preview),('Показать начальную модель в 3D',self.preview3d),('Редактор вокселя…',self.open_editor)]:
             tab.button(label,callback,layout)
+
+    def open_editor(self):
+        self.current()
+        dialog=QDialog(self); dialog.setWindowTitle('Редактор начального вокселя'); dialog.resize(570,600)
+        layout=QVBoxLayout(dialog)
+        note=QLabel('Необязательная подготовка модели. Изменения применяются сразу. Для просмотра результата закройте редактор кнопкой «Готово».')
+        note.setWordWrap(True); layout.addWidget(note)
+        for title,actions in [('Свойства',[('Операции со свойствами…',self.operation)]),('Геометрия',[('Обрезать по поверхности…',self.clip),('Обрезать по прямоугольной области…',self.crop),('Перенести на сетку Nx / Ny / Nz…',self.transfer)]),('История и файл',[('Отменить последнюю операцию',self.undo),('Сохранить начальную модель NPZ…',self.save)])]:
+            group=QGroupBox(title); rows=QVBoxLayout(group)
+            for label,callback in actions: self.tab.button(label,callback,rows)
+            layout.addWidget(group)
+        buttons=QDialogButtonBox(); buttons.addButton('Готово',QDialogButtonBox.AcceptRole); buttons.accepted.connect(dialog.accept); layout.addWidget(buttons)
+        dialog.exec_()
 
     def current(self):
         if self.source.currentIndex()==1:

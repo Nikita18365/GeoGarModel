@@ -11,6 +11,8 @@ QTabWidget::pane { border: 1px solid #24364e; border-radius: 8px; }
 QTabBar::tab { background: #101c2f; color: #93a9c4; padding: 11px 18px; border-bottom: 2px solid transparent; }
 QTabBar::tab:selected { color: #38bdf8; border-bottom: 2px solid #38bdf8; background: #15263c; }
 QTabBar::tab:hover { background: #1b3049; }
+QToolBox::tab { background: #14263b; color: #a7c5e7; border: 1px solid #24364e; border-radius: 5px; padding: 9px; text-align: left; }
+QToolBox::tab:selected { background: #1b394c; color: #38bdf8; font-weight: 600; }
 QPushButton, QToolButton { background: #182b43; border: 1px solid #2a4360; border-radius: 6px; padding: 7px 11px; }
 QPushButton:hover, QToolButton:hover { background: #23405d; border-color: #38bdf8; }
 QPushButton:disabled { color: #586d86; background: #101c2f; }
