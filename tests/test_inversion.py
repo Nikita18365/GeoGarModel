@@ -69,7 +69,7 @@ def test_regularizer_gradient_and_validation():
     numeric=(regularization(m+1e-6*v,mesh(),.1,2.)[0]-regularization(m-1e-6*v,mesh(),.1,2.)[0])/2e-6
     np.testing.assert_allclose(numeric,np.sum(g*v),rtol=1e-7)
     with pytest.raises(ValueError,match='выше'):
-        FieldOperator(mesh(),[[0,0,100]])
+        FieldOperator(mesh(),[[0,0,101]])
     np.testing.assert_allclose(direction(90,0),[0,0,1],atol=1e-15)
 
 

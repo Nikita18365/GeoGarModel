@@ -70,7 +70,11 @@ def load_grid(path):
 
 def read_zmap(path):
     """ZMAP+ ASCII, fixed-width values, columns north→south; D exponents supported."""
-    lines = [s.rstrip("\n") for s in Path(path).read_text(encoding="utf-8-sig").splitlines()
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        text = Path(path).read_text(encoding="cp1251")
+    lines = [s.rstrip("\n") for s in text.splitlines()
              if s.strip() and not s.lstrip().startswith("!")]
     start = next((i for i, s in enumerate(lines) if s.lstrip().startswith("@")), None)
     if start is None or start + 4 >= len(lines):

@@ -15,15 +15,25 @@ class Mesh:
     east: np.ndarray
     north: np.ndarray
     depth: np.ndarray
+    active: np.ndarray | None = None
+    bounds: np.ndarray | None = None
 
     def __post_init__(self):
         for key in ('east', 'north', 'depth'):
             a = np.asarray(getattr(self, key), dtype=float)
             if a.ndim != 1 or len(a) < 2 or not np.isfinite(a).all() or not (np.diff(a) > 0).all():
                 raise ValueError('Границы ячеек должны быть конечными и возрастающими.')
-            if not np.allclose(np.diff(a), np.diff(a)[0]):
-                raise ValueError('Требуется равномерная сетка по каждой оси.')
             setattr(self, key, a)
+        self.active = np.ones(self.size, dtype=bool) if self.active is None else np.asarray(self.active, dtype=bool).reshape(self.size).copy()
+        if self.bounds is not None:
+            self.bounds = np.asarray(self.bounds, dtype=float).reshape(self.size,6).copy()
+            if not np.isfinite(self.bounds).all() or np.any(self.bounds[self.active,3:] <= self.bounds[self.active,:3]):
+                raise ValueError('Некорректные границы активных призм.')
+            bounds=self.bounds; self.bounds=None
+            base=self.cells()
+            if np.any(bounds[self.active,:3]<base[self.active,:3]) or np.any(bounds[self.active,3:]>base[self.active,3:]):
+                raise ValueError('Обрезанные призмы должны лежать внутри исходных ячеек.')
+            self.bounds=None if np.array_equal(bounds,base) else bounds
 
     @property
     def shape(self):
@@ -34,6 +44,8 @@ class Mesh:
         return int(np.prod(self.shape))
 
     def cells(self):
+        if self.bounds is not None:
+            return self.bounds.copy()
         indices = np.indices(self.shape).reshape(3, -1)
         return np.column_stack([a[i] for a, i in zip((self.east, self.north, self.depth), indices)] +
                                [a[i+1] for a, i in zip((self.east, self.north, self.depth), indices)])
@@ -113,15 +125,17 @@ class FieldOperator:
         self.observations = np.asarray(observations, dtype=float)
         if self.observations.ndim != 2 or self.observations.shape[1] != 3 or not len(self.observations) or not np.isfinite(self.observations).all():
             raise ValueError('Наблюдения: конечный массив N×3 East, North, Down.')
-        if np.max(self.observations[:,2]) >= mesh.depth[0]:
-            raise ValueError('Все точки наблюдения должны находиться строго выше верхней грани сетки.')
+        if not mesh.active.any():
+            raise ValueError('В модели нет активных ячеек.')
+        self.cells = mesh.cells()
+        if np.max(self.observations[:,2]) > np.min(self.cells[mesh.active,2]):
+            raise ValueError('Все точки наблюдения должны находиться выше или на уровне самой высокой активной грани модели.')
         if not np.isfinite(field_strength) or field_strength <= 0 or not np.isfinite(cache_mb) or cache_mb < 0:
             raise ValueError('Модуль главного поля должен быть >0; кэш — ≥0.')
         self.xp = backend(device, gpu_id)
         self.field_strength = float(field_strength)
         self.f = self.xp.asarray(direction(inclination, declination))
         self.h = field_strength / (400*np.pi)  # nT to A/m, μ0=4π·10^-7
-        self.cells = mesh.cells()
         self.cache = {}
         self.cache_limit = cache_mb * 1024**2
         self.cache_bytes = 0
@@ -134,7 +148,9 @@ class FieldOperator:
         for o in range(0, len(self.observations), 64):
             for c in range(0, self.mesh.size, 512):
                 check_cancel(self.cancel_event)
-                os, cs = slice(o,o+64), slice(c,c+512)
+                os, cs = slice(o,o+64), np.flatnonzero(self.mesh.active[c:c+512])+c
+                if not len(cs):
+                    continue
                 key = o,c
                 a = self.cache.get(key)
                 if a is None:
@@ -194,19 +210,27 @@ class FieldOperator:
 
 def regularization(model, mesh, damping, smoothness, xp=np):
     """Mean square smallness and first differences scaled by cell aspect ratio."""
-    grad = damping*model/model.size
-    value = .5*damping*xp.mean(model*model)
+    active = xp.asarray(mesh.active).reshape((mesh.size,)+(() if model.ndim==1 else (1,)))
+    count = int(mesh.active.sum())*(1 if model.ndim==1 else 3)
+    grad = damping*model*active/max(count,1)
+    value = .5*damping*xp.sum(model*model*active)/max(count,1)
     shape = mesh.shape+(() if model.ndim == 1 else (3,))
     cube, g = model.reshape(shape), grad.reshape(shape)
-    widths = [a[1]-a[0] for a in (mesh.east, mesh.north, mesh.depth)]
+    axes = (mesh.east, mesh.north, mesh.depth)
+    widths = [np.min(np.diff(a)) for a in axes]
+    mask = xp.asarray(mesh.active.reshape(mesh.shape))
     for axis in range(3):
         if shape[axis] < 2:
             continue
         d = xp.diff(cube, axis=axis)
-        coefficient = smoothness*(min(widths)/widths[axis])**2/d.size
-        value += .5*coefficient*xp.sum(d*d)
         lo,hi = [slice(None)]*len(shape),[slice(None)]*len(shape)
         lo[axis],hi[axis] = slice(None,-1),slice(1,None)
+        valid = mask[tuple(lo[:3])]&mask[tuple(hi[:3])]
+        distances = np.diff((axes[axis][1:]+axes[axis][:-1])/2)
+        dims = [1]*len(shape); dims[axis] = len(distances)
+        valid = valid if model.ndim==1 else valid[...,None]
+        coefficient = smoothness*(min(widths)/xp.asarray(distances).reshape(dims))**2*valid/max(int(xp.sum(valid))*(1 if model.ndim==1 else 3),1)
+        value += .5*xp.sum(coefficient*d*d)
         g[tuple(lo)] -= coefficient*d
         g[tuple(hi)] += coefficient*d
     return value, grad
@@ -225,6 +249,7 @@ class InversionResult:
 
     def save(self, path):
         np.savez_compressed(path, east=self.mesh.east, north=self.mesh.north, depth=self.mesh.depth,
+                            active=self.mesh.active, bounds=np.empty(0) if self.mesh.bounds is None else self.mesh.bounds,
                             model=self.model, observations=self.observations, observed=self.observed,
                             predicted=self.predicted, metadata=json.dumps(dict(settings=self.settings,
                             status=self.status, history=self.history),ensure_ascii=False))
@@ -233,7 +258,7 @@ class InversionResult:
     def load(cls, path):
         with np.load(path,allow_pickle=False) as saved:
             meta=json.loads(str(saved['metadata']))
-            mesh=Mesh(saved['east'],saved['north'],saved['depth'])
+            mesh=Mesh(saved['east'],saved['north'],saved['depth'],saved['active'] if 'active' in saved else None,saved['bounds'] if 'bounds' in saved and saved['bounds'].size else None)
             model=saved['model'].copy()
             expected=(mesh.size,3) if meta['settings']['mode']=='vector' else (mesh.size,)
             if model.shape!=expected or not np.isfinite(model).all():
@@ -260,8 +285,12 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
     if not bool(xp.isfinite(m).all()):
         raise ValueError('Начальная модель содержит пропуски.')
     m = xp.clip(m,lower,upper)
+    active = xp.asarray(mesh.active)
+    m[~active] = 0
     z = mesh.centers()[:,2]-np.max(operator.observations[:,2])
-    weights = xp.asarray((z/z.min())**depth_index)
+    zmin=z[mesh.active].min()
+    weights = xp.asarray((np.maximum(z,zmin)/zmin)**depth_index)
+    weights[~active]=0
     weights /= weights.max()
     if m.ndim==2:
         weights = weights[:,None]
@@ -293,6 +322,7 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
         for _ in range(40):
             check_cancel(cancel_event)
             candidate=xp.clip(m+step*direction_,lower,upper)
+            candidate[~active] = 0
             delta=candidate-m
             if float(xp.max(xp.abs(delta))) < 1e-12*max(1.,upper-lower):
                 status='stationary'; break
