@@ -49,7 +49,7 @@ class Worker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GeoGarModel 2.1 · интерпретация и моделирование")
+        self.setWindowTitle("GeoGarModel 2.2 · интерпретация и моделирование")
         self.resize(1480, 940)
         self.setStyleSheet(STYLE)
         self.grids, self.overlays = [], []
@@ -86,6 +86,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self.make_maps()
         self.make_training()
+        from .inversion_ui import InversionTab
+        self.inversion = InversionTab(self)
+        self.tabs.addTab(self.inversion, "03 · 3D-инверсия")
         menu = self.menuBar().addMenu("Данные")
         action = menu.addAction("Открыть синтетический пример")
         action.triggered.connect(lambda: self.guard(self.load_demo))
@@ -473,6 +476,8 @@ class MainWindow(QMainWindow):
         self.canvas.draw_idle()
 
     def run_job(self, function, callback, with_context=False):
+        if self.inversion.worker is not None:
+            raise ValueError("Дождитесь окончания 3D-инверсии.")
         if self.worker is not None:
             raise ValueError("Дождитесь текущего расчёта.")
         worker = Worker(function, self)
@@ -795,10 +800,11 @@ class MainWindow(QMainWindow):
             Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def closeEvent(self, event):
-        if self.worker is not None:
+        if self.worker is not None or self.inversion.worker is not None:
             QMessageBox.information(self, "Расчёт выполняется", "Дождитесь окончания расчёта перед закрытием.")
             event.ignore()
         else:
+            self.inversion.scene.shutdown()
             event.accept()
 
 
