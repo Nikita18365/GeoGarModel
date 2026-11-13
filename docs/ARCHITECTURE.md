@@ -4,6 +4,8 @@
 geogarmodel/
   app.py            PyQt5: загрузка, формы, фоновые задания, экспорт
   theme.py          палитра, стили, оформление Matplotlib
+  window_theme.py   системная тёмная рамка Windows через DWM
+  parameter_files.py JSON параметров, снимок лучшего завершённого trial
   dashboard.py      PyQtGraph: Optuna, параметры, диагностика, карты контроля
   models.py         схема данных, внешнее разбиение, обучение, итоговая модель
   optimization.py   TPE, пространства поиска, внутренняя CV, pruning, история
