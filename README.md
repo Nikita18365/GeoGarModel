@@ -48,7 +48,7 @@ python -m pip install -e ".[boosting,neural,geo]"
 - [Основная инструкция, форматы, координаты и трансформанты](docs/MODERNIZATION.md)
 - [Optuna, CPU/GPU, графики и экспорт](docs/OPTUNA.md)
 - [Структура проекта и проверки](docs/ARCHITECTURE.md)
-- [ТЗ следующего этапа: структурно-адаптивная 3D-воксельная плотностная инверсия](docs/INVERSION_SPEC.md)
+- [Следующий модуль: 3D-инверсия гравитационного и магнитного полей](docs/INVERSION_SPEC.md)
 - [Архив инструкции версии 1.1](docs/LEGACY_MANUAL.md)
 
 ## Проверки
