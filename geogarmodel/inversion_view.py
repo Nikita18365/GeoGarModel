@@ -16,6 +16,16 @@ def vtk_grid(result, component='amplitude'):
     else:
         values=m
     grid.cell_data['property']=values.reshape(mesh.shape)[:,:,::-1].ravel(order='F')
+    if mesh.bounds is not None or not mesh.active.all():
+        # Exact vertically clipped prisms, independently represented as hexahedra.
+        cells=mesh.cells()[mesh.active]
+        corners=np.array([[0,0,1],[1,0,1],[1,1,1],[0,1,1],[0,0,0],[1,0,0],[1,1,0],[0,1,0]])
+        points=cells[:,None,:3]+corners[None,:,:]*(cells[:,None,3:]-cells[:,None,:3])
+        points[:,:,2]*=-1
+        connectivity=np.column_stack((np.full(len(cells),8),np.arange(len(cells)*8).reshape(-1,8)))
+        grid=pv.UnstructuredGrid(connectivity.ravel(),np.full(len(cells),pv.CellType.HEXAHEDRON),points.reshape(-1,3))
+        grid.cell_data['property']=values[mesh.active]
+        if m.ndim==2: grid.cell_data['M_END']=m[mesh.active]
     return grid
 
 
@@ -63,7 +73,7 @@ class ModelView(QWidget):
         grid.translate(-origin,inplace=True)
         mode=result.settings['mode']
         unit='g/cm³' if mode=='gravity' else ('SI' if mode=='induced' else 'A/m')
-        self.info.setText(f'{result.mesh.size:,} ячеек · {unit} · E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м; Z вверх. Вращение: ЛКМ, масштаб: колесо.')
+        self.info.setText(f'{result.mesh.active.sum():,} активных ячеек · {unit} · E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м; Z вверх. Вращение: ЛКМ, масштаб: колесо.')
         self.component.setEnabled(result.model.ndim==2)
         values=grid['property']; limit=max(float(np.max(np.abs(values))),1e-15)
         cmap='viridis' if np.min(values)>=0 else 'coolwarm'
@@ -76,7 +86,11 @@ class ModelView(QWidget):
             chosen=grid.extract_cells(np.flatnonzero(np.abs(values)>=limit*self.threshold.value()/100))
             if chosen.n_cells: p.add_mesh(chosen,show_edges=True,edge_color='#33465a',**options)
         elif kind==1:
-            p.add_volume(grid.cell_data_to_point_data(),opacity='sigmoid',**options)
+            if grid.__class__.__name__=='UnstructuredGrid':
+                p.add_mesh(grid,opacity=.3,**options)
+                self.info.setText(self.info.text()+' · Обрезанные призмы: полупрозрачная геометрия.')
+            else:
+                p.add_volume(grid.cell_data_to_point_data(),opacity='sigmoid',**options)
         elif kind==2:
             points=grid.cell_data_to_point_data()
             lo,hi=float(values.min()),float(values.max())

@@ -49,7 +49,7 @@ class Worker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GeoGarModel 2.2 · интерпретация и моделирование")
+        self.setWindowTitle("GeoGarModel 2.3 · интерпретация и моделирование")
         self.resize(1480, 940)
         self.setStyleSheet(STYLE)
         self.grids, self.overlays = [], []

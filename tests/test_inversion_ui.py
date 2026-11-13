@@ -29,6 +29,10 @@ def test_inversion_tab_background_workflow(mode,monkeypatch):
     assert len(tab.result.predicted)==225
     assert len(tab.figure.axes)==11
     assert tab.result.history[-1]['rmse']<tab.result.history[0]['rmse']
+    tab.initial_panel.previous()
+    initial=tab.initial_panel.current()
+    np.testing.assert_allclose(initial.values,tab.result.model)
+    assert initial.mesh.shape==tab.result.mesh.shape
     window.close(); QApplication.processEvents()
 
 
