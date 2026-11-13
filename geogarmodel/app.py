@@ -15,13 +15,15 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from .grids import load_grid, save_grid, points_to_grid
 from .fields import TRANSFORMS, transform
-from .models import read_table, available_models, train_horizon
+from .models import read_table, available_models, train_horizon, make_model
 from .plotting import draw_map
 from .coordinates import gsk2011_zones, validate_crs
 from .dashboard import TrainingDashboard
 from .theme import STYLE
 from .compute import GPU_MODELS, ComputationCancelled
 from .optimization import default_space
+from .parameter_files import validate_parameters, read_parameters, best_snapshot
+from .window_theme import apply_window_theme
 
 
 class Worker(QThread):
@@ -54,6 +56,7 @@ class MainWindow(QMainWindow):
         self.training = self.prediction = self.result = self.output = None
         self.worker = None
         self.job_outcome = ""
+        self.optimization_context = None
         self.tabs = QTabWidget()
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -87,6 +90,10 @@ class MainWindow(QMainWindow):
         action = menu.addAction("Открыть синтетический пример")
         action.triggered.connect(lambda: self.guard(self.load_demo))
         self.statusBar().showMessage("Загрузите карту или обучающую таблицу.")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        apply_window_theme(self)
 
     def load_demo(self):
         if self.worker:
@@ -252,6 +259,10 @@ class MainWindow(QMainWindow):
                               ("Доля контроля", self.test_fraction), ("Seed", self.seed), ("Параметры · JSON", self.parameters)]:
             model_form.addRow(label, widget)
         panel.addWidget(model_group)
+        parameter_actions = QHBoxLayout()
+        self.button("Редактор параметров…", self.edit_parameters, parameter_actions)
+        self.button("Загрузить параметры JSON…", self.import_parameters, parameter_actions)
+        model_form.addRow(parameter_actions)
         optimization = QGroupBox("03 · Optuna TPE")
         opt_form = QFormLayout(optimization)
         self.optimize_check = QCheckBox("Включить оптимизацию")
@@ -271,6 +282,13 @@ class MainWindow(QMainWindow):
         preset = QPushButton("Заполнить диапазоны для модели")
         preset.clicked.connect(lambda: self.search.setText(json.dumps(default_space(self.model_choice.currentText()))))
         opt_form.addRow(preset)
+        self.best_export = QPushButton("Сохранить лучший trial · JSON…")
+        self.best_export.clicked.connect(lambda: self.guard(self.export_best_parameters))
+        self.best_export.setToolTip("Доступно после первого завершённого trial, в том числе во время поиска и после остановки.")
+        opt_form.addRow(self.best_export)
+        self.best_trial_label = QLabel("Лучший trial: ещё нет завершённых результатов")
+        self.best_trial_label.setWordWrap(True)
+        opt_form.addRow(self.best_trial_label)
         panel.addWidget(optimization)
         actions = QHBoxLayout()
         footer = QWidget()
@@ -475,6 +493,12 @@ class MainWindow(QMainWindow):
 
     def trial_progress(self, record):
         self.dashboard.update_trial(record)
+        if self.optimization_context:
+            try:
+                snapshot = best_snapshot(self.optimization_context, self.dashboard.history)
+                self.best_trial_label.setText(f"Лучший trial: {snapshot['best_trial'] + 1} · CV RMSE {snapshot['best_cv_rmse']:.6g}")
+            except ValueError:
+                pass
         self.progress_bar.setValue(record["trial"] + 1)
         self.log.appendPlainText(f"Trial {record['trial'] + 1} · {record['state']} · CV RMSE={record['rmse']}\n"
                                  + json.dumps(record["parameters"], ensure_ascii=False))
@@ -599,6 +623,8 @@ class MainWindow(QMainWindow):
         self.log.setPlainText(self.training.describe().to_string())
 
     def fit(self):
+        if self.worker is not None:
+            raise ValueError("Дождитесь текущего расчёта.")
         if self.training is None:
             raise ValueError("Загрузите обучающую таблицу.")
         features = [self.feature_list.item(i).text() for i in range(self.feature_list.count())
@@ -613,12 +639,22 @@ class MainWindow(QMainWindow):
                     optimize=self.optimize_check.isChecked(), n_trials=self.trials.value(), cv_folds=self.folds.value(),
                     timeout=self.timeout.value() or None, device=self.device_choice.currentData(), gpu_id=self.gpu_id.value())
         table, name = self.training.copy(), self.model_choice.currentText()
+        validate_parameters(params)
+        make_model(name, params, self.seed.value(), self.device_choice.currentData(), self.gpu_id.value())
         if self.spatial.isChecked():
             validate_crs(self.table_crs.currentText().split("|")[0].strip(), "m")
         self.fitted_crs = self.table_crs.currentText().split("|")[0].strip()
         self.fitted_north_first = self.north_first.isChecked()
         self.result = self.output = None
         self.dashboard.reset("Расчёт запущен. Контрольные точки не участвуют в подборе.")
+        self.optimization_context = dict(model=name, parameters=dict(params), seed=args["seed"],
+                                         device=args["device"], gpu_id=args["gpu_id"],
+                                         search=search or default_space(name), cv_folds=args["cv_folds"],
+                                         spatial=args["spatial"], block_size=args["block_size"],
+                                         test_size=args["test_size"], n_trials=args["n_trials"],
+                                         timeout_seconds=args["timeout"], features=features,
+                                         target=args["target"], coordinates=args["coordinates"])
+        self.best_trial_label.setText("Лучший trial: ещё нет завершённых результатов")
         self.progress_bar.setRange(0, self.trials.value() if self.optimize_check.isChecked() else 1)
         self.progress_bar.setValue(0)
         self.run_job(lambda progress, cancel: train_horizon(table, name, **args, progress=progress, cancel_event=cancel),
@@ -663,6 +699,58 @@ class MainWindow(QMainWindow):
         rows = [{**r, "parameters": json.dumps(r["parameters"], ensure_ascii=False),
                  "fold_rmse": json.dumps(r["fold_rmse"])} for r in history]
         self.save_csv(pd.DataFrame(rows), "История Optuna")
+
+    def edit_parameters(self):
+        if self.worker:
+            raise ValueError("Редактирование доступно после окончания расчёта.")
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Гиперпараметры · {self.model_choice.currentText()}")
+        dialog.resize(700, 520)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel("JSON-объект параметров модели. Optuna заменяет значения, включённые в диапазоны поиска.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        editor = QPlainTextEdit()
+        editor.setPlainText(json.dumps(json.loads(self.parameters.text()), ensure_ascii=False, indent=2))
+        layout.addWidget(editor)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        def save():
+            def checked():
+                params = validate_parameters(json.loads(editor.toPlainText()))
+                make_model(self.model_choice.currentText(), params, self.seed.value(),
+                           self.device_choice.currentData(), self.gpu_id.value())
+                self.parameters.setText(json.dumps(params, ensure_ascii=False))
+                dialog.accept()
+            self.guard(checked)
+        buttons.accepted.connect(save)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        apply_window_theme(dialog)
+        dialog.exec_()
+
+    def import_parameters(self):
+        if self.worker:
+            raise ValueError("Загрузка параметров доступна после окончания расчёта.")
+        path, _ = QFileDialog.getOpenFileName(self, "Гиперпараметры / лучший trial / отчёт", "", "JSON (*.json)")
+        if not path:
+            return
+        model, params = read_parameters(json.loads(Path(path).read_text(encoding="utf-8-sig")))
+        model = model or self.model_choice.currentText()
+        if model not in available_models():
+            raise ValueError(f"Модель {model} недоступна. Установите её зависимости.")
+        make_model(model, params)
+        self.model_choice.setCurrentText(model)
+        self.parameters.setText(json.dumps(params, ensure_ascii=False))
+        self.optimize_check.setChecked(False)
+        self.statusBar().showMessage("Параметры загружены. Optuna выключена; CPU/GPU и разбиение проверьте перед обучением.")
+
+    def export_best_parameters(self):
+        if not self.optimization_context:
+            raise ValueError("Сначала запустите Optuna и дождитесь первого завершённого trial.")
+        snapshot = best_snapshot(self.optimization_context, self.dashboard.history)
+        path, _ = QFileDialog.getSaveFileName(self, "Лучший завершённый trial Optuna", "optuna-best.json", "JSON (*.json)")
+        if path:
+            Path(path).write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
 
     def export_chart(self):
         path, _ = QFileDialog.getSaveFileName(self, "Сохранить график", "", "PNG (*.png)")

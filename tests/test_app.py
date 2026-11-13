@@ -77,7 +77,7 @@ def test_background_training_and_prediction():
     app.processEvents()
 
 
-def test_optuna_ui_stream_and_device_controls():
+def test_optuna_ui_stream_and_device_controls(tmp_path, monkeypatch):
     from PyQt5.QtCore import QEventLoop, QTimer
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
@@ -87,8 +87,20 @@ def test_optuna_ui_stream_and_device_controls():
     window.optimize_check.setChecked(True)
     window.trials.setValue(3)
     window.search.setText('{"alpha": [0.01, 0.1, 1]}')
+    window.parameters.setText('{"fit_intercept": false}')
+    from PyQt5.QtWidgets import QFileDialog
+    import json
+    saved = tmp_path / "best.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a: (str(saved), "JSON"))
+    exported = []
+    def save_during_search(record):
+        if record["state"] == "COMPLETE" and not exported:
+            assert window.worker is not None
+            window.export_best_parameters()
+            exported.append(json.loads(saved.read_text(encoding="utf-8")))
     loop = QEventLoop()
     window.fit()
+    window.worker.progress.connect(save_during_search)
     window.worker.finished.connect(loop.quit)
     timer = QTimer()
     timer.setSingleShot(True)
@@ -101,5 +113,13 @@ def test_optuna_ui_stream_and_device_controls():
     assert len(window.result.optimization_history) == 3
     assert not window.stop_button.isEnabled()
     assert len(window.dashboard.map_items) == 4
+    assert exported[0]["completed_trials"] == 1
+    assert exported[0]["parameters"]["fit_intercept"] is False
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a: (str(saved), "JSON"))
+    window.model_choice.setCurrentText("Linear")
+    window.import_parameters()
+    assert window.model_choice.currentText() == "Ridge"
+    assert json.loads(window.parameters.text()) == exported[0]["parameters"]
+    assert not window.optimize_check.isChecked()
     window.close()
     app.processEvents()
