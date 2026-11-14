@@ -7,7 +7,7 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QGroupBox,
     QComboBox,QDoubleSpinBox,QSpinBox,QPushButton,QLabel,QScrollArea,QSplitter,
-    QTabWidget,QFileDialog,QProgressBar,QPlainTextEdit,QCheckBox)
+    QTabWidget,QFileDialog,QProgressBar,QPlainTextEdit,QCheckBox,QAbstractSpinBox,QLineEdit,QAbstractButton)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg,NavigationToolbar2QT
 from threading import Event
@@ -38,6 +38,8 @@ class InversionTab(QWidget):
         root=QHBoxLayout(self); splitter=QSplitter(); root.addWidget(splitter)
         left=QWidget(); panel=QVBoxLayout(left)
         self.parameter_panel=left
+        left.setObjectName('inversionParameters')
+        self._locked_inputs=[]
         self.mode=QComboBox()
         for label,key in [('Плотностное моделирование · Δρ, g/cm³','gravity'),('Моделирование магнитной восприимчивости · χ, SI','induced'),('Моделирование векторной намагниченности · J, A/m','vector')]: self.mode.addItem(label,key)
         panel.addWidget(self.mode)
@@ -108,6 +110,7 @@ class InversionTab(QWidget):
             f.setRowWrapPolicy(QFormLayout.WrapLongRows)
             f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.workflow=arrange_workflow(panel,self.initial_panel,mesh_group,settings,self.magnetic_group,solver,compute)
+        for label in left.findChildren(QLabel): label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         for combo in left.findChildren(QComboBox):
             combo.setMinimumContentsLength(10); combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(left)
@@ -136,6 +139,26 @@ class InversionTab(QWidget):
 
     def button(self,text,fn,layout):
         w=QPushButton(text); w.clicked.connect(lambda: self.workbench.guard(fn)); layout.addWidget(w); return w
+
+    def lock_inputs(self):
+        """Freeze settings, retaining enabled page navigation and scroll areas."""
+        self._locked_inputs=[]
+        for widget in self.parameter_panel.findChildren(QWidget):
+            if isinstance(widget,QAbstractSpinBox):
+                self._locked_inputs.append((widget,'readonly',widget.isReadOnly()))
+            elif isinstance(widget,QLineEdit) and not isinstance(widget.parent(),QAbstractSpinBox):
+                self._locked_inputs.append((widget,'readonly',widget.isReadOnly()))
+            elif isinstance(widget,(QComboBox,QAbstractButton)) and not widget.property('workflowNavigation'):
+                self._locked_inputs.append((widget,'enabled',widget.isEnabled()))
+        for widget,kind,_ in self._locked_inputs:
+            if kind=='readonly': widget.setReadOnly(True)
+            else: widget.setEnabled(False)
+
+    def unlock_inputs(self):
+        for widget,kind,value in self._locked_inputs:
+            if kind=='readonly': widget.setReadOnly(value)
+            else: widget.setEnabled(value)
+        self._locked_inputs=[]
     @staticmethod
     def number(lo,hi,val,decimals=2):
         w=QDoubleSpinBox(); w.setDecimals(decimals); w.setRange(lo,hi); w.setValue(val); return w
@@ -280,11 +303,10 @@ class InversionTab(QWidget):
         self.progress.setRange(0,settings['iterations']); self.progress.setValue(0)
         self.status.setText(f'{len(data):,} наблюдений × {mesh.active.sum():,} активных ячеек · {operator_args["device"].upper()} · определение бюджета памяти…')
         self.worker=InversionWorker(compute,self)
-        self.parameter_panel.setEnabled(False)
-        self.initial_panel.setEnabled(False)
+        self.lock_inputs()
         self.worker.progress.connect(self.update_progress); self.worker.result.connect(self.finished_result)
         self.worker.failed.connect(self.failure); self.worker.finished.connect(self.job_finished)
-        for w in (self.run_button,self.load_button,self.grid_button,self.demo_button,self.model_load,self.mode): w.setEnabled(False)
+        self.run_button.setEnabled(False)
         self.stop.setEnabled(True); self.tabs.setCurrentIndex(2); self.worker.start()
 
     def update_progress(self,row):
@@ -302,15 +324,14 @@ class InversionTab(QWidget):
     def failure(self,message): self.status.setText(message); self.log.appendPlainText(message)
     def job_finished(self):
         self.worker.function=None; self.worker.deleteLater(); self.worker=None
-        for w in (self.run_button,self.load_button,self.grid_button,self.demo_button,self.model_load,self.mode): w.setEnabled(True)
+        self.unlock_inputs()
+        self.run_button.setEnabled(True)
         self.stop.setEnabled(False)
-        self.initial_panel.setEnabled(True)
-        self.parameter_panel.setEnabled(True)
 
     def model_task(self,function,callback):
         if self.worker or self.workbench.worker: raise ValueError('Дождитесь текущего расчёта.')
         self.status.setText('Чтение начальной модели…')
-        self.parameter_panel.setEnabled(False); self.run_button.setEnabled(False)
+        self.lock_inputs(); self.run_button.setEnabled(False)
         self.worker=InversionWorker(lambda progress,cancel:function(),self)
         self.worker.result.connect(lambda model:self.workbench.guard(lambda:callback(model)))
         self.worker.failed.connect(self.failure); self.worker.finished.connect(self.job_finished)

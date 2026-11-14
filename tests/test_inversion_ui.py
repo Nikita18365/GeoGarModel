@@ -123,3 +123,42 @@ def test_workflow_and_separate_editor(monkeypatch):
     assert len(observed)==1
     np.testing.assert_allclose(observed[0],.25)
     window.close(); QApplication.processEvents()
+
+
+def test_running_job_keeps_navigation_but_freezes_inputs(monkeypatch):
+    from threading import Event
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtCore import Qt
+    import geogarmodel.inversion_ui as ui
+    gate=Event(); original=ui.invert
+    def delayed(*args,**kwargs):
+        assert gate.wait(15)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(ui,'invert',delayed)
+    window=MainWindow(); tab=window.inversion; tab.demo(); tab.iterations.setValue(1)
+    tab.workflow.setCurrentIndex(2); tab.run()
+    try:
+        for i,button in enumerate(tab.workflow.buttons):
+            assert button.isEnabled()
+            button.click(); assert tab.workflow.currentIndex()==i
+        assert tab.parameter_panel.isEnabled()
+        assert tab.nx.isReadOnly() and tab.initial.isReadOnly()
+        value=tab.nx.value(); QTest.keyClick(tab.nx,Qt.Key_Up)
+        assert tab.nx.value()==value
+        assert not tab.east.isEnabled() and not tab.mode.isEnabled()
+        assert not tab.initial_panel.source.isEnabled()
+        assert all(not b.isEnabled() for b in tab.initial_panel.findChildren(QPushButton))
+        assert not tab.run_button.isEnabled() and tab.stop.isEnabled()
+        assert not tab.cache.isEnabled()  # Automatic memory policy remains disabled after unlock too.
+        tab.workflow.setCurrentIndex(0)
+        next(b for b in tab.workflow.widget(0).findChildren(QPushButton) if b.text().startswith('Далее')).click()
+        assert tab.workflow.currentIndex()==1
+    finally:
+        gate.set()
+        loop=QEventLoop(); timer=QTimer(); timer.setSingleShot(True); timer.timeout.connect(loop.quit)
+        tab.worker.finished.connect(loop.quit); timer.start(15000); loop.exec_()
+        assert tab.worker is None
+        assert not tab.nx.isReadOnly() and tab.east.isEnabled()
+        assert not tab.cache.isEnabled()
+        assert tab.initial_panel.source.isEnabled()
+        window.close(); QApplication.processEvents()
