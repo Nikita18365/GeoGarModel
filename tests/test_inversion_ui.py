@@ -53,6 +53,43 @@ def test_vtk_coordinates_and_vector_order(tmp_path):
     grid.save(tmp_path/'model.vtr')
 
 
+def test_display_scale_keeps_physical_axes_and_model():
+    pytest.importorskip('pyvistaqt')
+    from geogarmodel.inversion import Mesh,InversionResult
+    from geogarmodel.inversion_view import ModelView,vtk_grid
+    mesh=Mesh(np.linspace(18000000,18010000,4),np.linspace(6000000,6020000,4),np.linspace(100,30000,4))
+    result=InversionResult(mesh,np.ones(mesh.size),np.zeros((1,3)),np.zeros(1),np.zeros(1),[],{'mode':'gravity'},'test')
+    original=vtk_grid(result).points.copy()
+    view=ModelView(); view.resize(1100,850)
+    try:
+        view.render(result)
+        view.axis_scales[2].setValue(3)
+        np.testing.assert_allclose(view.bounds_axes.bounds,[0,10000,0,20000,-90000,-300])
+        np.testing.assert_allclose(view.bounds_axes.z_axis_range,[-30000,-100])
+        view.axis_unit.setCurrentText('км')
+        np.testing.assert_allclose(view.bounds_axes.z_axis_range,[-30,-.1])
+        view.plotter.camera.zoom(1.2)
+        zoom=view.plotter.camera.parallel_scale
+        view.axis_font.setValue(22)
+        assert view.plotter.camera.parallel_scale==pytest.approx(zoom)
+        for mode in range(5):
+            view.kind.setCurrentIndex(mode)
+            np.testing.assert_allclose(view.bounds_axes.z_axis_range,[-30,-.1])
+        view.reset_scales()
+        np.testing.assert_allclose(view.bounds_axes.bounds,[0,10000,0,20000,-30000,-100])
+        np.testing.assert_allclose(vtk_grid(result).points,original)
+        result.model[:]=0
+        view.kind.setCurrentIndex(0); view.render(result)
+        assert any(getattr(getattr(actor,'mapper',None),'dataset',None) is not None
+                   and actor.mapper.dataset.n_cells==mesh.size for actor in view.plotter.renderer.actors.values())
+        view.expanded_view()
+        assert view._expanded_dialog.isVisible()
+        view._expanded_dialog.accept()
+        assert view._expanded_dialog is None
+    finally:
+        view.shutdown(); view.close()
+
+
 def test_workflow_and_separate_editor(monkeypatch):
     window=MainWindow(); tab=window.inversion; tab.demo()
     assert [tab.mode.itemText(i) for i in range(3)]==[
