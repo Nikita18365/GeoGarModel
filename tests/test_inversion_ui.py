@@ -26,6 +26,8 @@ def test_inversion_tab_background_workflow(mode,monkeypatch):
     assert tab.worker is None
     assert not errors,errors
     assert tab.result is not None,tab.status.text()
+    assert tab.result.settings['resources']['policy']=='balanced'
+    assert 'Свободно при старте' in tab.memory_info.text()
     assert len(tab.result.predicted)==225
     assert len(tab.figure.axes)==11
     assert tab.result.history[-1]['rmse']<tab.result.history[0]['rmse']
@@ -92,6 +94,11 @@ def test_display_scale_keeps_physical_axes_and_model():
 
 def test_workflow_and_separate_editor(monkeypatch):
     window=MainWindow(); tab=window.inversion; tab.demo()
+    tab.memory_policy.setCurrentIndex(2)
+    tab.cache.setValue(1048576)
+    assert tab.cache.value()==1048576 and tab.cache.isEnabled()
+    tab.memory_policy.setCurrentIndex(0)
+    assert not tab.cache.isEnabled()
     assert [tab.mode.itemText(i) for i in range(3)]==[
         'Плотностное моделирование · Δρ, g/cm³',
         'Моделирование магнитной восприимчивости · χ, SI',

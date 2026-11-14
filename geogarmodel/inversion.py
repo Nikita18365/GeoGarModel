@@ -8,6 +8,7 @@ from itertools import product
 import json
 import numpy as np
 from .compute import check_cancel
+from .inversion_resources import available_memory, resource_plan
 
 
 @dataclass
@@ -118,7 +119,7 @@ def prism_kernel(observations, cells, magnetic=False, xp=np):
 class FieldOperator:
     def __init__(self, mesh, observations, mode='gravity', *, device='cpu', gpu_id=0,
                  field_strength=50000., inclination=60., declination=0., cache_mb=128,
-                 cancel_event=None):
+                 cancel_event=None, memory_policy='manual'):
         if mode not in ('gravity', 'induced', 'vector'):
             raise ValueError('Неизвестный режим 3D-моделирования.')
         self.mesh, self.mode, self.cancel_event = mesh, mode, cancel_event
@@ -133,11 +134,13 @@ class FieldOperator:
         if not np.isfinite(field_strength) or field_strength <= 0 or not np.isfinite(cache_mb) or cache_mb < 0:
             raise ValueError('Модуль главного поля должен быть >0; кэш — ≥0.')
         self.xp = backend(device, gpu_id)
+        self.resources=resource_plan(available_memory(self.xp),mesh.size,len(self.observations),
+                                     mode,device,memory_policy,cache_mb)
         self.field_strength = float(field_strength)
         self.f = self.xp.asarray(direction(inclination, declination))
         self.h = field_strength / (400*np.pi)  # nT to A/m, μ0=4π·10^-7
         self.cache = {}
-        self.cache_limit = cache_mb * 1024**2
+        self.cache_limit = self.resources['cache_mib'] * 1024**2
         self.cache_bytes = 0
 
     @property
@@ -145,10 +148,11 @@ class FieldOperator:
         return (self.mesh.size, 3) if self.mode == 'vector' else (self.mesh.size,)
 
     def blocks(self):
-        for o in range(0, len(self.observations), 64):
-            for c in range(0, self.mesh.size, 512):
+        ob,cb=self.resources['observation_block'],self.resources['cell_block']
+        for o in range(0, len(self.observations), ob):
+            for c in range(0, self.mesh.size, cb):
                 check_cancel(self.cancel_event)
-                os, cs = slice(o,o+64), np.flatnonzero(self.mesh.active[c:c+512])+c
+                os, cs = slice(o,o+ob), np.flatnonzero(self.mesh.active[c:c+cb])+c
                 if not len(cs):
                     continue
                 key = o,c
@@ -343,5 +347,6 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
                   coordinate_order='East North Down, m',density_unit='g/cm3',magnetization_unit='A/m',
                   susceptibility_unit='SI',magnetic_anomaly='exact total field magnitude',
                   fit_offset=bool(fit_offset),constant_offset=float(xp.mean(pred-operator.predict(m))),
+                  resources=operator.resources,
                   sigma=host(sigma).tolist())
     return InversionResult(mesh,host(m),operator.observations.copy(),host(data),host(pred),history,settings,status)

@@ -66,7 +66,13 @@ class InversionTab(QWidget):
         self.top=self.number(-1e6,1e6,100)
         self.bottom=self.number(-1e6,1e6,3000)
         self.padding=self.number(0,10,.2)
-        self.cache=self.integer(0,2048,128)
+        self.cache=self.integer(0,2147483647,512)
+        self.cache.setEnabled(False)
+        self.memory_policy=QComboBox()
+        for label,key in [('Авто · сбалансированный','balanced'),('Авто · производительность','performance'),('Вручную','manual')]:
+            self.memory_policy.addItem(label,key)
+        self.memory_policy.currentIndexChanged.connect(lambda: self.cache.setEnabled(self.memory_policy.currentData()=='manual'))
+        self.cache.setToolTip('Предел кэша в MiB: GPU — видеопамять, CPU — оперативная память. 0 отключает кэш. Бюджет проверяется при запуске.')
         for name,w in [('Nx',self.nx),('Ny',self.ny),('Nz',self.nz),('Верх: глубина Down, м',self.top),('Низ: глубина Down, м',self.bottom),('Запас площади, доля',self.padding)]: f.addRow(name,w)
         panel.addWidget(mesh_group)
         forms=[form,f]
@@ -92,7 +98,10 @@ class InversionTab(QWidget):
         for name,w in [('Итерации',self.iterations),('Глубинный индекс',self.depth_index),('L2 малость',self.damping),('Гладкость',self.smooth),('Масштаб первого шага',self.step),('Целевая RMS / σ',self.target)]: sf.addRow(name,w)
         sf.addRow(self.offset); panel.addWidget(solver)
         compute=QGroupBox('07 · Вычисления'); cf=QFormLayout(compute)
-        cf.addRow('Устройство',self.device); cf.addRow('GPU ID',self.gpu); cf.addRow('Кэш, MiB',self.cache); panel.addWidget(compute)
+        cf.addRow('Устройство',self.device); cf.addRow('GPU ID',self.gpu)
+        cf.addRow('Режим памяти',self.memory_policy); cf.addRow('Кэш вручную, MiB',self.cache)
+        self.memory_info=QLabel('Свободная RAM/VRAM, бюджет кэша и размер пакетов определяются при запуске.'); self.memory_info.setWordWrap(True)
+        cf.addRow(self.memory_info); panel.addWidget(compute)
         self.dec.setToolTip('Склонение относительно севера проекционной сетки. Для IGRF учтите сближение меридианов.')
         forms.extend([f,mf,sf,cf])
         for f in forms:
@@ -256,19 +265,20 @@ class InversionTab(QWidget):
         initial_model=self.initial_panel.current(); mesh=initial_model.mesh
         observation_stride=self.stride.value()
         mode=self.mode.currentData()
-        operator_args=dict(device=self.device.currentData(),gpu_id=self.gpu.value(),field_strength=self.field.value(),inclination=self.inc.value(),declination=self.dec.value(),cache_mb=self.cache.value())
+        operator_args=dict(device=self.device.currentData(),gpu_id=self.gpu.value(),field_strength=self.field.value(),inclination=self.inc.value(),declination=self.dec.value(),cache_mb=self.cache.value(),memory_policy=self.memory_policy.currentData())
         if np.any(initial_model.values[mesh.active]<self.lower.value()) or np.any(initial_model.values[mesh.active]>self.upper.value()):
             raise ValueError('Начальные свойства выходят за минимум/максимум. Исправьте границы или явно ограничьте свойства через операции.')
         settings=dict(sigma=sigma,iterations=self.iterations.value(),lower=self.lower.value(),upper=self.upper.value(),initial=initial_model.values,damping=self.damping.value(),smoothness=self.smooth.value(),depth_index=self.depth_index.value(),step_scale=self.step.value(),target_rms=self.target.value(),fit_offset=self.offset.isChecked())
         def compute(progress,cancel):
             op=FieldOperator(mesh,observations,mode,**operator_args,cancel_event=cancel)
+            progress(dict(event='resources',**op.resources))
             result=invert(op,data,**settings,progress=progress,cancel_event=cancel)
             result.settings.update(crs=crs,gpu_id=operator_args['gpu_id'])
             result.settings.update(initial_model_history=initial_model.history,observation_stride=observation_stride)
             return result
         self.result=None; self.history=[]; self.curve.setData([],[]); self.log.clear()
         self.progress.setRange(0,settings['iterations']); self.progress.setValue(0)
-        self.status.setText(f'{len(data):,} наблюдений × {mesh.active.sum():,} активных ячеек · {operator_args["device"].upper()} · кэш ≤{self.cache.value()} MiB; блоки 64×512')
+        self.status.setText(f'{len(data):,} наблюдений × {mesh.active.sum():,} активных ячеек · {operator_args["device"].upper()} · определение бюджета памяти…')
         self.worker=InversionWorker(compute,self)
         self.parameter_panel.setEnabled(False)
         self.initial_panel.setEnabled(False)
@@ -278,8 +288,16 @@ class InversionTab(QWidget):
         self.stop.setEnabled(True); self.tabs.setCurrentIndex(2); self.worker.start()
 
     def update_progress(self,row):
+        if row.get('event')=='resources':
+            text=(f'Свободно при старте: {row["free_mib"]:,} MiB; кэш ≤{row["cache_mib"]:,} MiB; '
+                  f'полный оператор ≤{row["operator_mib"]:,} MiB; пакет до '
+                  f'{row["observation_block"]} наблюдений × {row["cell_block"]} вокселей.')
+            self.memory_info.setText(text); self.log.appendPlainText(text)
+            self.status.setText(text+' Расчёт начального поля и градиента…')
+            return
         self.history.append(row); self.curve.setData([r['iteration'] for r in self.history],[r['rmse'] for r in self.history])
         self.progress.setValue(row['iteration'])
+        self.status.setText(f'Итерация {row["iteration"]}: RMSE={row["rmse"]:.6g}; RMS/σ={row["normalized_rms"]:.4g}')
         self.log.appendPlainText(f"{row['iteration']}: RMSE={row['rmse']:.6g}; RMS/σ={row['normalized_rms']:.4g}; J={row['objective']:.6g}")
     def failure(self,message): self.status.setText(message); self.log.appendPlainText(message)
     def job_finished(self):
