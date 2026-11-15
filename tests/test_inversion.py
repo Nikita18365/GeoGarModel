@@ -155,6 +155,30 @@ def test_early_stop_is_optional_and_returns_best():
     assert stopped.settings['selected_iteration']==min(stopped.history,key=lambda r:r['normalized_rms'])['iteration']
 
 
+def test_block_progress_counts_active_blocks_and_preserves_solution(tmp_path):
+    grid=mesh(); grid.active[9:18]=False
+    op=FieldOperator(grid,observations(),cache_mb=0)
+    op.resources.update(observation_block=10,cell_block=9)
+    events=[]
+    timed=invert(op,np.ones(49),iterations=2,target_rms=0,work_progress=events.append)
+    plain=invert(op,np.ones(49),iterations=2,target_rms=0)
+    np.testing.assert_allclose(timed.model,plain.model)
+    assert op.monitor is None
+    assert {e['stage'] for e in events}=={'field','gradient','regularization'}
+    blocks=[e for e in events if e['total']]
+    assert all(e['total']==10 for e in blocks)  # Five observation blocks × two active cell blocks.
+    assert all(0<=e['completed']<=10 for e in blocks)
+    assert blocks[0]['completed']==0 and blocks[-1]['completed']==10
+    assert all(e['stage_remaining_seconds']==0 for e in blocks if e['completed']==10)
+    assert [e['iteration'] for e in events if e['stage']=='field' and e['completed']==0][:2]==[0,1]
+    assert all(e['elapsed_seconds']>=e['iteration_seconds']>=e['stage_seconds']>=0 for e in events)
+    assert all(r['iteration_seconds']>=0 and r['elapsed_seconds']>=r['iteration_seconds'] for r in timed.history)
+    assert timed.settings['elapsed_seconds']>=timed.history[-1]['elapsed_seconds']
+    timed.save(tmp_path/'timed.npz')
+    loaded=InversionResult.load(tmp_path/'timed.npz')
+    assert loaded.history==timed.history
+
+
 @pytest.mark.skipif(os.environ.get('GEOGARMODEL_GPU_TESTS')!='1',reason='Opt-in CUDA hardware test')
 @pytest.mark.parametrize('mode',['gravity','induced','vector'])
 def test_gpu_cpu_equivalence(mode):

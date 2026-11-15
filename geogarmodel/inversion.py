@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from itertools import product
 import json
 import numpy as np
+from time import perf_counter
 from .compute import check_cancel, ComputationCancelled
+from .inversion_progress import WorkProgress
 from .inversion_resources import available_memory, resource_plan
 
 
@@ -142,13 +144,19 @@ class FieldOperator:
         self.cache = {}
         self.cache_limit = self.resources['cache_mib'] * 1024**2
         self.cache_bytes = 0
+        self.monitor = None
 
     @property
     def parameter_shape(self):
         return (self.mesh.size, 3) if self.mode == 'vector' else (self.mesh.size,)
 
-    def blocks(self):
+    def blocks(self, stage='field'):
         ob,cb=self.resources['observation_block'],self.resources['cell_block']
+        monitor=self.monitor
+        if monitor:
+            total=((len(self.observations)+ob-1)//ob)*sum(self.mesh.active[c:c+cb].any() for c in range(0,self.mesh.size,cb))
+            monitor.begin_stage(stage,int(total))
+        completed=0
         for o in range(0, len(self.observations), ob):
             for c in range(0, self.mesh.size, cb):
                 check_cancel(self.cancel_event)
@@ -163,12 +171,14 @@ class FieldOperator:
                         self.cache[key] = a
                         self.cache_bytes += a.nbytes
                 yield os,cs,a
+                completed+=1
+                if monitor: monitor.update(completed)
 
     def field(self, model):
         xp = self.xp
         m = xp.asarray(model).reshape(self.parameter_shape)
         out = xp.zeros((len(self.observations),3)) if self.mode != 'gravity' else xp.zeros(len(self.observations))
-        for os,cs,a in self.blocks():
+        for os,cs,a in self.blocks('field'):
             if self.mode == 'gravity':
                 out[os] += a @ m[cs]
             else:
@@ -200,7 +210,7 @@ class FieldOperator:
         residual = predicted-data
         weighted = residual/(sigma*sigma*len(data))
         gradient = xp.zeros(self.parameter_shape)
-        for os,cs,a in self.blocks():
+        for os,cs,a in self.blocks('gradient'):
             if self.mode == 'gravity':
                 gradient[cs] += a.T @ weighted[os]
             else:
@@ -274,9 +284,10 @@ class InversionResult:
 def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
            initial=None, damping=.01, smoothness=.1, depth_index=1., step_scale=1.,
            target_rms=1., fit_offset=False, progress=None, cancel_event=None,
-           early_stop=False, early_tolerance=.001, early_patience=5):
+           early_stop=False, early_tolerance=.001, early_patience=5, work_progress=None):
     """Projected preconditioned gradient with Armijo backtracking, exact ΔT."""
     xp,mesh = operator.xp,operator.mesh
+    timer=WorkProgress(work_progress,xp)
     data = np.asarray(data,dtype=float)
     sigma = np.broadcast_to(np.asarray(sigma,dtype=float),data.shape)
     if data.shape != (len(operator.observations),) or not np.isfinite(data).all() or not np.isfinite(sigma).all() or np.any(sigma<=0):
@@ -305,18 +316,25 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
     step = 1.
     def objective(v):
         val,grad,pred = operator.value_gradient(v,data,sigma,fit_offset)
+        timer.begin_stage('regularization',0)
         rv,rg = regularization(v,mesh,damping,smoothness,xp)
         return val+rv,grad+rg,pred,val,rv
     check_cancel(cancel_event)
-    value,gradient,pred,dv,rv = objective(m)
+    previous_monitor=operator.monitor
+    operator.monitor=timer if work_progress else None
     best = None
     stale = 0
-    offset = operator.last_offset
     try:
+        value,gradient,pred,dv,rv = objective(m)
+        offset = operator.last_offset
         for iteration in range(iterations+1):
             row = dict(iteration=iteration,objective=float(value),data_objective=float(dv),
                        regularization=float(rv),rmse=float(xp.sqrt(xp.mean((pred-data)**2))),
                        normalized_rms=float(xp.sqrt(2*dv)))
+            timer.sync()
+            row.update(iteration_seconds=perf_counter()-timer.iteration_started,
+                       elapsed_seconds=perf_counter()-timer.started,
+                       trial_evaluations=timer.trial)
             history.append(row)
             if best is None or row['normalized_rms'] < best[2]['normalized_rms']:
                 best = (m.copy(), pred.copy(), dict(row), offset)
@@ -333,11 +351,13 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
                     status='early_stop'; break
             if iteration==iterations:
                 break
+            timer.begin_iteration(iteration+1)
             direction_ = -weights*gradient
             if iteration==0:
                 step = step_scale*(upper-lower)*.05/max(float(xp.max(xp.abs(direction_))),1e-30)
             accepted=False
-            for _ in range(40):
+            for trial_index in range(40):
+                timer.trial=trial_index+1
                 check_cancel(cancel_event)
                 candidate=xp.clip(m+step*direction_,lower,upper)
                 candidate[~active] = 0
@@ -359,6 +379,10 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
         if best is None:
             raise
         status='cancelled'
+    finally:
+        operator.monitor=previous_monitor
+    timer.sync()
+    elapsed_seconds=perf_counter()-timer.started
     selected_iteration=history[-1]['iteration']
     if status in ('cancelled','early_stop'):
         m,pred,selected,offset=best
@@ -373,5 +397,6 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
                   early_stop=bool(early_stop),early_tolerance=early_tolerance,early_patience=early_patience,
                   selected_iteration=selected_iteration,best_criterion='minimum normalized RMS among completed iterates',
                   resources=operator.resources,
+                  elapsed_seconds=elapsed_seconds,initial_evaluation_seconds=history[0]['iteration_seconds'],
                   sigma=host(sigma).tolist())
     return InversionResult(mesh,host(m),operator.observations.copy(),host(data),host(pred),history,settings,status)
