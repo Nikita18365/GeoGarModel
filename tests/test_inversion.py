@@ -91,6 +91,70 @@ def test_induced_and_aligned_vector_have_same_exact_field():
     np.testing.assert_allclose(induced.predict(chi),vector.predict(chi[:,None]*induced.h*induced.f),atol=1e-10)
 
 
+@pytest.mark.parametrize('mode',['gravity','induced','vector'])
+def test_cancel_returns_consistent_best_completed_model(mode,tmp_path):
+    event=Event()
+    op=FieldOperator(mesh(),observations(),mode,cancel_event=event)
+    truth=np.full(op.parameter_shape,.01)
+    data=op.predict(truth)+.05
+    def progress(row):
+        if row['iteration']==3: event.set()
+    result=invert(op,data,lower=0,upper=.1,target_rms=0,iterations=20,
+                  fit_offset=True,progress=progress,cancel_event=event)
+    assert result.status=='cancelled'
+    selected=result.settings['selected_iteration']
+    assert selected==min(result.history,key=lambda row:row['normalized_rms'])['iteration']
+    event.clear()
+    np.testing.assert_allclose(result.predicted,op.predict(result.model)+result.settings['constant_offset'])
+    result.save(tmp_path/'stopped.npz')
+    loaded=InversionResult.load(tmp_path/'stopped.npz')
+    np.testing.assert_array_equal(loaded.model,result.model)
+    assert loaded.status=='cancelled'
+
+
+def test_cancel_during_trial_discards_partial_work(monkeypatch):
+    event=Event(); op=FieldOperator(mesh(),observations(),cancel_event=event)
+    original=op.value_gradient
+    calls=0
+    def interrupted(*args):
+        nonlocal calls
+        calls+=1
+        if calls==2: event.set()
+        return original(*args)
+    monkeypatch.setattr(op,'value_gradient',interrupted)
+    result=invert(op,np.ones(49),target_rms=0,cancel_event=event)
+    assert result.status=='cancelled'
+    assert result.settings['selected_iteration']==0
+    assert len(result.history)==1
+    np.testing.assert_array_equal(result.model,0)
+    np.testing.assert_array_equal(result.predicted,0)
+
+
+def test_cancel_returns_earlier_best_when_regularization_increases_misfit():
+    event=Event(); op=FieldOperator(mesh(),observations(),cancel_event=event)
+    initial=np.full(op.parameter_shape,.1)
+    data=op.predict(initial)+.01
+    def progress(row):
+        if row['iteration']==3: event.set()
+    result=invert(op,data,initial=initial,damping=1e6,smoothness=0,target_rms=0,
+                  progress=progress,cancel_event=event)
+    assert result.status=='cancelled'
+    assert result.history[-1]['rmse']>result.history[0]['rmse']
+    assert result.settings['selected_iteration']==0
+    np.testing.assert_array_equal(result.model,initial)
+
+
+def test_early_stop_is_optional_and_returns_best():
+    op=FieldOperator(mesh(),observations())
+    kwargs=dict(target_rms=0,iterations=8,early_tolerance=.99,early_patience=2)
+    stopped=invert(op,np.ones(49),early_stop=True,**kwargs)
+    full=invert(op,np.ones(49),early_stop=False,**kwargs)
+    assert stopped.status=='early_stop'
+    assert stopped.history[-1]['iteration']==2
+    assert full.history[-1]['iteration']>2
+    assert stopped.settings['selected_iteration']==min(stopped.history,key=lambda r:r['normalized_rms'])['iteration']
+
+
 @pytest.mark.skipif(os.environ.get('GEOGARMODEL_GPU_TESTS')!='1',reason='Opt-in CUDA hardware test')
 @pytest.mark.parametrize('mode',['gravity','induced','vector'])
 def test_gpu_cpu_equivalence(mode):

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from itertools import product
 import json
 import numpy as np
-from .compute import check_cancel
+from .compute import check_cancel, ComputationCancelled
 from .inversion_resources import available_memory, resource_plan
 
 
@@ -195,8 +195,8 @@ class FieldOperator:
             if bool(xp.any(norm < 1e-8)):
                 raise ValueError('Суммарное магнитное поле близко к нулю; измените ограничения.')
             predicted, unit = norm-self.field_strength, total/norm[:,None]
-        if fit_offset:
-            predicted = predicted+xp.sum((data-predicted)/sigma**2)/xp.sum(1/sigma**2)
+        self.last_offset = float(xp.sum((data-predicted)/sigma**2)/xp.sum(1/sigma**2)) if fit_offset else 0.
+        predicted = predicted+self.last_offset
         residual = predicted-data
         weighted = residual/(sigma*sigma*len(data))
         gradient = xp.zeros(self.parameter_shape)
@@ -273,7 +273,8 @@ class InversionResult:
 
 def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
            initial=None, damping=.01, smoothness=.1, depth_index=1., step_scale=1.,
-           target_rms=1., fit_offset=False, progress=None, cancel_event=None):
+           target_rms=1., fit_offset=False, progress=None, cancel_event=None,
+           early_stop=False, early_tolerance=.001, early_patience=5):
     """Projected preconditioned gradient with Armijo backtracking, exact ΔT."""
     xp,mesh = operator.xp,operator.mesh
     data = np.asarray(data,dtype=float)
@@ -284,6 +285,8 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
         raise ValueError('Проверьте границы, регуляризацию, индекс глубины [0,4], шаг (0,2] и итерации.')
     if operator.mode=='induced' and lower<0:
         raise ValueError('Для индуцированной восприимчивости задайте нижнюю границу ≥0.')
+    if not np.isfinite(early_tolerance) or not 0 <= early_tolerance < 1 or not isinstance(early_patience, int) or early_patience < 1:
+        raise ValueError('Ранняя остановка: относительный порог [0,1), терпение ≥1 итерации.')
     data,sigma = xp.asarray(data),xp.asarray(sigma)
     m = xp.zeros(operator.parameter_shape) if initial is None else xp.asarray(initial,dtype=float).reshape(operator.parameter_shape).copy()
     if not bool(xp.isfinite(m).all()):
@@ -306,47 +309,69 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
         return val+rv,grad+rg,pred,val,rv
     check_cancel(cancel_event)
     value,gradient,pred,dv,rv = objective(m)
-    for iteration in range(iterations+1):
-        check_cancel(cancel_event)
-        row = dict(iteration=iteration,objective=float(value),data_objective=float(dv),
-                   regularization=float(rv),rmse=float(xp.sqrt(xp.mean((pred-data)**2))),
-                   normalized_rms=float(xp.sqrt(2*dv)))
-        history.append(row)
-        if progress:
-            progress(dict(row))
-        if row['normalized_rms']<=target_rms:
-            status='target_rms'; break
-        if iteration==iterations:
-            break
-        direction_ = -weights*gradient
-        # Estimate first step in model units; backtracking always checks the objective.
-        if iteration==0:
-            step = step_scale*(upper-lower)*.05/max(float(xp.max(xp.abs(direction_))),1e-30)
-        accepted=False
-        for _ in range(40):
+    best = None
+    stale = 0
+    offset = operator.last_offset
+    try:
+        for iteration in range(iterations+1):
+            row = dict(iteration=iteration,objective=float(value),data_objective=float(dv),
+                       regularization=float(rv),rmse=float(xp.sqrt(xp.mean((pred-data)**2))),
+                       normalized_rms=float(xp.sqrt(2*dv)))
+            history.append(row)
+            if best is None or row['normalized_rms'] < best[2]['normalized_rms']:
+                best = (m.copy(), pred.copy(), dict(row), offset)
+            if progress:
+                progress(dict(row))
             check_cancel(cancel_event)
-            candidate=xp.clip(m+step*direction_,lower,upper)
-            candidate[~active] = 0
-            delta=candidate-m
-            if float(xp.max(xp.abs(delta))) < 1e-12*max(1.,upper-lower):
-                status='stationary'; break
-            trial=objective(candidate)
-            if float(trial[0]) <= float(value+1e-4*xp.sum(gradient*delta)):
-                m=candidate
-                value,gradient,pred,dv,rv=trial
-                accepted=True; step*=1.5
+            if row['normalized_rms']<=target_rms:
+                status='target_rms'; break
+            if early_stop and len(history)>1:
+                previous = history[-2]['normalized_rms']
+                improvement = (previous-row['normalized_rms'])/max(abs(previous),1e-30)
+                stale = stale+1 if improvement < early_tolerance else 0
+                if stale >= early_patience:
+                    status='early_stop'; break
+            if iteration==iterations:
                 break
-            step*=.5
-        if not accepted:
-            status='stationary' if status=='stationary' else 'line_search_limit'
-            break
+            direction_ = -weights*gradient
+            if iteration==0:
+                step = step_scale*(upper-lower)*.05/max(float(xp.max(xp.abs(direction_))),1e-30)
+            accepted=False
+            for _ in range(40):
+                check_cancel(cancel_event)
+                candidate=xp.clip(m+step*direction_,lower,upper)
+                candidate[~active] = 0
+                delta=candidate-m
+                if float(xp.max(xp.abs(delta))) < 1e-12*max(1.,upper-lower):
+                    status='stationary'; break
+                trial=objective(candidate)
+                if float(trial[0]) <= float(value+1e-4*xp.sum(gradient*delta)):
+                    m=candidate
+                    value,gradient,pred,dv,rv=trial
+                    offset=operator.last_offset
+                    accepted=True; step*=1.5
+                    break
+                step*=.5
+            if not accepted:
+                status='stationary' if status=='stationary' else 'line_search_limit'
+                break
+    except ComputationCancelled:
+        if best is None:
+            raise
+        status='cancelled'
+    selected_iteration=history[-1]['iteration']
+    if status in ('cancelled','early_stop'):
+        m,pred,selected,offset=best
+        selected_iteration=selected['iteration']
     settings=dict(mode=operator.mode,device='cpu' if xp is np else 'gpu',
                   field_strength_nT=operator.field_strength,field_direction_END=host(operator.f).tolist(),
                   lower=lower,upper=upper,damping=damping,smoothness=smoothness,depth_index=depth_index,
                   step_scale=step_scale,target_rms=target_rms,iterations=iterations,
                   coordinate_order='East North Down, m',density_unit='g/cm3',magnetization_unit='A/m',
                   susceptibility_unit='SI',magnetic_anomaly='exact total field magnitude',
-                  fit_offset=bool(fit_offset),constant_offset=float(xp.mean(pred-operator.predict(m))),
+                  fit_offset=bool(fit_offset),constant_offset=offset,
+                  early_stop=bool(early_stop),early_tolerance=early_tolerance,early_patience=early_patience,
+                  selected_iteration=selected_iteration,best_criterion='minimum normalized RMS among completed iterates',
                   resources=operator.resources,
                   sigma=host(sigma).tolist())
     return InversionResult(mesh,host(m),operator.observations.copy(),host(data),host(pred),history,settings,status)
