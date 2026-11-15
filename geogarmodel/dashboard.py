@@ -29,7 +29,7 @@ def plot_widget(title, xlabel="", ylabel="", local_coordinates=False):
     for axis in ("left", "bottom"):
         widget.getAxis(axis).setPen("#52647c")
         widget.getAxis(axis).setTextPen("#a9bbd3")
-    widget.setMinimumSize(220, 180)
+    widget.setMinimumSize(200, 140)
     return widget
 
 
@@ -56,7 +56,7 @@ class TrainingDashboard(QWidget):
         for name in ("CV RMSE", "RMSE", "MAE", "R²"):
             card = QLabel(f"{name}\n—")
             card.setObjectName("metricCard")
-            card.setMinimumHeight(65)
+            card.setMinimumHeight(54)
             metrics.addWidget(card)
             self.metric_labels[name] = card
         layout.addLayout(metrics)
@@ -85,22 +85,24 @@ class TrainingDashboard(QWidget):
         opt_layout.addWidget(self.trials_table, 1)
         self.tabs.addTab(optimization, "Оптимизация")
         diagnostics = QWidget()
-        grid = QGridLayout(diagnostics)
+        grid = QVBoxLayout(diagnostics)
+        diagnostic_pages=QTabWidget(); grid.addWidget(diagnostic_pages)
         self.crossplot = plot_widget("Прогноз / наблюдения", "Наблюдения", "Прогноз")
         self.histogram = plot_widget("Распределение невязок", "Прогноз − наблюдения", "Число точек")
         self.residual_plot = plot_widget("Смещение прогноза", "Наблюдения", "Прогноз − наблюдения")
         self.loss_plot = plot_widget("Обучение итоговой сети", "Эпоха", "MSE · нормированная цель")
-        for n, widget in enumerate((self.crossplot, self.histogram, self.residual_plot, self.loss_plot)):
-            grid.addWidget(widget, n // 2, n % 2)
+        for title,widget in zip(('Прогноз','Невязки','Смещение','Обучение'),(self.crossplot,self.histogram,self.residual_plot,self.loss_plot)):
+            diagnostic_pages.addTab(widget,title)
         self.tabs.addTab(diagnostics, "Диагностика")
         maps = QWidget()
-        map_layout = QGridLayout(maps)
+        map_layout = QVBoxLayout(maps)
+        map_pages=QTabWidget(); map_layout.addWidget(map_pages)
         self.map_plots = []
         for n, title in enumerate(("Наблюдения · контроль", "Прогноз · контроль", "Невязка: прогноз − наблюдения", "Абсолютная ошибка")):
             widget = plot_widget(title, "Восток, м", "Север, м", local_coordinates=True)
             widget.setAspectLocked(True)
             self.map_plots.append(widget)
-            map_layout.addWidget(widget, n // 2, n % 2)
+            map_pages.addTab(widget,('Наблюдения','Прогноз','Невязка','Модуль невязки')[n])
         self.tabs.addTab(maps, "Карты контроля")
         parameters = QWidget()
         parameter_layout = QVBoxLayout(parameters)

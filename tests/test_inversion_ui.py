@@ -196,7 +196,7 @@ def test_running_job_keeps_navigation_but_freezes_inputs(monkeypatch):
         assert tab.nx.value()==value
         assert not tab.east.isEnabled() and not tab.mode.isEnabled()
         assert not tab.initial_panel.source.isEnabled()
-        assert all(not b.isEnabled() for b in tab.initial_panel.findChildren(QPushButton))
+        assert all(not b.isEnabled() for b in tab.initial_panel.findChildren(QPushButton) if not b.property('workflowNavigation'))
         assert not tab.run_button.isEnabled() and tab.stop.isEnabled()
         assert not tab.cache.isEnabled()  # Automatic memory policy remains disabled after unlock too.
         tab.workflow.setCurrentIndex(0)

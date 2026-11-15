@@ -1,6 +1,6 @@
 """VTK scene with cell thresholding, slices, volume and isosurfaces; lazy imports."""
 import numpy as np
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QDoubleSpinBox, QLabel, QSlider, QSpinBox, QPushButton, QDialog, QCheckBox
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QDoubleSpinBox, QLabel, QSlider, QSpinBox, QPushButton, QDialog, QCheckBox, QScrollArea, QGroupBox, QFormLayout
 from PyQt5.QtCore import Qt
 
 
@@ -98,6 +98,47 @@ class ModelView(QWidget):
         self.display_grid=None
         for w in (self.kind,self.component): w.currentTextChanged.connect(self.refresh_if_ready)
         self.threshold.valueChanged.connect(self.refresh_if_ready)
+        # All display controls remain live, but no longer compete with the 3D canvas.
+        self.view_settings=QDialog(self); self.view_settings.setWindowTitle('Настроить 3D-вид')
+        self.view_settings.resize(440,650)
+        outer=QVBoxLayout(self.view_settings); scroll=QScrollArea(); scroll.setWidgetResizable(True)
+        body=QWidget(); settings_rows=QVBoxLayout(body); scroll.setWidget(body); outer.addWidget(scroll)
+        controls=[self.component,self.threshold,*self.slices,*self.axis_scales,self.reset_scale,
+            self.axis_font,self.axis_unit,self.camera_view,self.fit,self.palette,self.reverse_palette,
+            self.color_range,self.color_min,self.color_max,self.apply_colors,self.color_note,self.info]
+        for w in controls: w.setParent(body)
+        view_row.removeWidget(self.expand); self.expand.setParent(self)
+        # Dispose only the old layout containers, never the connected input widgets.
+        while layout.count():
+            item=layout.takeAt(0)
+            sub=item.layout()
+            if sub:
+                while sub.count():
+                    child=sub.takeAt(0).widget()
+                    if child and child not in controls and child not in (self.kind,self.expand): child.hide(); child.deleteLater()
+            elif item.widget() and item.widget() not in controls: item.widget().setParent(None)
+        toolbar=QHBoxLayout(); toolbar.addWidget(self.kind,1)
+        self.configure_view=QPushButton('Настроить вид…'); toolbar.addWidget(self.configure_view); toolbar.addWidget(self.expand)
+        self.configure_view.clicked.connect(self.show_view_settings)
+        layout.addLayout(toolbar)
+        layout.setAlignment(Qt.AlignTop)
+        for title,fields in [
+            ('Отображение',[('Компонента',self.component),('Порог вокселей',self.threshold)]),
+            ('Сечения',[('East',self.slices[0]),('North',self.slices[1]),('Up',self.slices[2])]),
+            ('Пропорции модели',[('Растянуть X',self.axis_scales[0]),('Растянуть Y',self.axis_scales[1]),('Растянуть Z',self.axis_scales[2]),('',self.reset_scale)]),
+            ('Камера и оси',[('Ракурс',self.camera_view),('Единицы',self.axis_unit),('Размер подписей',self.axis_font),('',self.fit)]),
+            ('Цвета',[('Палитра',self.palette),('',self.reverse_palette),('Диапазон',self.color_range),('Минимум',self.color_min),('Максимум',self.color_max),('',self.apply_colors),('',self.color_note)]),
+            ('Координаты и управление',[('',self.info)])]:
+            group=QGroupBox(title); form=QFormLayout(group)
+            form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+            for label,widget in fields:
+                if label: form.addRow(label,widget)
+                else: form.addRow(widget)
+            settings_rows.addWidget(group)
+        done=QPushButton('Готово'); done.clicked.connect(self.view_settings.close); outer.addWidget(done)
+
+    def show_view_settings(self):
+        self.view_settings.show(); self.view_settings.raise_(); self.view_settings.activateWindow()
 
     def rescale(self):
         self._fit_pending=True
@@ -201,8 +242,8 @@ class ModelView(QWidget):
         if self.color_range.currentIndex()!=2:
             self.color_min.setValue(clim[0]); self.color_max.setValue(clim[1])
         options=dict(scalars='property',cmap=cmap,clim=clim,scalar_bar_args={
-            'title':unit,'color':'#f0f5ff','title_font_size':18,'label_font_size':16,
-            'n_labels':4,'fmt':'%.3g','position_x':.88,'position_y':.18,'width':.07,'height':.65,'vertical':True})
+            'title':unit,'color':'#f0f5ff','title_font_size':14,'label_font_size':12,
+            'n_labels':4,'fmt':'%.3g','position_x':.80,'position_y':.18,'width':.05,'height':.65,'vertical':True})
         kind=self.kind.currentIndex()
         if kind==0:
             chosen=grid.extract_cells(np.flatnonzero(np.abs(values)>=amplitude*self.threshold.value()/100))
@@ -247,6 +288,7 @@ class ModelView(QWidget):
         p.render()
 
     def shutdown(self):
+        self.view_settings.close()
         if self._expanded_dialog is not None:
             self._expanded_dialog.close()
         if self.plotter is not None:

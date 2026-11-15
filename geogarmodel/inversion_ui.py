@@ -22,6 +22,7 @@ from .theme import style_figure
 from .inversion_workflow_ui import arrange_workflow
 from .inversion_export import field_table, export_zmap, export_ubc
 from .inversion_progress import duration
+from .ui_layout import Disclosure,SummaryLabel,details,form_details,quiet_button,prepare_forms
 
 
 class InversionWorker(QThread):
@@ -103,6 +104,7 @@ class InversionTab(QWidget):
         for name,w in [('Итерации',self.iterations),('Глубинный индекс',self.depth_index),('L2 малость',self.damping),('Гладкость',self.smooth),('Масштаб первого шага',self.step),('Целевая RMS / σ',self.target)]: sf.addRow(name,w)
         sf.addRow(self.offset); panel.addWidget(solver)
         self.early_stop=QCheckBox('Ранняя остановка по слабому улучшению RMS/σ')
+        self.early_stop.setToolTip(self.early_stop.text()); self.early_stop.setText('Ранняя остановка')
         self.early_tolerance=self.number(0,99,.1,4)
         self.early_patience=self.integer(1,1000,5)
         sf.addRow(self.early_stop)
@@ -122,7 +124,13 @@ class InversionTab(QWidget):
         for f in forms:
             f.setRowWrapPolicy(QFormLayout.WrapLongRows)
             f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        details(panel,self.hint,'О выбранном режиме')
+        form_details(sf,[self.depth_index,self.damping,self.smooth,self.step,self.offset],'Регуляризация и подбор шага')
+        form_details(sf,[self.early_tolerance,self.early_patience],'Параметры ранней остановки')
+        form_details(cf,[self.gpu,self.memory_policy,self.cache,self.memory_info],'Устройство и память: подробнее')
         self.workflow=arrange_workflow(panel,self.initial_panel,mesh_group,settings,self.magnetic_group,solver,compute)
+        prepare_forms(left)
+        for button in left.findChildren(QPushButton): quiet_button(button)
         for label in left.findChildren(QLabel): label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         for combo in left.findChildren(QComboBox):
             combo.setMinimumContentsLength(10); combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -134,10 +142,15 @@ class InversionTab(QWidget):
         self.progress.setFormat('%v / %m итераций (%p%)')
         controls.setMinimumWidth(400); controls.setMaximumWidth(540); splitter.addWidget(controls)
         right=QWidget(); rl=QVBoxLayout(right)
-        self.status=QLabel('Прямоугольные призмы · прямая задача · решение обратной задачи с ограничениями'); self.status.setWordWrap(True); rl.addWidget(self.status)
+        self.status=SummaryLabel('Загрузите поле, задайте модель и запустите расчёт.'); rl.addWidget(self.status)
         self.phase_label=QLabel('Этап расчёта появится после запуска'); self.phase_label.setWordWrap(True); rl.addWidget(self.phase_label)
         self.phase_progress=QProgressBar(); self.phase_progress.setRange(0,100); rl.addWidget(self.phase_progress)
         self.timing_label=QLabel('Время расчёта: —'); self.timing_label.setWordWrap(True); rl.addWidget(self.timing_label)
+        timing_details=QWidget(); timing_rows=QVBoxLayout(timing_details)
+        rl.removeWidget(self.phase_label); rl.removeWidget(self.timing_label)
+        timing_rows.addWidget(self.phase_label); timing_rows.addWidget(self.timing_label)
+        self.runtime_details=Disclosure('Время и этапы расчёта',timing_details)
+        rl.addWidget(self.runtime_details)
         self._run_started=None; self._iteration_started=None; self._iteration_number=0; self._iteration_limit=0
         self.clock_timer=QTimer(self); self.clock_timer.setInterval(250); self.clock_timer.timeout.connect(self.update_clock)
         self.tabs=QTabWidget(); rl.addWidget(self.tabs,1)
@@ -150,12 +163,15 @@ class InversionTab(QWidget):
         self.timing_curve=timing_plot.plot(pen=pg.mkPen('#38bdf8',width=2),symbol='o',symbolSize=5)
         self.tabs.addTab(timing_plot,'Время итераций')
         self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(100); self.log.setMaximumBlockCount(1000); rl.addWidget(self.log)
+        details(rl,self.log,'Журнал расчёта')
         actions=QHBoxLayout(); rl.addLayout(actions)
         self.button('Открыть / обновить 3D',self.open_3d,actions)
-        self.button('Модель NPZ…',self.save,actions)
-        self.button('UBC…',self.save_ubc,actions)
-        self.button('Поля CSV / ZMAP…',self.save_fields,actions)
-        self.button('VTK…',self.save_vtk,actions)
+        from PyQt5.QtWidgets import QMenu
+        export_button=QPushButton('Сохранить результат…'); export_menu=QMenu(export_button)
+        for title,callback in [('Модель и отчёт · NPZ',self.save),('Модель · UBC',self.save_ubc),
+                               ('Поля · CSV / ZMAP',self.save_fields),('Модель · VTK',self.save_vtk)]:
+            export_menu.addAction(title,lambda checked=False,fn=callback:self.workbench.guard(fn))
+        export_button.setMenu(export_menu); actions.addWidget(export_button)
         splitter.addWidget(right); splitter.setSizes([440,1000]); splitter.setStretchFactor(1,1)
         self.mode.currentIndexChanged.connect(self.mode_changed); self.mode_changed()
         self.history=[]

@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, QVB
     QHBoxLayout, QFormLayout, QPushButton, QComboBox, QLineEdit, QCheckBox, QLabel,
     QFileDialog, QMessageBox, QListWidget, QSplitter, QPlainTextEdit, QDoubleSpinBox,
     QSpinBox, QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem,
-    QScrollArea, QGroupBox, QProgressBar, QGridLayout, QSizePolicy)
+    QScrollArea, QGroupBox, QProgressBar, QGridLayout, QSizePolicy, QBoxLayout)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from .grids import load_grid, save_grid, points_to_grid
@@ -24,6 +24,7 @@ from .compute import GPU_MODELS, ComputationCancelled
 from .optimization import default_space
 from .parameter_files import validate_parameters, read_parameters, best_snapshot
 from .window_theme import apply_window_theme
+from .ui_layout import Disclosure,details,form_details,workflow_sections,quiet_button,prepare_forms
 
 
 class Worker(QThread):
@@ -67,12 +68,12 @@ class MainWindow(QMainWindow):
         logo = QLabel("G")
         logo.setObjectName("logo")
         logo.setAlignment(Qt.AlignCenter)
-        logo.setFixedSize(46, 46)
+        logo.setFixedSize(36, 36)
         header_layout.addWidget(logo)
         brand_layout = QVBoxLayout()
         brand = QLabel("GeoGarModel")
         brand.setObjectName("brand")
-        subtitle = QLabel("Геофизическая интерпретация · горизонты · потенциальные поля")
+        subtitle = QLabel("Данные → настройки → результат")
         subtitle.setObjectName("muted")
         brand_layout.addWidget(brand)
         brand_layout.addWidget(subtitle)
@@ -130,23 +131,29 @@ class MainWindow(QMainWindow):
     def make_maps(self):
         tab = QWidget()
         layout = QHBoxLayout(tab)
-        self.figure = Figure()
+        self.figure = Figure(facecolor='#101c2f')
         self.canvas = FigureCanvasQTAgg(self.figure)
         plot = QWidget()
         plot_layout = QVBoxLayout(plot)
         plot_layout.addWidget(NavigationToolbar2QT(self.canvas, self))
         plot_layout.addWidget(self.canvas)
         controls = QWidget()
-        panel = QVBoxLayout(controls)
+        root_panel = QVBoxLayout(controls)
+        data_group=QGroupBox('Открыть карту'); panel=QVBoxLayout(data_group); root_panel.addWidget(data_group)
         self.button("Открыть ZMAP / DAT / NPZ", self.open_grid, panel)
         self.button("Таблица XYZ → регулярная сетка", self.open_xyz, panel)
         self.layers = QListWidget()
+        self.layers.setMinimumHeight(100); self.layers.setMaximumHeight(180)
         self.layers.currentRowChanged.connect(lambda _: self.guard(self.redraw))
         panel.addWidget(self.layers)
         self.button("CRS и единицы карты…", self.metadata, panel)
+        overlay_group=QWidget(); overlay_layout=QVBoxLayout(overlay_group)
+        main_data_panel=panel; panel=overlay_layout
         self.button("Добавить SHP / GeoJSON", self.open_vector, panel)
         self.button("Убрать векторные наложения", self.clear_overlays, panel)
         self.button("Обрезать по текущему виду карты", self.crop_view, panel)
+        main_data_panel.addWidget(Disclosure('Контуры и обрезка',overlay_group))
+        style_group=QGroupBox('Оформление карты'); panel=QVBoxLayout(style_group); root_panel.addWidget(style_group)
         form = QFormLayout()
         panel.addLayout(form)
         self.palette = QComboBox()
@@ -161,6 +168,8 @@ class MainWindow(QMainWindow):
                               ("", self.contours), ("", self.shade)]:
             form.addRow(label, widget)
         self.button("Применить оформление", self.redraw, panel)
+        transform_group=QGroupBox('Рассчитать трансформанту'); panel=QVBoxLayout(transform_group); root_panel.addWidget(transform_group)
+        form=QFormLayout(); panel.addLayout(form)
         self.operation = QComboBox()
         for key, text in TRANSFORMS.items():
             self.operation.addItem(text, key)
@@ -175,18 +184,27 @@ class MainWindow(QMainWindow):
         form.addRow("Длина волны фильтра, м", self.wave)
         form.addRow("Степень тренда", self.degree)
         self.transform_button = self.button("Рассчитать → новый слой", self.apply_transform, panel)
+        self.transform_button.setObjectName('primary')
+        export_group=QGroupBox('Сохранить результат'); panel=QVBoxLayout(export_group); root_panel.addWidget(export_group)
         self.button("Сохранить сетку NPZ", self.export_grid, panel)
         self.button("Экспорт XYZ CSV", self.export_xyz, panel)
+        self.map_workflow=workflow_sections(root_panel,[('1 · Карта',[data_group]),('2 · Расчёт',[transform_group]),
+            ('3 · Вид',[style_group]),('4 · Файл',[export_group])])
+        for group in (style_group,transform_group):
+            for i in range(group.layout().count()):
+                sub=group.layout().itemAt(i).layout()
+                if isinstance(sub,QFormLayout): sub.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        for button in controls.findChildren(QPushButton): quiet_button(button)
         controls.setMinimumWidth(320)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(controls)
-        scroll.setMinimumWidth(350)
-        scroll.setMaximumWidth(470)
+        scroll.setMinimumWidth(340)
+        scroll.setMaximumWidth(440)
         splitter = QSplitter()
-        splitter.addWidget(plot)
         splitter.addWidget(scroll)
-        splitter.setStretchFactor(0, 1)
+        splitter.addWidget(plot)
+        splitter.setStretchFactor(1, 1); splitter.setSizes([380,1000])
         layout.addWidget(splitter)
         self.tabs.addTab(tab, "01  ·  Карты и трансформанты")
 
@@ -317,13 +335,18 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda checked=False, fn=function: self.guard(fn))
             export_layout.addWidget(button, n // 2, n % 2)
         panel.addWidget(export)
+        self.training_workflow=workflow_sections(panel,[('1 · Данные',[data_group]),('2 · Модель',[model_group]),
+            ('3 · Подбор',[optimization]),('4 · Файл',[export])])
+        parameter_actions.setDirection(QBoxLayout.TopToBottom)
+        form_details(model_form,[self.device_hint,self.seed,self.parameters],'Дополнительные параметры')
+        form_details(opt_form,[self.timeout,self.search],'Диапазоны и лимит времени')
         panel.addStretch()
         for combo in controls.findChildren(QComboBox):
             combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(10)
             combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         for item_form in (form, model_form, opt_form):
-            item_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            item_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
             item_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -353,6 +376,9 @@ class MainWindow(QMainWindow):
         self.log.setMaximumHeight(110)
         self.log.setPlaceholderText("Журнал расчётов и лучшие параметры…")
         right_layout.addWidget(self.log)
+        details(right_layout,self.log,'Журнал расчёта')
+        prepare_forms(controls)
+        for button in controls.findChildren(QPushButton): quiet_button(button)
         splitter = QSplitter()
         splitter.addWidget(left)
         splitter.addWidget(right)

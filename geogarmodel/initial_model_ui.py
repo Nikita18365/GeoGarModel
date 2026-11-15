@@ -4,6 +4,7 @@ import numpy as np
 from PyQt5.QtWidgets import (QGroupBox,QVBoxLayout,QComboBox,QLabel,QFileDialog,QInputDialog,QDialog,QDialogButtonBox)
 from .voxel import VoxelModel,load_voxel,combine_components,edit,resample,clip_surface
 from .grids import load_grid
+from .ui_layout import Disclosure
 
 
 class InitialModelPanel(QGroupBox):
@@ -15,6 +16,10 @@ class InitialModelPanel(QGroupBox):
         self.info=QLabel('Без файла: новая сетка заполняется полем «Начальное значение».'); self.info.setWordWrap(True); layout.addWidget(self.info)
         for label,callback in [('Загрузить воксель / UBC / VTK / центры…',self.load),('Загрузить отдельно JE, JN, JD…',self.components),('Использовать результат последнего моделирования',self.previous),('Предпросмотр модели и поля',self.preview),('Показать начальную модель в 3D',self.preview3d),('Редактор вокселя…',self.open_editor)]:
             tab.button(label,callback,layout)
+        extra=QGroupBox(''); extra_rows=QVBoxLayout(extra)
+        for i in (4,3):
+            widget=layout.takeAt(i).widget(); extra_rows.insertWidget(0,widget)
+        layout.addWidget(Disclosure('Компоненты и предыдущий результат',extra))
 
     def open_editor(self):
         self.current()
