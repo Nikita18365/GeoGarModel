@@ -29,6 +29,10 @@ def test_inversion_tab_background_workflow(mode,monkeypatch):
     assert tab.result.settings['resources']['policy']=='balanced'
     assert 'Свободно при старте' in tab.memory_info.text()
     assert len(tab.result.predicted)==225
+    assert not tab.clock_timer.isActive()
+    assert 'Общее время расчёта' in tab.timing_label.text()
+    assert tab.result.settings['run_elapsed_seconds']>=tab.result.settings['elapsed_seconds']
+    assert len(tab.timing_curve.xData)==len(tab.result.history)
     assert len(tab.figure.axes)==11
     assert tab.result.history[-1]['rmse']<tab.result.history[0]['rmse']
     tab.initial_panel.previous()
@@ -242,6 +246,7 @@ def test_stop_dialog_exports_then_displays_model(monkeypatch,tmp_path):
     assert not errors,errors
     assert len(dialogs)==1 and selected.exists()
     assert tab.result.status=='cancelled'
+    assert not tab.clock_timer.isActive()
     assert tab.scene.result is tab.result
     assert len(tab.figure.axes)==11
     assert tab.tabs.currentIndex()==1

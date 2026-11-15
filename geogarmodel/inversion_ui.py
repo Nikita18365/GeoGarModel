@@ -4,7 +4,8 @@ import json
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from time import perf_counter
 from PyQt5.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QGroupBox,
     QComboBox,QDoubleSpinBox,QSpinBox,QPushButton,QLabel,QScrollArea,QSplitter,
     QTabWidget,QFileDialog,QProgressBar,QPlainTextEdit,QCheckBox,QAbstractSpinBox,QLineEdit,QAbstractButton,QDialog)
@@ -20,6 +21,7 @@ from .initial_model_ui import InitialModelPanel
 from .theme import style_figure
 from .inversion_workflow_ui import arrange_workflow
 from .inversion_export import field_table, export_zmap, export_ubc
+from .inversion_progress import duration
 
 
 class InversionWorker(QThread):
@@ -129,15 +131,24 @@ class InversionTab(QWidget):
         self.run_button=self.button('Запустить 3D-моделирование',self.run,cl); self.run_button.setObjectName('primary')
         self.stop=self.button('Остановить',self.cancel,cl); self.stop.setEnabled(False)
         self.progress=QProgressBar(); cl.addWidget(self.progress)
+        self.progress.setFormat('%v / %m итераций (%p%)')
         controls.setMinimumWidth(400); controls.setMaximumWidth(540); splitter.addWidget(controls)
         right=QWidget(); rl=QVBoxLayout(right)
         self.status=QLabel('Прямоугольные призмы · прямая задача · решение обратной задачи с ограничениями'); self.status.setWordWrap(True); rl.addWidget(self.status)
+        self.phase_label=QLabel('Этап расчёта появится после запуска'); self.phase_label.setWordWrap(True); rl.addWidget(self.phase_label)
+        self.phase_progress=QProgressBar(); self.phase_progress.setRange(0,100); rl.addWidget(self.phase_progress)
+        self.timing_label=QLabel('Время расчёта: —'); self.timing_label.setWordWrap(True); rl.addWidget(self.timing_label)
+        self._run_started=None; self._iteration_started=None; self._iteration_number=0; self._iteration_limit=0
+        self.clock_timer=QTimer(self); self.clock_timer.setInterval(250); self.clock_timer.timeout.connect(self.update_clock)
         self.tabs=QTabWidget(); rl.addWidget(self.tabs,1)
         self.scene=ModelView(); self.tabs.addTab(self.scene,'3D-модель')
         self.figure=Figure(); self.canvas=FigureCanvasQTAgg(self.figure)
         plot=QWidget(); pl=QVBoxLayout(plot); pl.addWidget(NavigationToolbar2QT(self.canvas,self)); pl.addWidget(self.canvas)
         self.tabs.addTab(plot,'Срезы и поля')
         self.convergence=pg.PlotWidget(background='#101c2f'); self.convergence.setLabel('left','RMSE'); self.convergence.setLabel('bottom','Итерация'); self.curve=self.convergence.plot(pen=pg.mkPen('#2dd4bf',width=2)); self.tabs.addTab(self.convergence,'Сходимость')
+        timing_plot=pg.PlotWidget(background='#101c2f'); timing_plot.setLabel('left','Время','s'); timing_plot.setLabel('bottom','Итерация')
+        self.timing_curve=timing_plot.plot(pen=pg.mkPen('#38bdf8',width=2),symbol='o',symbolSize=5)
+        self.tabs.addTab(timing_plot,'Время итераций')
         self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(100); self.log.setMaximumBlockCount(1000); rl.addWidget(self.log)
         actions=QHBoxLayout(); rl.addLayout(actions)
         self.button('Открыть / обновить 3D',self.open_3d,actions)
@@ -306,13 +317,20 @@ class InversionTab(QWidget):
         settings=dict(sigma=sigma,iterations=self.iterations.value(),lower=self.lower.value(),upper=self.upper.value(),initial=initial_model.values,damping=self.damping.value(),smoothness=self.smooth.value(),depth_index=self.depth_index.value(),step_scale=self.step.value(),target_rms=self.target.value(),fit_offset=self.offset.isChecked())
         settings.update(early_stop=self.early_stop.isChecked(),early_tolerance=self.early_tolerance.value()/100,early_patience=self.early_patience.value())
         def compute(progress,cancel):
+            started=perf_counter()
             op=FieldOperator(mesh,observations,mode,**operator_args,cancel_event=cancel)
             progress(dict(event='resources',**op.resources))
-            result=invert(op,data,**settings,progress=progress,cancel_event=cancel)
+            result=invert(op,data,**settings,progress=progress,cancel_event=cancel,work_progress=progress)
+            result.settings['run_elapsed_seconds']=perf_counter()-started
             result.settings.update(crs=crs,gpu_id=operator_args['gpu_id'])
             result.settings.update(initial_model_history=initial_model.history,observation_stride=observation_stride)
             return result
         self.result=None; self.history=[]; self.curve.setData([],[]); self.log.clear()
+        self.timing_curve.setData([],[])
+        self._run_started=perf_counter(); self._iteration_started=self._run_started
+        self._iteration_number=0; self._iteration_limit=settings['iterations']
+        self.phase_label.setText('Подготовка устройства и оператора…'); self.phase_progress.setRange(0,0)
+        self.clock_timer.start(); self.update_clock()
         self.progress.setRange(0,settings['iterations']); self.progress.setValue(0)
         self.status.setText(f'{len(data):,} наблюдений × {mesh.active.sum():,} активных ячеек · {operator_args["device"].upper()} · определение бюджета памяти…')
         self.worker=InversionWorker(compute,self)
@@ -323,6 +341,22 @@ class InversionTab(QWidget):
         self.stop.setEnabled(True); self.tabs.setCurrentIndex(2); self.worker.start()
 
     def update_progress(self,row):
+        if row.get('event')=='work':
+            self._iteration_number=row['iteration']
+            self._iteration_started=perf_counter()-row['iteration_seconds']
+            stage={'field':'Рассчитанное поле','gradient':'Градиент','regularization':'Регуляризация'}[row['stage']]
+            iteration='Начальная оценка (0)' if row['iteration']==0 else f'Итерация {row["iteration"]} / {self._iteration_limit}'
+            trial=f' · пробный шаг {row["trial"]}' if row['trial'] else ''
+            blocks=f' · блоки {row["completed"]:,} / {row["total"]:,}' if row['total'] else ''
+            estimate=f' · осталось на этапе ≈ {duration(row["stage_remaining_seconds"])}' if row['total'] else ''
+            self.phase_label.setText(f'{iteration}{trial} · {stage}{blocks}\nЭтап: {duration(row["stage_seconds"])}{estimate}')
+            if row['total']:
+                self.phase_progress.setRange(0,1000)
+                self.phase_progress.setValue(round(1000*row['completed']/row['total']))
+                self.phase_progress.setFormat('%p% текущего этапа')
+            else: self.phase_progress.setRange(0,0)
+            self.update_clock()
+            return
         if row.get('event')=='resources':
             text=(f'Свободно при старте: {row["free_mib"]:,} MiB; кэш ≤{row["cache_mib"]:,} MiB; '
                   f'полный оператор ≤{row["operator_mib"]:,} MiB; пакет до '
@@ -331,11 +365,49 @@ class InversionTab(QWidget):
             self.status.setText(text+' Расчёт начального поля и градиента…')
             return
         self.history.append(row); self.curve.setData([r['iteration'] for r in self.history],[r['rmse'] for r in self.history])
+        self.update_timing_plot()
         self.progress.setValue(row['iteration'])
         self.status.setText(f'Итерация {row["iteration"]}: RMSE={row["rmse"]:.6g}; RMS/σ={row["normalized_rms"]:.4g}')
-        self.log.appendPlainText(f"{row['iteration']}: RMSE={row['rmse']:.6g}; RMS/σ={row['normalized_rms']:.4g}; J={row['objective']:.6g}")
-    def failure(self,message): self.status.setText(message); self.log.appendPlainText(message)
+        self.log.appendPlainText(f"{row['iteration']}: RMSE={row['rmse']:.6g}; RMS/σ={row['normalized_rms']:.4g}; J={row['objective']:.6g}; время={row.get('iteration_seconds',0):.2f} с; всего={row.get('elapsed_seconds',0):.2f} с")
+        self.update_clock()
+
+    def update_timing_plot(self):
+        rows=[r for r in self.history if 'iteration_seconds' in r]
+        self.timing_curve.setData([r['iteration'] for r in rows],[r['iteration_seconds'] for r in rows])
+
+    def update_clock(self):
+        if self._run_started is None: return
+        now=perf_counter(); elapsed=now-self._run_started
+        current=now-self._iteration_started if self._iteration_started is not None else 0
+        measured=[r['iteration_seconds'] for r in self.history if r['iteration']>0 and 'iteration_seconds' in r]
+        completed=self.history[-1]['iteration'] if self.history else 0
+        remaining=None
+        iteration_remaining=None
+        if measured:
+            mean=float(np.mean(measured[-5:])); remaining=max(0,self._iteration_limit-completed)*mean
+            if self._iteration_number>completed:
+                remaining=max(0,remaining-current)
+                iteration_remaining=max(0,mean-current) if current<=mean else None
+                if current>mean: remaining=None
+        last=self.history[-1].get('iteration_seconds') if self.history else None
+        self.timing_label.setText(f'Прошло: {duration(elapsed)} · текущая итерация: {duration(current)} · последняя: {duration(last)}\n'
+            f'Остаток итерации ≈ {duration(iteration_remaining)}\n'
+            f'До лимита итераций ≈ {duration(remaining)} · полное время ≈ {duration(elapsed+remaining) if remaining is not None else "ожидаются замеры"}')
+
+    def stop_timing(self,elapsed=None):
+        if self._run_started is None: return
+        elapsed=perf_counter()-self._run_started if elapsed is None else elapsed
+        last=self.history[-1].get('iteration_seconds') if self.history else None
+        self.timing_label.setText(f'Общее время расчёта: {duration(elapsed)} ({elapsed:.2f} с) · последняя завершённая итерация: {duration(last)}')
+        self.clock_timer.stop(); self._run_started=None; self._iteration_started=None
+        self.phase_progress.setRange(0,100); self.phase_progress.setValue(0)
+        self.phase_progress.setFormat('Расчёт завершён')
+
+    def failure(self,message):
+        self.stop_timing(); self.phase_label.setText(message)
+        self.status.setText(message); self.log.appendPlainText(message)
     def job_finished(self):
+        self.stop_timing()
         self.worker.function=None; self.worker.deleteLater(); self.worker=None
         self.unlock_inputs()
         self.run_button.setEnabled(True)
@@ -355,9 +427,16 @@ class InversionTab(QWidget):
             self.status.setText('Остановка… Возвращаем лучшую завершённую модель и соответствующее поле.')
     def finished_result(self,result,offer_export=True):
         self.result=result
+        self.history=list(result.history); self.update_timing_plot()
+        elapsed=result.settings.get('run_elapsed_seconds',result.settings.get('elapsed_seconds'))
+        if self._run_started is not None: self.stop_timing(elapsed)
+        elif elapsed is not None: self.timing_label.setText(f'Общее время сохранённого расчёта: {duration(elapsed)} ({elapsed:.2f} с)')
+        else: self.timing_label.setText('В сохранённом результате нет замеров времени.')
+        self.phase_label.setText('Вычисления завершены. Подготовка результатов…')
         selected=result.settings.get('selected_iteration',result.history[-1]['iteration'])
         row=next(r for r in result.history if r['iteration']==selected)
         reason={'cancelled':'Остановлено пользователем','early_stop':'Ранняя остановка'}.get(result.status,result.status)
+        self.phase_label.setText(f'{reason} · завершено {result.history[-1]["iteration"]} итераций (начальная оценка — 0).')
         self.status.setText(f"{reason} · модель итерации {selected} · RMSE={row['rmse']:.6g} · RMS/σ={row['normalized_rms']:.4g}; {result.settings['device'].upper()}")
         if result.status=='cancelled' and offer_export:
             self.stopped_export_dialog()
