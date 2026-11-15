@@ -7,7 +7,7 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QGroupBox,
     QComboBox,QDoubleSpinBox,QSpinBox,QPushButton,QLabel,QScrollArea,QSplitter,
-    QTabWidget,QFileDialog,QProgressBar,QPlainTextEdit,QCheckBox,QAbstractSpinBox,QLineEdit,QAbstractButton)
+    QTabWidget,QFileDialog,QProgressBar,QPlainTextEdit,QCheckBox,QAbstractSpinBox,QLineEdit,QAbstractButton,QDialog)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg,NavigationToolbar2QT
 from threading import Event
@@ -19,6 +19,7 @@ from .compute import ComputationCancelled
 from .initial_model_ui import InitialModelPanel
 from .theme import style_figure
 from .inversion_workflow_ui import arrange_workflow
+from .inversion_export import field_table, export_zmap, export_ubc
 
 
 class InversionWorker(QThread):
@@ -27,7 +28,7 @@ class InversionWorker(QThread):
         super().__init__(parent); self.function=function; self.cancel=Event()
     def run(self):
         try: self.result.emit(self.function(self.progress.emit,self.cancel))
-        except ComputationCancelled: self.failed.emit('Расчёт остановлен. История итераций сохранена на графике.')
+        except ComputationCancelled: self.failed.emit('Расчёт остановлен до завершения оценки начальной модели. Готовой модели и поля пока нет.')
         except Exception as exc: self.failed.emit(str(exc))
 
 
@@ -99,6 +100,16 @@ class InversionTab(QWidget):
         solver=QGroupBox('06 · Решатель и регуляризация'); sf=QFormLayout(solver)
         for name,w in [('Итерации',self.iterations),('Глубинный индекс',self.depth_index),('L2 малость',self.damping),('Гладкость',self.smooth),('Масштаб первого шага',self.step),('Целевая RMS / σ',self.target)]: sf.addRow(name,w)
         sf.addRow(self.offset); panel.addWidget(solver)
+        self.early_stop=QCheckBox('Ранняя остановка по слабому улучшению RMS/σ')
+        self.early_tolerance=self.number(0,99,.1,4)
+        self.early_patience=self.integer(1,1000,5)
+        sf.addRow(self.early_stop)
+        sf.addRow('Минимальное улучшение, %',self.early_tolerance)
+        sf.addRow('Последовательных итераций',self.early_patience)
+        self.early_tolerance.setEnabled(False); self.early_patience.setEnabled(False)
+        self.early_stop.toggled.connect(self.early_tolerance.setEnabled)
+        self.early_stop.toggled.connect(self.early_patience.setEnabled)
+        self.early_tolerance.setToolTip('Если относительное уменьшение RMS/σ меньше порога несколько итераций подряд, возвращается лучшая завершённая модель.')
         compute=QGroupBox('07 · Вычисления'); cf=QFormLayout(compute)
         cf.addRow('Устройство',self.device); cf.addRow('GPU ID',self.gpu)
         cf.addRow('Режим памяти',self.memory_policy); cf.addRow('Кэш вручную, MiB',self.cache)
@@ -131,7 +142,8 @@ class InversionTab(QWidget):
         actions=QHBoxLayout(); rl.addLayout(actions)
         self.button('Открыть / обновить 3D',self.open_3d,actions)
         self.button('Модель NPZ…',self.save,actions)
-        self.button('Поля CSV…',self.save_fields,actions)
+        self.button('UBC…',self.save_ubc,actions)
+        self.button('Поля CSV / ZMAP…',self.save_fields,actions)
         self.button('VTK…',self.save_vtk,actions)
         splitter.addWidget(right); splitter.setSizes([440,1000]); splitter.setStretchFactor(1,1)
         self.mode.currentIndexChanged.connect(self.mode_changed); self.mode_changed()
@@ -292,6 +304,7 @@ class InversionTab(QWidget):
         if np.any(initial_model.values[mesh.active]<self.lower.value()) or np.any(initial_model.values[mesh.active]>self.upper.value()):
             raise ValueError('Начальные свойства выходят за минимум/максимум. Исправьте границы или явно ограничьте свойства через операции.')
         settings=dict(sigma=sigma,iterations=self.iterations.value(),lower=self.lower.value(),upper=self.upper.value(),initial=initial_model.values,damping=self.damping.value(),smoothness=self.smooth.value(),depth_index=self.depth_index.value(),step_scale=self.step.value(),target_rms=self.target.value(),fit_offset=self.offset.isChecked())
+        settings.update(early_stop=self.early_stop.isChecked(),early_tolerance=self.early_tolerance.value()/100,early_patience=self.early_patience.value())
         def compute(progress,cancel):
             op=FieldOperator(mesh,observations,mode,**operator_args,cancel_event=cancel)
             progress(dict(event='resources',**op.resources))
@@ -337,12 +350,36 @@ class InversionTab(QWidget):
         self.worker.failed.connect(self.failure); self.worker.finished.connect(self.job_finished)
         self.worker.start()
     def cancel(self):
-        if self.worker: self.worker.cancel.set(); self.stop.setEnabled(False)
-    def finished_result(self,result):
+        if self.worker:
+            self.worker.cancel.set(); self.stop.setEnabled(False)
+            self.status.setText('Остановка… Возвращаем лучшую завершённую модель и соответствующее поле.')
+    def finished_result(self,result,offer_export=True):
         self.result=result
-        self.status.setText(f"{result.status} · RMSE={result.history[-1]['rmse']:.6g} · RMS/σ={result.history[-1]['normalized_rms']:.4g}; {result.settings['device'].upper()}")
+        selected=result.settings.get('selected_iteration',result.history[-1]['iteration'])
+        row=next(r for r in result.history if r['iteration']==selected)
+        reason={'cancelled':'Остановлено пользователем','early_stop':'Ранняя остановка'}.get(result.status,result.status)
+        self.status.setText(f"{reason} · модель итерации {selected} · RMSE={row['rmse']:.6g} · RMS/σ={row['normalized_rms']:.4g}; {result.settings['device'].upper()}")
+        if result.status=='cancelled' and offer_export:
+            self.stopped_export_dialog()
         self.workbench.guard(self.draw_results)
+        if result.status in ('cancelled','early_stop'):
+            self.workbench.guard(lambda:self.scene.render(result))
         self.progress.setValue(result.history[-1]['iteration'])
+
+    def stopped_export_dialog(self):
+        dialog=QDialog(self); dialog.setWindowTitle('Инверсия остановлена — сохранить результат')
+        layout=QVBoxLayout(dialog)
+        text=QLabel('Лучшая завершённая модель выбрана по минимальной RMS/σ.\n'
+                    'Можно сохранить несколько форматов. После закрытия окна модель и поля\n'
+                    'останутся в программе; экспорт будет доступен и позднее.\n'
+                    'Автоматического сохранения на диск нет.')
+        text.setWordWrap(True); layout.addWidget(text)
+        for title,callback in [('Модель и полный результат NPZ…',self.save),('Модель UBC…',self.save_ubc),
+                               ('Модель VTK / VTR / VTU…',self.save_vtk),('Рассчитанное поле ZMAP / поля CSV…',self.save_fields)]:
+            button=QPushButton(title); layout.addWidget(button)
+            button.clicked.connect(lambda checked=False,fn=callback:self.workbench.guard(fn))
+        done=QPushButton('Показать модель и поля'); done.clicked.connect(dialog.accept); layout.addWidget(done)
+        dialog.exec_()
 
     def draw_results(self):
         r=self.require_result(); self.figure.clear()
@@ -375,13 +412,20 @@ class InversionTab(QWidget):
             result=InversionResult.load(path)
             self.history=list(result.history)
             self.curve.setData([r['iteration'] for r in self.history],[r['rmse'] for r in self.history])
-            self.finished_result(result)
+            self.finished_result(result,offer_export=False)
     def save(self):
         result=self.require_result(); path,_=QFileDialog.getSaveFileName(self,'3D-модель и отчёт','inversion.npz','NPZ (*.npz)')
         if path: result.save(path if path.lower().endswith('.npz') else path+'.npz')
     def save_fields(self):
-        r=self.require_result(); path,_=QFileDialog.getSaveFileName(self,'Поля и невязки','inversion-fields.csv','CSV (*.csv)')
-        if path: pd.DataFrame(dict(East=r.observations[:,0],North=r.observations[:,1],height=-r.observations[:,2],observed=r.observed,predicted=r.predicted,residual=r.predicted-r.observed)).to_csv(path,index=False,encoding='utf-8-sig')
+        r=self.require_result(); path,kind=QFileDialog.getSaveFileName(self,'Поля и невязки','inversion-fields.csv','CSV (*.csv);;Рассчитанное поле ZMAP (*.zmap)')
+        if path:
+            if Path(path).suffix.lower()=='.zmap' or ('ZMAP' in kind and not Path(path).suffix):
+                export_zmap(r,path if path.lower().endswith('.zmap') else path+'.zmap')
+            else:
+                field_table(r).to_csv(path if path.lower().endswith('.csv') else path+'.csv',index=False,encoding='utf-8-sig')
+    def save_ubc(self):
+        r=self.require_result(); path,_=QFileDialog.getSaveFileName(self,'UBC: mesh, свойства и описание','inversion.msh','UBC mesh (*.msh)')
+        if path: export_ubc(r,path)
     def save_vtk(self):
         r=self.require_result(); grid=vtk_grid(r); ext='.vtu' if grid.__class__.__name__=='UnstructuredGrid' else '.vtr'
         path,_=QFileDialog.getSaveFileName(self,'VTK-модель','inversion'+ext,'VTK (*'+ext+')')

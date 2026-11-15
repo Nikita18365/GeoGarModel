@@ -162,3 +162,45 @@ def test_running_job_keeps_navigation_but_freezes_inputs(monkeypatch):
         assert not tab.cache.isEnabled()
         assert tab.initial_panel.source.isEnabled()
         window.close(); QApplication.processEvents()
+
+
+def test_stop_dialog_exports_then_displays_model(monkeypatch,tmp_path):
+    from PyQt5.QtWidgets import QFileDialog
+    import geogarmodel.inversion_ui as ui
+    errors=[]; dialogs=[]
+    monkeypatch.setattr(QMessageBox,'warning',lambda *a:errors.append(a[-1]))
+    original=ui.invert
+    def cancelled(*args,**kwargs):
+        notify=kwargs['progress']
+        def progress(row):
+            notify(row)
+            if row['iteration']==2: kwargs['cancel_event'].set()
+        kwargs['progress']=progress
+        return original(*args,**kwargs)
+    monkeypatch.setattr(ui,'invert',cancelled)
+    window=MainWindow(); tab=window.inversion; tab.demo(); tab.target.setValue(0)
+    selected=tmp_path/'stopped.npz'
+    monkeypatch.setattr(QFileDialog,'getSaveFileName',lambda *a:(str(selected),'NPZ (*.npz)'))
+    original_dialog=tab.stopped_export_dialog
+    def dialog():
+        def save_and_close():
+            modal=QApplication.activeModalWidget()
+            dialogs.append(modal.windowTitle())
+            next(b for b in modal.findChildren(QPushButton) if b.text().startswith('Модель и полный')).click()
+            next(b for b in modal.findChildren(QPushButton) if b.text()=='Показать модель и поля').click()
+        QTimer.singleShot(0,save_and_close)
+        original_dialog()
+    monkeypatch.setattr(tab,'stopped_export_dialog',dialog)
+    loop=QEventLoop(); timer=QTimer(); timer.setSingleShot(True); timer.timeout.connect(loop.quit)
+    tab.run(); tab.worker.finished.connect(loop.quit); timer.start(30000); loop.exec_()
+    assert tab.worker is None
+    assert not errors,errors
+    assert len(dialogs)==1 and selected.exists()
+    assert tab.result.status=='cancelled'
+    assert tab.scene.result is tab.result
+    assert len(tab.figure.axes)==11
+    assert tab.tabs.currentIndex()==1
+    assert not tab.early_tolerance.isEnabled()
+    tab.early_stop.setChecked(True)
+    assert tab.early_tolerance.isEnabled() and tab.early_patience.isEnabled()
+    window.close(); QApplication.processEvents()
