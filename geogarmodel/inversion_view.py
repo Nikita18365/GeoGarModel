@@ -1,6 +1,6 @@
 """VTK scene with cell thresholding, slices, volume and isosurfaces; lazy imports."""
 import numpy as np
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QDoubleSpinBox, QLabel, QSlider, QSpinBox, QPushButton, QDialog
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QDoubleSpinBox, QLabel, QSlider, QSpinBox, QPushButton, QDialog, QCheckBox
 from PyQt5.QtCore import Qt
 
 
@@ -49,7 +49,7 @@ class ModelView(QWidget):
         scale_row=QHBoxLayout(); layout.addLayout(scale_row); self.axis_scales=[]
         for name in ('X / East','Y / North','Z / Up'):
             scale_row.addWidget(QLabel(name))
-            scale=QDoubleSpinBox(); scale.setRange(.01,1000); scale.setDecimals(2)
+            scale=QDoubleSpinBox(); scale.setRange(.001,1000); scale.setDecimals(3)
             scale.setValue(1); scale.setSuffix(' ×'); scale.setKeyboardTracking(False)
             scale.setToolTip('Визуальное растяжение оси. Координаты модели и экспорт сохраняются.')
             scale.valueChanged.connect(self.rescale)
@@ -71,14 +71,48 @@ class ModelView(QWidget):
         self.camera_view.activated.connect(self.fit_model)
         self.axis_font.valueChanged.connect(self.refresh_if_ready)
         self.axis_unit.currentTextChanged.connect(self.refresh_if_ready)
+        colors=QHBoxLayout(); layout.addLayout(colors)
+        colors.addWidget(QLabel('Палитра'))
+        self.palette=QComboBox(); self.palette.addItems(['Авто','viridis','cividis','plasma','turbo','coolwarm','RdBu','terrain','gray'])
+        colors.addWidget(self.palette)
+        self.reverse_palette=QCheckBox('Развернуть'); colors.addWidget(self.reverse_palette)
+        self.color_range=QComboBox(); self.color_range.addItems(['Авто диапазон','Симметрично ±','Вручную'])
+        colors.addWidget(self.color_range)
+        self.color_min,self.color_max=QDoubleSpinBox(),QDoubleSpinBox()
+        for label,control in [('Мин.',self.color_min),('Макс.',self.color_max)]:
+            colors.addWidget(QLabel(label)); colors.addWidget(control)
+            control.setRange(-1e12,1e12); control.setDecimals(8); control.setKeyboardTracking(False)
+            control.setEnabled(False)
+        self.color_max.setValue(1)
+        self.apply_colors=QPushButton('Применить цвета'); colors.addWidget(self.apply_colors)
+        self.color_note=QLabel(''); layout.addWidget(self.color_note)
+        self.palette.currentTextChanged.connect(self.refresh_if_ready)
+        self.reverse_palette.toggled.connect(self.refresh_if_ready)
+        self.color_range.currentIndexChanged.connect(self.range_changed)
+        self.apply_colors.clicked.connect(self.refresh_if_ready)
         self.plotter=None; self.result=None
         self._expanded_dialog=None
         self._fit_pending=False
+        self._reorient_pending=False
+        self._display_scale=np.ones(3)
+        self.display_grid=None
         for w in (self.kind,self.component): w.currentTextChanged.connect(self.refresh_if_ready)
         self.threshold.valueChanged.connect(self.refresh_if_ready)
 
     def rescale(self):
         self._fit_pending=True
+        if self.plotter is not None:
+            # A top view hides Z exaggeration entirely (similarly X/Y in side views).
+            changed=np.array([w.value() for w in self.axis_scales])!=self._display_scale
+            direction=np.abs(self.plotter.camera.direction)
+            if np.any(changed & (direction>.999)):
+                self._reorient_pending=True
+                self.camera_view.setCurrentIndex(0)
+        self.refresh_if_ready()
+
+    def range_changed(self):
+        manual=self.color_range.currentIndex()==2
+        self.color_min.setEnabled(manual); self.color_max.setEnabled(manual)
         self.refresh_if_ready()
 
     def reset_scales(self):
@@ -103,8 +137,11 @@ class ModelView(QWidget):
         view.expand.hide()
         for source,target in zip(self.axis_scales,view.axis_scales): target.setValue(source.value())
         for source,target in ((self.kind,view.kind),(self.component,view.component),
-                              (self.axis_unit,view.axis_unit),(self.camera_view,view.camera_view)):
+                              (self.axis_unit,view.axis_unit),(self.camera_view,view.camera_view),
+                              (self.palette,view.palette),(self.color_range,view.color_range)):
             target.setCurrentIndex(source.currentIndex())
+        view.color_min.setValue(self.color_min.value()); view.color_max.setValue(self.color_max.value())
+        view.reverse_palette.setChecked(self.reverse_palette.isChecked())
         view.threshold.setValue(self.threshold.value()); view.axis_font.setValue(self.axis_font.value())
         for source,target in zip(self.slices,view.slices): target.setValue(source.value())
         def cleanup():
@@ -131,6 +168,10 @@ class ModelView(QWidget):
         new_model=self.result is not result
         self.result=result
         p=self.plotter
+        if self.color_range.currentIndex()==2 and self.color_min.value()>=self.color_max.value():
+            self.color_note.setText('Цветовой минимум должен быть меньше максимума. Исправьте значения и нажмите «Применить цвета».')
+            return
+        self.color_note.clear()
         camera=p.camera_position if p.renderer.actors else None
         camera_scale=p.camera.parallel_scale
         p.clear(); p.clear_plane_widgets()
@@ -144,6 +185,8 @@ class ModelView(QWidget):
         physical_bounds=np.array(grid.bounds)
         scale=np.array([widget.value() for widget in self.axis_scales])
         grid.scale(scale,inplace=True)
+        self.display_grid=grid
+        self._display_scale=scale.copy()
         mode=result.settings['mode']
         unit='g/cm³' if mode=='gravity' else ('SI' if mode=='induced' else 'A/m')
         self.info.setText(f'{result.mesh.active.sum():,} активных ячеек · {unit} · X = East − E₀, Y = North − N₀; E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м; Z = Up (вверх). Вращение: ЛКМ, масштаб: колесо.')
@@ -151,6 +194,12 @@ class ModelView(QWidget):
         values=grid['property']; amplitude=float(np.max(np.abs(values))); limit=max(amplitude,1e-15)
         cmap='viridis' if np.min(values)>=0 else 'coolwarm'
         clim=(0,limit) if np.min(values)>=0 else (-limit,limit)
+        if self.palette.currentIndex()>0: cmap=self.palette.currentText()
+        if self.reverse_palette.isChecked(): cmap+='_r'
+        if self.color_range.currentIndex()==1: clim=(-limit,limit)
+        elif self.color_range.currentIndex()==2: clim=(self.color_min.value(),self.color_max.value())
+        if self.color_range.currentIndex()!=2:
+            self.color_min.setValue(clim[0]); self.color_max.setValue(clim[1])
         options=dict(scalars='property',cmap=cmap,clim=clim,scalar_bar_args={
             'title':unit,'color':'#f0f5ff','title_font_size':18,'label_font_size':16,
             'n_labels':4,'fmt':'%.3g','position_x':.88,'position_y':.18,'width':.07,'height':.65,'vertical':True})
@@ -172,7 +221,8 @@ class ModelView(QWidget):
                 if surface.n_points: p.add_mesh(surface,opacity=.65,**options)
         elif kind==3:
             centers=[grid.bounds[2*i]+(grid.bounds[2*i+1]-grid.bounds[2*i])*slider.value()/100 for i,slider in enumerate(self.slices)]
-            p.add_mesh(grid.slice_orthogonal(x=centers[0],y=centers[1],z=centers[2]),**options)
+            # One mapper keeps the same explicit color range on all three slices.
+            p.add_mesh(grid.slice_orthogonal(x=centers[0],y=centers[1],z=centers[2]).combine(),**options)
             p.add_mesh(grid.outline(),color='#93a9c4')
         else:
             p.add_mesh_clip_plane(grid,normal='x',**options)
@@ -185,11 +235,15 @@ class ModelView(QWidget):
                     xtitle=f'X ({unit_label})',ytitle=f'Y ({unit_label})',
                     ztitle=f'Z ({unit_label})',n_xlabels=4,n_ylabels=4,n_zlabels=4)
         self.bounds_axes.GetProperty().SetLineWidth(1.5)
-        if camera is None or new_model or self._fit_pending: self.fit_model()
+        if camera is None or new_model or self._reorient_pending: self.fit_model()
         else:
             p.camera_position=camera
-            p.camera.parallel_scale=camera_scale
+            if self._fit_pending:
+                # Refit the stretched geometry while retaining the user's rotated view.
+                p.reset_camera(bounds=grid.bounds); p.camera.zoom(.82)
+            else: p.camera.parallel_scale=camera_scale
         self._fit_pending=False
+        self._reorient_pending=False
         p.render()
 
     def shutdown(self):

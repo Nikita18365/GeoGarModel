@@ -67,6 +67,9 @@ def test_display_scale_keeps_physical_axes_and_model():
         view.render(result)
         view.axis_scales[2].setValue(3)
         np.testing.assert_allclose(view.bounds_axes.bounds,[0,10000,0,20000,-90000,-300])
+        meshes=[actor.mapper.dataset for actor in view.plotter.renderer.actors.values()
+                if getattr(getattr(actor,'mapper',None),'dataset',None) is not None]
+        assert any(np.allclose(g.bounds,[0,10000,0,20000,-90000,-300]) for g in meshes)
         np.testing.assert_allclose(view.bounds_axes.z_axis_range,[-30000,-100])
         view.axis_unit.setCurrentText('км')
         np.testing.assert_allclose(view.bounds_axes.z_axis_range,[-30,-.1])
@@ -74,6 +77,17 @@ def test_display_scale_keeps_physical_axes_and_model():
         zoom=view.plotter.camera.parallel_scale
         view.axis_font.setValue(22)
         assert view.plotter.camera.parallel_scale==pytest.approx(zoom)
+        view.plotter.camera.azimuth+=20
+        direction=np.array(view.plotter.camera.direction)
+        view.axis_scales[0].setValue(2)
+        np.testing.assert_allclose(view.plotter.camera.direction,direction)
+        np.testing.assert_allclose(view.display_grid.bounds,[0,20000,0,20000,-90000,-300])
+        view.axis_scales[0].setValue(1)
+        view.camera_view.setCurrentIndex(1); view.fit_model()
+        view.axis_scales[2].setValue(4)
+        assert view.camera_view.currentIndex()==0  # Top XY cannot show a Z stretch.
+        assert abs(view.plotter.camera.direction[2])<.99
+        view.axis_scales[2].setValue(3)
         for mode in range(5):
             view.kind.setCurrentIndex(mode)
             np.testing.assert_allclose(view.bounds_axes.z_axis_range,[-30,-.1])
@@ -88,6 +102,37 @@ def test_display_scale_keeps_physical_axes_and_model():
         assert view._expanded_dialog.isVisible()
         view._expanded_dialog.accept()
         assert view._expanded_dialog is None
+    finally:
+        view.shutdown(); view.close()
+
+
+def test_model_colors_apply_to_all_modes_and_expanded_view():
+    from geogarmodel.inversion import Mesh,InversionResult
+    from geogarmodel.inversion_view import ModelView
+    mesh=Mesh(np.arange(5.)*100,np.arange(5.)*100,np.arange(5.)*100+10)
+    result=InversionResult(mesh,np.linspace(-1,1,mesh.size),np.zeros((1,3)),np.zeros(1),np.zeros(1),[],{'mode':'gravity'},'test')
+    view=ModelView()
+    try:
+        view.render(result)
+        view.palette.setCurrentText('plasma'); view.reverse_palette.setChecked(True)
+        view.color_range.setCurrentIndex(2)
+        view.color_min.setValue(-.3); view.color_max.setValue(.7)
+        for mode in range(5):
+            view.kind.setCurrentIndex(mode); view.apply_colors.click()
+            assert not view.color_note.text()
+            bar=next(iter(view.plotter.scalar_bars.values()))
+            np.testing.assert_allclose(bar.GetLookupTable().GetRange(),[-.3,.7],err_msg=f'mode={mode}')
+        view.color_min.setValue(.8); view.apply_colors.click()
+        assert 'меньше' in view.color_note.text()
+        view.color_min.setValue(-.3); view.apply_colors.click()
+        view.expanded_view()
+        expanded=view._expanded_dialog.findChild(ModelView)
+        assert expanded.palette.currentText()=='plasma'
+        assert expanded.reverse_palette.isChecked()
+        assert expanded.color_min.value()==pytest.approx(-.3)
+        assert expanded.color_max.value()==pytest.approx(.7)
+        view._expanded_dialog.accept()
+        np.testing.assert_array_equal(result.model,np.linspace(-1,1,mesh.size))
     finally:
         view.shutdown(); view.close()
 
