@@ -57,6 +57,8 @@ python -m pip install -e ".[boosting,neural,geo]"
 
 ## Документация
 
+- [Проекты карт, слои, изолинии, SHP/GeoJSON и масштабная линейка](docs/MAP_PROJECTS.md)
+
 - [Основная инструкция, форматы, координаты и трансформанты](docs/MODERNIZATION.md)
 - [Optuna, CPU/GPU, графики и экспорт](docs/OPTUNA.md)
 - [Структура проекта и проверки](docs/ARCHITECTURE.md)
