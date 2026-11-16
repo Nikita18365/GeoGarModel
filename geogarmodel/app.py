@@ -25,6 +25,7 @@ from .optimization import default_space
 from .parameter_files import validate_parameters, read_parameters, best_snapshot
 from .window_theme import apply_window_theme
 from .ui_layout import Disclosure,details,form_details,workflow_sections,quiet_button,prepare_forms
+from .maps_ui import MapWorkspace,LayerList
 
 
 class Worker(QThread):
@@ -47,7 +48,7 @@ class Worker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
-class MainWindow(QMainWindow):
+class MainWindow(MapWorkspace,QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GeoGarModel 2.3 · интерпретация и моделирование")
@@ -150,7 +151,7 @@ class MainWindow(QMainWindow):
         data_group=QGroupBox('Открыть карту'); panel=QVBoxLayout(data_group); root_panel.addWidget(data_group)
         self.button("Открыть ZMAP / DAT / NPZ", self.open_grid, panel)
         self.button("Таблица XYZ → регулярная сетка", self.open_xyz, panel)
-        self.layers = QListWidget()
+        self.layers = LayerList()
         self.layers.setMinimumHeight(100); self.layers.setMaximumHeight(180)
         self.layers.currentRowChanged.connect(lambda _: self.guard(self.redraw))
         panel.addWidget(self.layers)
@@ -176,6 +177,7 @@ class MainWindow(QMainWindow):
                               ("", self.contours), ("", self.shade)]:
             form.addRow(label, widget)
         self.button("Применить оформление", self.redraw, panel)
+        map_style_form=form
         transform_group=QGroupBox('Рассчитать трансформанту'); panel=QVBoxLayout(transform_group); root_panel.addWidget(transform_group)
         form=QFormLayout(); panel.addLayout(form)
         self.operation = QComboBox()
@@ -191,6 +193,7 @@ class MainWindow(QMainWindow):
         form.addRow("Высота, м", self.height)
         form.addRow("Длина волны фильтра, м", self.wave)
         form.addRow("Степень тренда", self.degree)
+        self.setup_map_workspace(map_style_form,form,main_data_panel)
         self.transform_button = self.button("Рассчитать → новый слой", self.apply_transform, panel)
         self.transform_button.setObjectName('primary')
         export_group=QGroupBox('Сохранить результат'); panel=QVBoxLayout(export_group); root_panel.addWidget(export_group)
@@ -215,6 +218,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1); splitter.setSizes([380,1000])
         layout.addWidget(splitter)
         self.tabs.addTab(tab, "01  ·  Карты и трансформанты")
+        self.redraw(); self.map_dirty=False
 
     def make_training(self):
         tab = QWidget()
@@ -416,15 +420,10 @@ class MainWindow(QMainWindow):
         self.device_hint.setText(text)
 
     def selected_grid(self):
-        row = self.layers.currentRow()
-        if row < 0:
-            raise ValueError("Сначала загрузите карту.")
-        return self.grids[row]
+        return MapWorkspace.selected_grid(self)
 
     def add_grid(self, grid):
-        self.grids.append(grid)
-        self.layers.addItem(grid.name)
-        self.layers.setCurrentRow(len(self.grids) - 1)
+        return MapWorkspace.add_grid(self,grid)
 
     def open_grid(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Сетки", "", "Grid (*.zmap *.dat *.npz);;Все файлы (*)")
@@ -475,22 +474,10 @@ class MainWindow(QMainWindow):
             self.redraw()
 
     def open_vector(self):
-        import geopandas as gpd
-        grid = self.selected_grid()
-        if not grid.crs:
-            raise ValueError("Сначала задайте CRS карты.")
-        path, _ = QFileDialog.getOpenFileName(self, "Векторный слой", "", "Vector (*.shp *.geojson)")
-        if path:
-            layer = gpd.read_file(path)
-            if layer.crs is None:
-                raise ValueError("У вектора отсутствует CRS.")
-            layer.to_crs(grid.crs)  # validate before keeping it
-            self.overlays.append(layer)
-            self.redraw()
+        return MapWorkspace.open_vector(self)
 
     def clear_overlays(self):
-        self.overlays.clear()
-        self.redraw()
+        return MapWorkspace.clear_overlays(self)
 
     def crop_view(self):
         grid = self.selected_grid()
@@ -500,14 +487,7 @@ class MainWindow(QMainWindow):
         self.add_grid(grid.crop(*ax.get_xlim(), *ax.get_ylim()))
 
     def redraw(self):
-        if self.layers.currentRow() < 0:
-            return
-        draw_map(self.figure, self.selected_grid(), cmap=self.palette.currentText(), mode=self.norm.currentData(),
-                 vmin=float(self.minimum.text()) if self.minimum.text().strip() else None,
-                 vmax=float(self.maximum.text()) if self.maximum.text().strip() else None,
-                 title=self.map_title.text() or None, contours=self.contours.isChecked(),
-                 hillshade=self.shade.isChecked(), overlays=self.overlays)
-        self.canvas.draw_idle()
+        return MapWorkspace.redraw(self)
 
     def run_job(self, function, callback, with_context=False):
         if self.inversion.worker is not None:
@@ -838,6 +818,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Расчёт выполняется", "Дождитесь окончания расчёта перед закрытием.")
             event.ignore()
         else:
+            if not self.confirm_map_close():
+                event.ignore(); return
             self.inversion.scene.shutdown()
             event.accept()
 
