@@ -152,6 +152,7 @@ class InversionTab(QWidget):
         self.runtime_details=Disclosure('Время и этапы расчёта',timing_details)
         rl.addWidget(self.runtime_details)
         self._run_started=None; self._iteration_started=None; self._iteration_number=0; self._iteration_limit=0
+        self._notify_inversion=False
         self.clock_timer=QTimer(self); self.clock_timer.setInterval(250); self.clock_timer.timeout.connect(self.update_clock)
         self.tabs=QTabWidget(); rl.addWidget(self.tabs,1)
         self.scene=ModelView(); self.tabs.addTab(self.scene,'3D-модель')
@@ -350,6 +351,7 @@ class InversionTab(QWidget):
         self.progress.setRange(0,settings['iterations']); self.progress.setValue(0)
         self.status.setText(f'{len(data):,} наблюдений × {mesh.active.sum():,} активных ячеек · {operator_args["device"].upper()} · определение бюджета памяти…')
         self.worker=InversionWorker(compute,self)
+        self._notify_inversion=True
         self.lock_inputs()
         self.worker.progress.connect(self.update_progress); self.worker.result.connect(self.finished_result)
         self.worker.failed.connect(self.failure); self.worker.finished.connect(self.job_finished)
@@ -420,6 +422,14 @@ class InversionTab(QWidget):
         self.phase_progress.setFormat('Расчёт завершён')
 
     def failure(self,message):
+        if self._notify_inversion:
+            self._notify_inversion=False
+            # Arbitrary exception text may contain paths/data. Keep outbound error messages generic.
+            cancelled=self.worker is not None and self.worker.cancel.is_set()
+            event='cancelled' if cancelled else 'error'
+            text=('Расчёт остановлен пользователем до получения готового результата.' if cancelled
+                  else 'Расчёт 3D-модели завершился без готового результата.')
+            self.workbench.notifications.send(event,'GeoGarModel: '+text+'\nПодробности доступны в программе.')
         self.stop_timing(); self.phase_label.setText(message)
         self.status.setText(message); self.log.appendPlainText(message)
     def job_finished(self):
@@ -452,6 +462,11 @@ class InversionTab(QWidget):
         selected=result.settings.get('selected_iteration',result.history[-1]['iteration'])
         row=next(r for r in result.history if r['iteration']==selected)
         reason={'cancelled':'Остановлено пользователем','early_stop':'Ранняя остановка'}.get(result.status,result.status)
+        if self._notify_inversion:
+            self._notify_inversion=False
+            from .telegram_notifications import result_message
+            event=result.status if result.status in ('cancelled','early_stop') else 'finished'
+            self.workbench.notifications.send(event,result_message(result))
         self.phase_label.setText(f'{reason} · завершено {result.history[-1]["iteration"]} итераций (начальная оценка — 0).')
         self.status.setText(f"{reason} · модель итерации {selected} · RMSE={row['rmse']:.6g} · RMS/σ={row['normalized_rms']:.4g}; {result.settings['device'].upper()}")
         if result.status=='cancelled' and offer_export:

@@ -93,7 +93,15 @@ class MainWindow(QMainWindow):
         menu = self.menuBar().addMenu("Данные")
         action = menu.addAction("Открыть синтетический пример")
         action.triggered.connect(lambda: self.guard(self.load_demo))
+        from .telegram_notifications import TelegramNotifications
+        self.notifications = TelegramNotifications(self)
+        settings_menu = self.menuBar().addMenu('Настройки')
+        settings_menu.addAction('Уведомления Telegram…').triggered.connect(lambda: self.guard(self.telegram_settings))
         self.statusBar().showMessage("Загрузите карту или обучающую таблицу.")
+
+    def telegram_settings(self):
+        from .telegram_ui import TelegramDialog
+        TelegramDialog(self.notifications,self).exec_()
 
     def showEvent(self, event):
         super().showEvent(event)
