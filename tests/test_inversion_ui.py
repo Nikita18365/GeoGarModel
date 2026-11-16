@@ -111,6 +111,7 @@ def test_display_scale_keeps_physical_axes_and_model():
 
 
 def test_model_colors_apply_to_all_modes_and_expanded_view():
+    pytest.importorskip('pyvistaqt')  # Exercised by the volume-enabled CI job.
     from geogarmodel.inversion import Mesh,InversionResult
     from geogarmodel.inversion_view import ModelView
     mesh=Mesh(np.arange(5.)*100,np.arange(5.)*100,np.arange(5.)*100+10)

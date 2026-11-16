@@ -473,7 +473,12 @@ class InversionTab(QWidget):
             self.stopped_export_dialog()
         self.workbench.guard(self.draw_results)
         if result.status in ('cancelled','early_stop'):
-            self.workbench.guard(lambda:self.scene.render(result))
+            from importlib.util import find_spec
+            if find_spec('pyvistaqt') is not None:
+                self.workbench.guard(lambda:self.scene.render(result))
+            else:
+                self.scene.result=result
+                self.log.appendPlainText('3D-сцена требует пакет volume. Модель и двумерные срезы доступны.')
         self.progress.setValue(result.history[-1]['iteration'])
 
     def stopped_export_dialog(self):
