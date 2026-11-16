@@ -106,7 +106,7 @@ def test_home_wheel_heading_scale_and_name_editor(qt_application_lifetime):
     window.contours.setChecked(True); assert window.contour_color.isHidden()
     assert window.contour_color_button.isHidden() is False
     window.scale_on.setChecked(True); ax=window.figure.axes[0]; window.canvas.draw()
-    assert all(p.get_y()<0 and not p.get_clip_on() for p in ax.patches)
+    assert all(p.get_window_extent().y1<ax.xaxis.label.get_window_extent().y0 and not p.get_clip_on() for p in ax.patches)
     first=min(t for t in ax.get_xticks() if min(ax.get_xlim())<=t<=max(ax.get_xlim()))
     assert ax.patches[0].get_x()==pytest.approx(first)
     window.close()
@@ -121,3 +121,73 @@ def test_geographic_north_uses_crs():
     east=north_direction('EPSG:20918',*project.transform(107,70))
     np.testing.assert_allclose(central,[0,1],atol=1e-5)
     assert west[0]>0 and east[0]<0 and west[1]>0 and east[1]>0
+
+
+def test_drag_lifecycle_never_removes_layers(monkeypatch,qt_application_lifetime):
+    from types import SimpleNamespace
+    import geogarmodel.maps_ui as ui
+    window=MainWindow()
+    for name in ('A','B','C'): window.add_grid(grid(name))
+    original={id(window.layers.item(i)):window.layers.item(i).data(Qt.UserRole)['data'] for i in range(3)}
+    class Drag:
+        def __init__(self,parent): self.parent=parent
+        def setMimeData(self,mime): assert mime.hasFormat('application/x-geogarmodel-layer')
+        def exec_(self,action):
+            assert action==Qt.MoveAction
+            target=2 if self.parent.currentRow()==0 else 0
+            pos=self.parent.visualItemRect(self.parent.item(target)).center()
+            self.parent.dropEvent(SimpleNamespace(source=lambda:self.parent,pos=lambda:pos,accept=lambda:None))
+            return Qt.MoveAction
+    monkeypatch.setattr(ui,'QDrag',Drag)
+    for _ in range(6):
+        window.layers.startDrag(Qt.MoveAction)
+        assert window.layers.count()==3
+        assert {id(window.layers.item(i)):window.layers.item(i).data(Qt.UserRole)['data'] for i in range(3)}==original
+    window.close()
+
+
+def test_project_crs_reprojects_raster_vector_and_persists(tmp_path,monkeypatch,qt_application_lifetime):
+    from geogarmodel.map_project import reproject_grid,Vector
+    from pyproj import Transformer
+    x=np.linspace(104.9,105.1,21); y=np.linspace(69.9,70.1,21); xx,yy=np.meshgrid(x,y)
+    source=Grid(x,y,xx+2*yy,'WGS84 field','nT','EPSG:4326','degrees')
+    target=reproject_grid(source,'EPSG:20918')
+    assert target.crs=='EPSG:20918' and target.coordinate_unit=='m'
+    tx,ty=np.meshgrid(target.x,target.y); lon,lat=Transformer.from_crs(20918,4326,always_xy=True).transform(tx,ty)
+    valid=np.isfinite(target.values)
+    np.testing.assert_allclose(target.values[valid],(lon+2*lat)[valid],atol=1e-8)
+    assert np.isnan(target.values).any()  # Outside the transformed footprint is not filled.
+    window=MainWindow(); assert window.apply_project_crs('EPSG:20918')
+    window.add_grid(source)
+    assert window.selected_grid().crs=='EPSG:20918'
+    vector=Vector([dict(type='Point',coordinates=[105,70])],'EPSG:4326').reproject(window.map_project_crs)
+    assert vector.crs=='EPSG:20918' and vector.features[0]['coordinates'][0]>18000000
+    window.add_map_layer(dict(kind='vector',name='Точки',visible=True,style={},data=vector))
+    window.scale_on.setChecked(True); window.scale_step.setValue(1000); window.scale_unit.setCurrentText('км')
+    assert window.scale_step.value()==1
+    window.scale_crs.setChecked(True); window.north_symbol.setCurrentIndex(2)
+    path=tmp_path/'crs.ggmaps'; monkeypatch.setattr(QFileDialog,'getSaveFileName',lambda *a:(str(path),''))
+    assert window.save_map_project()
+    manifest,rows=load_project(path)
+    assert manifest['crs']=='EPSG:20918' and manifest['scale']['unit']=='км'
+    assert manifest['scale']['north']=='compass' and manifest['scale']['show_crs']
+    window.reset_map_project(); monkeypatch.setattr(QFileDialog,'getOpenFileName',lambda *a:(str(path),''))
+    window.open_map_project()
+    assert window.scale_unit.currentText()=='км' and window.scale_step.value()==1
+    assert window.map_project_crs=='EPSG:20918' and window.north_symbol.currentData()=='compass'
+    window.close()
+
+
+def test_cancel_crs_change_is_atomic(monkeypatch,qt_application_lifetime):
+    known=grid('Известная СК'); known.x+=18500000; known.y+=7800000
+    window=MainWindow(); window.add_grid(known)
+    original=window.grids[0]
+    unknown=grid('Неизвестная СК'); unknown.crs=''
+    window.add_map_layer(dict(kind='grid',name=unknown.name,visible=False,style=window.read_map_style(),data=unknown))
+    window.move_map_layer(1)  # Transform a known layer before encountering the cancelled source-CRS prompt.
+    monkeypatch.setattr(window,'source_crs',lambda known,name:known or None)
+    assert not window.apply_project_crs('EPSG:20919')
+    assert window.map_project_crs=='EPSG:20918'
+    assert window.layers.item(0).data(Qt.UserRole)['data'] is original
+    assert window.layers.item(1).data(Qt.UserRole)['data'] is unknown
+    window.close()

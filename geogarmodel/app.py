@@ -473,6 +473,14 @@ class MainWindow(MapWorkspace,QMainWindow):
         form.addRow(buttons)
         if dialog.exec_():
             checked = validate_crs(crs.text().strip(), coord_unit.currentText())
+            if self.map_project_crs:
+                if not checked: raise ValueError('В проекте с заданной СК укажите исходную СК карты.')
+                from .grids import Grid
+                from .map_project import reproject_grid
+                revised=Grid(grid.x,grid.y,grid.values,grid.name,unit.text().strip(),checked,coord_unit.currentText(),list(grid.history))
+                revised=reproject_grid(revised,self.map_project_crs)
+                self.layers.currentItem().data(Qt.UserRole)['data']=revised
+                self._map_fit=True; self.map_reordered(); return
             grid.crs, grid.unit, grid.coordinate_unit = checked, unit.text().strip(), coord_unit.currentText()
             self.redraw()
 

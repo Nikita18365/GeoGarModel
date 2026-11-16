@@ -1,15 +1,15 @@
 """Layer tree, independent layer styling and portable map workspaces."""
 from pathlib import Path
 import numpy as np
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor,QKeySequence
+from PyQt5.QtCore import Qt,QMimeData
+from PyQt5.QtGui import QColor,QKeySequence,QDrag
 from PyQt5.QtWidgets import (QListWidgetItem,QAbstractItemView,QMenu,QShortcut,QInputDialog,
-    QFileDialog,QMessageBox,QDoubleSpinBox,QSpinBox,QLineEdit,QCheckBox,QColorDialog,QStyledItemDelegate,QPushButton)
+    QFileDialog,QMessageBox,QDoubleSpinBox,QSpinBox,QLineEdit,QCheckBox,QColorDialog,QStyledItemDelegate,QPushButton,QComboBox,QDialog,QDialogButtonBox,QFormLayout)
 from PyQt5.QtWidgets import QListWidget
 from PyQt5.QtWidgets import QLabel
 from matplotlib.patches import Rectangle
-from matplotlib.transforms import blended_transform_factory
-from .map_project import read_vector,save_project,load_project
+from matplotlib.transforms import blended_transform_factory,IdentityTransform
+from .map_project import read_vector,save_project,load_project,reproject_grid
 from .plotting import draw_map
 from .map_navigation import north_direction
 
@@ -37,7 +37,22 @@ class LayerItem(QListWidgetItem):
 
 
 class LayerList(QListWidget):
+    def startDrag(self,actions):
+        # Own the move completely. QAbstractItemView.startDrag would remove the
+        # source again after our custom dropEvent has already moved the item.
+        drag=QDrag(self); mime=QMimeData(); mime.setData('application/x-geogarmodel-layer',b'layer')
+        drag.setMimeData(mime); drag.exec_(Qt.MoveAction)
+
+    def dragEnterEvent(self,event):
+        if event.source() is self: event.acceptProposedAction()
+        else: event.ignore()
+
+    def dragMoveEvent(self,event):
+        if event.source() is self: event.acceptProposedAction()
+        else: event.ignore()
+
     def dropEvent(self,event):
+        if hasattr(event,'source') and event.source() is not self: event.ignore(); return
         source=self.currentRow(); target=self.indexAt(event.pos()).row()
         if source<0: return
         if target<0: target=self.count()-1
@@ -49,6 +64,7 @@ class LayerList(QListWidget):
 class MapWorkspace:
     def setup_map_workspace(self,style_form,transform_form,project_layout):
         self.map_project_name='Без названия'; self.map_project_path=None; self.map_dirty=False
+        self.map_project_crs=''
         self._map_selected=None; self._map_loading=False; self._map_fit=True
         self.map_style_group.setTitle('')
         self.map_style_heading=QLabel('Оформление карты — выберите карту')
@@ -58,6 +74,7 @@ class MapWorkspace:
         project_layout.insertWidget(0,self.project_label)
         help_label=QLabel('✓ — показать слой · верхний слой впереди\nПеретащите для порядка · F2 — имя · Delete — удалить')
         help_label.setWordWrap(True); project_layout.insertWidget(1,help_label)
+        self.button('СК проекта…',self.project_crs_dialog,project_layout)
         self.layers.currentRowChanged.disconnect()
         self.layers.setSelectionMode(QAbstractItemView.SingleSelection)
         self.layers.setDragDropMode(QAbstractItemView.InternalMove)
@@ -90,7 +107,14 @@ class MapWorkspace:
         self.scale_on=QCheckBox('Масштабная линейка'); style_form.addRow(self.scale_on)
         self.scale_step=number(0,1e9,0); self.scale_step.setSpecialValueText('Авто')
         self.scale_count=QSpinBox(); self.scale_count.setRange(1,20); self.scale_count.setValue(4)
-        style_form.addRow('Шаг линейки, м',self.scale_step); style_form.addRow('Число делений',self.scale_count)
+        self.scale_unit=QComboBox(); self.scale_unit.addItems(['м','км'])
+        self.scale_crs=QCheckBox('Подписывать СК под линейкой')
+        self.north_symbol=QComboBox()
+        for label,key in [('Стрелка N','arrow'),('Стрелка С','russian'),('Компасная стрелка','compass'),('Скрыть','none')]: self.north_symbol.addItem(label,key)
+        style_form.addRow('Символ севера',self.north_symbol)
+        style_form.addRow('Единицы линейки',self.scale_unit)
+        style_form.addRow('Шаг линейки',self.scale_step); style_form.addRow('Число делений',self.scale_count)
+        style_form.addRow(self.scale_crs)
         def show_details():
             for widget in (self.contour_step,self.contour_width,self.contour_labels):
                 widget.setVisible(self.contours.isChecked())
@@ -98,10 +122,13 @@ class MapWorkspace:
                 if label: label.setVisible(self.contours.isChecked())
             color_button.setVisible(self.contours.isChecked())
             style_form.labelForField(color_button).setVisible(self.contours.isChecked())
-            for widget in (self.scale_step,self.scale_count):
-                widget.setVisible(self.scale_on.isChecked()); style_form.labelForField(widget).setVisible(self.scale_on.isChecked())
+            for widget in (self.scale_step,self.scale_count,self.scale_unit,self.scale_crs):
+                widget.setVisible(self.scale_on.isChecked())
+                label=style_form.labelForField(widget)
+                if label: label.setVisible(self.scale_on.isChecked())
         self.contours.toggled.connect(show_details); self.scale_on.toggled.connect(show_details); show_details()
-        for w in [*self.map_style_widgets.values(),self.scale_on,self.scale_step,self.scale_count]:
+        self.scale_unit.currentIndexChanged.connect(self.change_scale_unit)
+        for w in [*self.map_style_widgets.values(),self.scale_on,self.scale_step,self.scale_count,self.scale_unit,self.scale_crs,self.north_symbol]:
             signal=(w.editingFinished if isinstance(w,QLineEdit) else w.toggled if isinstance(w,QCheckBox)
                     else w.currentIndexChanged if hasattr(w,'currentIndexChanged') else w.valueChanged)
             signal.connect(lambda *a:self.guard(self.redraw))
@@ -112,6 +139,7 @@ class MapWorkspace:
         menu=self.menuBar().addMenu('Проект карт')
         for title,fn in [('Создать…',self.new_map_project),('Открыть…',self.open_map_project),
                          ('Сохранить',self.save_map_project),('Сохранить как…',lambda:self.save_map_project(True)),
+                         ('Система координат…',self.project_crs_dialog),
                          ('Закрыть',self.close_map_project),('Вписать все видимые карты',self.fit_maps)]:
             menu.addAction(title).triggered.connect(lambda checked=False,fn=fn:self.guard(fn))
 
@@ -121,6 +149,76 @@ class MapWorkspace:
                self.degree:operation in ('trend','detrend')}
         for widget,visible in shown.items():
             widget.setVisible(visible); self.transform_rows[widget].setVisible(visible)
+
+    def change_scale_unit(self):
+        if self._map_loading: return
+        # Keep physical length when changing m ↔ km.
+        factor=.001 if self.scale_unit.currentText()=='км' else 1000
+        self.scale_step.blockSignals(True)
+        self.scale_step.setDecimals(6 if self.scale_unit.currentText()=='км' else 2)
+        self.scale_step.setValue(self.scale_step.value()*factor); self.scale_step.blockSignals(False)
+
+    def crs_caption(self):
+        from pyproj import CRS
+        crs=self.map_project_crs
+        if not crs:
+            rows=self.map_layer_rows(); crs=next((r['data'].crs for r in rows if r['kind']=='grid'),'')
+        if not crs: return 'СК не задана'
+        source=CRS.from_user_input(crs); authority=source.to_authority()
+        return f'{source.name} ({authority[0]}:{authority[1]})' if authority else source.name
+
+    def update_project_label(self):
+        self.project_label.setText('Проект: '+self.map_project_name+('\nСК: '+self.map_project_crs if self.map_project_crs else ''))
+
+    def source_crs(self,known,name):
+        from pyproj import CRS
+        if known: return CRS.from_user_input(known).to_string()
+        value,ok=QInputDialog.getText(self,'Исходная СК — '+name,
+            'У файла не указана исходная СК. Введите EPSG или PROJ/WKT.\nЭто СК координат исходного файла, до преобразования:')
+        if not ok: return None
+        if not value.strip(): raise ValueError('Укажите исходную СК файла.')
+        return CRS.from_user_input(value.strip()).to_string()
+
+    def apply_project_crs(self,crs):
+        from pyproj import CRS
+        target=CRS.from_user_input(crs)
+        if not target.is_projected or any(abs(a.unit_conversion_factor-1)>1e-9 for a in target.axis_info[:2]):
+            raise ValueError('Выберите проекцию в метрах, например GSK-2011 / Gauss-Kruger zone 18.')
+        if self.worker is not None: raise ValueError('Дождитесь завершения расчёта перед сменой СК проекта.')
+        converted=[]
+        for row in self.map_layer_rows():
+            source=self.source_crs(row['data'].crs,row['name'])
+            if source is None: return False
+            converted.append(reproject_grid(row['data'],target,source) if row['kind']=='grid' else row['data'].reproject(target))
+        # Commit only after every layer has been transformed successfully.
+        for i,value in enumerate(converted): self.layers.item(i).data(Qt.UserRole)['data']=value
+        self.map_project_crs=target.to_string(); self.update_project_label()
+        self._map_fit=True; self.map_reordered(); return True
+
+    def project_crs_dialog(self,new=False):
+        from .coordinates import gsk2011_zones
+        dialog=QDialog(self); dialog.setWindowTitle('Новый проект карт' if new else 'Система координат проекта')
+        dialog.resize(540,260); form=QFormLayout(dialog); form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        name=QLineEdit('' if new else self.map_project_name); crs=QComboBox(); crs.setEditable(True)
+        for code,label in gsk2011_zones(): crs.addItem(code+' | '+label)
+        crs.setCurrentText('EPSG:20918 | GSK-2011 / Gauss-Kruger zone 18' if new else self.map_project_crs or 'EPSG:20918')
+        form.addRow('Название проекта',name); form.addRow('СК проекта (EPSG / PROJ / WKT)',crs)
+        note=QLabel('Все карты и контуры приводятся к этой СК. Растры интерполируются на регулярную сетку.\nДля файлов без СК потребуется указать исходную систему.')
+        note.setWordWrap(True); form.addRow(note)
+        buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
+        if dialog.exec_()!=QDialog.Accepted: return
+        value=crs.currentText().split('|')[0].strip()
+        if not name.text().strip(): raise ValueError('Введите название проекта.')
+        if new:
+            from pyproj import CRS
+            target=CRS.from_user_input(value)
+            if not target.is_projected or any(abs(a.unit_conversion_factor-1)>1e-9 for a in target.axis_info[:2]):
+                raise ValueError('Выберите СК в метрах.')
+            if not self.confirm_map_close(): return
+            self.reset_map_project(name.text().strip()); self.map_project_crs=target.to_string(); self.update_project_label(); self.map_dirty=True
+        elif self.apply_project_crs(value):
+            self.map_project_name=name.text().strip(); self.update_project_label()
 
     def choose_contour_color(self):
         color=QColorDialog.getColor(QColor(self.contour_color.text()),self,'Цвет изолиний')
@@ -174,6 +272,15 @@ class MapWorkspace:
         return item.data(Qt.UserRole)['data']
 
     def add_grid(self,grid):
+        if self.map_project_crs:
+            source=self.source_crs(grid.crs,grid.name)
+            if not source: return
+            grid=reproject_grid(grid,self.map_project_crs,source)
+        elif grid.crs:
+            if self.layers.count():
+                if not self.apply_project_crs(grid.crs): return
+            else:
+                self.map_project_crs=grid.crs; self.update_project_label()
         style=self.read_map_style(); style.update(vmin='',vmax='',title='')
         self.add_map_layer(dict(kind='grid',name=grid.name,visible=True,style=style,data=grid))
 
@@ -190,8 +297,17 @@ class MapWorkspace:
         if item is None: return
         self.layers.setCurrentItem(item); menu=QMenu(self)
         menu.addAction('Переименовать',lambda:self.layers.editItem(item))
+        menu.addAction('Выше',lambda:self.move_map_layer(-1))
+        menu.addAction('Ниже',lambda:self.move_map_layer(1))
         menu.addAction('Удалить',lambda:self.guard(self.delete_map_layer))
         menu.exec_(self.layers.mapToGlobal(position))
+
+    def move_map_layer(self,direction):
+        source=self.layers.currentRow(); target=source+direction
+        if source<0 or not 0<=target<self.layers.count(): return
+        self._map_loading=True; item=self.layers.takeItem(source)
+        self.layers.insertItem(target,item); self.layers.setCurrentItem(item); self._map_loading=False
+        self.map_reordered()
 
     def delete_map_layer(self):
         row=self.layers.currentRow()
@@ -202,13 +318,16 @@ class MapWorkspace:
         self.map_reordered()
 
     def open_vector(self):
-        grid=self.selected_grid()
-        if not grid.crs: raise ValueError('Сначала задайте CRS карты: «CRS и единицы карты…».')
+        crs=self.map_project_crs
+        if not crs: raise ValueError('Сначала задайте СК проекта.')
         path,_=QFileDialog.getOpenFileName(self,'Добавить векторный слой','','Vector (*.shp *.geojson *.json)')
         if path:
-            vector=read_vector(path)
-            from pyproj import Transformer
-            Transformer.from_crs(vector.crs,grid.crs,always_xy=True)
+            source=None
+            if Path(path).suffix.lower()=='.shp' and not Path(path).with_suffix('.prj').exists():
+                source=self.source_crs('',Path(path).stem)
+                if source is None: return
+            vector=read_vector(path,source)
+            vector=vector.reproject(crs)
             self.add_map_layer(dict(kind='vector',name=Path(path).stem,visible=True,style={},data=vector))
 
     def clear_overlays(self):
@@ -255,7 +374,7 @@ class MapWorkspace:
             ax.relim(); ax.autoscale_view()
             self._map_home=(ax.get_xlim(),ax.get_ylim())
             if view: ax.set_xlim(view[0]); ax.set_ylim(view[1])
-            self.figure.subplots_adjust(bottom=.24 if self.scale_on.isChecked() else .13,top=.84)
+            self.figure.subplots_adjust(bottom=(.23 if self.scale_crs.isChecked() else .20) if self.scale_on.isChecked() else .13,top=.84)
             self.draw_north(ax,self.figure.axes[1],crs)
             if self.scale_on.isChecked():
                 if grids[0]['data'].coordinate_unit=='degrees': raise ValueError('Масштабная линейка в метрах требует метрических координат.')
@@ -287,9 +406,12 @@ class MapWorkspace:
 
     def draw_north(self,ax,bar,crs):
         self._map_decorations=[]
+        symbol=self.north_symbol.currentData()
+        if symbol=='none': return
         arrow=bar.annotate('',xy=(0,0),xytext=(0,0),xycoords='figure pixels',textcoords='figure pixels',
-                           arrowprops=dict(arrowstyle='-|>',color='#dbe7f6',lw=1.5),annotation_clip=False)
-        label=bar.text(.5,1.16,'N' if crs else 'N сетки',transform=bar.transAxes,ha='center',fontsize=10,color='#dbe7f6',clip_on=False)
+                           arrowprops=dict(arrowstyle='<|-|>' if symbol=='compass' else '-|>',color='#dbe7f6',lw=1.5),annotation_clip=False)
+        letter='С' if symbol=='russian' else 'N'
+        label=bar.text(.5,1.16,letter,transform=bar.transAxes,ha='center',fontsize=10,color='#dbe7f6',clip_on=False)
         def update(_=None):
             x=np.mean(ax.get_xlim()); y=np.mean(ax.get_ylim())
             try:
@@ -299,7 +421,7 @@ class MapWorkspace:
                 base=bar.transAxes.transform((.5,1.035)); tip=base+delta*25*self.figure.dpi/100
                 changed=not np.allclose(arrow.xy,tip) or not np.allclose(arrow.get_position(),base)
                 arrow.xy=tip; arrow.set_position(base); arrow.set_visible(True)
-                label.set_text('N' if crs else 'N сетки')
+                label.set_text(letter if crs else letter+' сетки')
                 return changed
             except (ValueError,RuntimeError):
                 arrow.set_visible(False); label.set_text('N ?')
@@ -308,25 +430,36 @@ class MapWorkspace:
         ax.callbacks.connect('xlim_changed',update); ax.callbacks.connect('ylim_changed',update)
 
     def draw_scale(self,ax):
-        artists=[]
+        artists=[]; state=[]
         def update(_=None):
-            for artist in artists: artist.remove()
-            artists.clear(); lo,hi=ax.get_xlim(); count=self.scale_count.value()
-            step=self.scale_step.value()
+            lo,hi=ax.get_xlim(); count=self.scale_count.value()
+            factor=1000 if self.scale_unit.currentText()=='км' else 1
+            step=self.scale_step.value()*factor
             if step==0:
                 desired=abs(hi-lo)*.25/count; base=10**np.floor(np.log10(max(desired,1e-12)))
                 step=next(v*base for v in (1,2,5,10) if v*base>=desired)
             ticks=[v for v in ax.get_xticks() if min(lo,hi)<=v<=max(lo,hi)]
             x=(min(ticks) if lo<hi else max(ticks)) if ticks else min(lo,hi)
-            trans=blended_transform_factory(ax.transData,ax.transAxes)
+            pixels=self.figure.dpi/72
+            bottom=ax.xaxis.label.get_window_extent(self.canvas.get_renderer()).y0
+            base=bottom-23*pixels
+            current=(lo,hi,x,step,base)
+            if state and np.allclose(state[0],current,rtol=0,atol=.01): return False
+            state[:]=[current]
+            for artist in artists: artist.remove()
+            artists.clear()
+            trans=blended_transform_factory(ax.transData,IdentityTransform())
             for i in range(count):
-                patch=Rectangle((x+i*step,-.25),step,.02,transform=trans,clip_on=False,
+                patch=Rectangle((x+i*step,base),step,5*pixels,transform=trans,clip_on=False,
                                 facecolor='white' if i%2 else 'black',edgecolor='white',linewidth=.7,zorder=100000)
                 ax.add_patch(patch); artists.append(patch)
             for i in range(count+1):
-                artists.append(ax.text(x+i*step,-.21,f'{i*step:g}',transform=trans,ha='center',fontsize=8,color='white',zorder=100000,clip_on=False))
-            artists.append(ax.text(x+count*step,-.29,'м',transform=trans,ha='right',fontsize=9,color='white',zorder=100000,clip_on=False))
-        update(); ax.callbacks.connect('xlim_changed',update)
+                artists.append(ax.text(x+i*step,base+9*pixels,f'{i*step/factor:g}',transform=trans,ha='center',fontsize=8,color='white',zorder=100000,clip_on=False))
+            artists.append(ax.text(x+count*step,base-11*pixels,self.scale_unit.currentText(),transform=trans,ha='right',fontsize=9,color='white',zorder=100000,clip_on=False))
+            if self.scale_crs.isChecked():
+                artists.append(ax.text(x,base-24*pixels,self.crs_caption(),transform=trans,ha='left',fontsize=8,color='#a9bbd3',zorder=100000,clip_on=False))
+            return True
+        update(); self._map_decorations.append(update); ax.callbacks.connect('xlim_changed',update)
 
     def fit_maps(self): self._map_fit=True; self.redraw()
 
@@ -341,14 +474,14 @@ class MapWorkspace:
 
     def reset_map_project(self,name='Без названия'):
         self._map_loading=True; self._map_selected=None; self.layers.clear(); self._map_loading=False
-        self.grids=[]; self.overlays=[]; self.map_project_name=name; self.map_project_path=None
+        self.grids=[]; self.overlays=[]; self.map_project_name=name; self.map_project_path=None; self.map_project_crs=''
         self._map_loading=True; self.scale_on.setChecked(False); self.scale_step.setValue(0); self.scale_count.setValue(4); self._map_loading=False
+        self._map_loading=True; self.scale_unit.setCurrentIndex(0); self.scale_crs.setChecked(False); self.north_symbol.setCurrentIndex(0); self._map_loading=False
         self.project_label.setText('Проект: '+name); self._map_view=None; self._map_fit=True; self.redraw()
         self._map_view=None; self._map_fit=True; self.map_dirty=False
 
     def new_map_project(self):
-        name,ok=QInputDialog.getText(self,'Новый проект карт','Название проекта:')
-        if ok and name.strip() and self.confirm_map_close(): self.reset_map_project(name.strip())
+        self.project_crs_dialog(new=True)
 
     def close_map_project(self):
         if self.confirm_map_close(): self.reset_map_project()
@@ -365,19 +498,29 @@ class MapWorkspace:
         ax=self.figure.axes[0] if self.figure.axes else None
         view=[list(ax.get_xlim()),list(ax.get_ylim())] if ax else None
         save_project(path,self.map_project_name,self.map_layer_rows(),view,
-                     dict(enabled=self.scale_on.isChecked(),step=self.scale_step.value(),count=self.scale_count.value()))
+                     dict(enabled=self.scale_on.isChecked(),step=self.scale_step.value(),count=self.scale_count.value(),
+                          unit=self.scale_unit.currentText(),show_crs=self.scale_crs.isChecked(),north=self.north_symbol.currentData()),self.map_project_crs)
         self.map_project_path=path; self.map_dirty=False; return True
 
     def open_map_project(self):
         path,_=QFileDialog.getOpenFileName(self,'Открыть проект карт','','GeoGarModel карты (*.ggmaps)')
         if not path: return
         manifest,rows=load_project(path)
+        project_crs=manifest.get('crs','') or next((r['data'].crs for r in rows if r['kind']=='grid' and r['data'].crs),'')
+        if project_crs:
+            for row in rows:
+                if row['kind']=='vector': row['data']=row['data'].reproject(project_crs)
         if not self.confirm_map_close(): return
         self.reset_map_project(manifest['name'])
+        self.map_project_crs=project_crs; self.update_project_label()
         for row in reversed(rows): self.add_map_layer(row)
         self._map_loading=True
         scale=manifest['scale']; self.scale_on.setChecked(scale['enabled'])
-        self.scale_step.setValue(scale['step']); self.scale_count.setValue(scale['count']); self._map_loading=False
+        self.scale_unit.setCurrentText(scale.get('unit','м'))
+        self.scale_step.setDecimals(6 if self.scale_unit.currentText()=='км' else 2)
+        self.scale_step.setValue(scale['step']); self.scale_count.setValue(scale['count'])
+        self.scale_crs.setChecked(scale.get('show_crs',False))
+        self.north_symbol.setCurrentIndex(max(0,self.north_symbol.findData(scale.get('north','arrow')))); self._map_loading=False
         self.redraw()
         if manifest['view'] and self.figure.axes:
             ax=self.figure.axes[0]; ax.set_xlim(manifest['view'][0]); ax.set_ylim(manifest['view'][1])
