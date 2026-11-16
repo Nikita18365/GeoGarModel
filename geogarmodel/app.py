@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, QVB
     QHBoxLayout, QFormLayout, QPushButton, QComboBox, QLineEdit, QCheckBox, QLabel,
     QFileDialog, QMessageBox, QListWidget, QSplitter, QPlainTextEdit, QDoubleSpinBox,
     QSpinBox, QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem,
-    QScrollArea, QGroupBox, QProgressBar, QGridLayout, QSizePolicy, QBoxLayout)
+    QScrollArea, QGroupBox, QProgressBar, QGridLayout, QSizePolicy, QBoxLayout,QInputDialog)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from .grids import load_grid, save_grid, points_to_grid
@@ -437,12 +437,18 @@ class MainWindow(MapWorkspace,QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Таблица: первые 3 столбца X Y поле", "", "Таблицы (*.xlsx *.csv *.txt)")
         if path:
             data = read_table(path)
-            # Share the explicit table CRS and axis-order controls with horizon data.
-            north_first = self.north_first.isChecked()
-            crs = validate_crs(self.table_crs.currentText().split("|")[0].strip(), "m")
+            # Plain XYZ tables carry no reliable CRS: never borrow ML defaults.
+            from pyproj import CRS
+            crs=self.source_crs('',Path(path).stem)
+            if crs is None: return
+            order,ok=QInputDialog.getItem(self,'Координаты таблицы','Первые два столбца:',
+                ['East (X), North (Y)','North (X), East (Y)'],0,False)
+            if not ok: return
+            north_first=order.startswith('North')
+            coordinate_unit='degrees' if CRS.from_user_input(crs).is_geographic else 'm'
             self.add_grid(points_to_grid(data.iloc[:, 1 if north_first else 0],
                                         data.iloc[:, 0 if north_first else 1], data.iloc[:, 2],
-                                        name=Path(path).stem, crs=crs, coordinate_unit="m"))
+                                        name=Path(path).stem, crs=crs, coordinate_unit=coordinate_unit))
 
     def metadata(self):
         grid = self.selected_grid()

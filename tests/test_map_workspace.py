@@ -191,3 +191,18 @@ def test_cancel_crs_change_is_atomic(monkeypatch,qt_application_lifetime):
     assert window.layers.item(0).data(Qt.UserRole)['data'] is original
     assert window.layers.item(1).data(Qt.UserRole)['data'] is unknown
     window.close()
+
+
+def test_xyz_import_asks_source_crs_independently_of_ml(tmp_path,monkeypatch,qt_application_lifetime):
+    from PyQt5.QtWidgets import QInputDialog
+    path=tmp_path/'wgs.csv'
+    path.write_text('East,North,Field\n104.99,69.99,1\n105.01,69.99,2\n104.99,70.01,3\n105.01,70.01,4\n')
+    window=MainWindow(); window.apply_project_crs('EPSG:20918')
+    asked=[]
+    monkeypatch.setattr(window,'source_crs',lambda known,name:known or asked.append(name) or 'EPSG:4326')
+    monkeypatch.setattr(QFileDialog,'getOpenFileName',lambda *a:(str(path),''))
+    monkeypatch.setattr(QInputDialog,'getItem',lambda *a:('East (X), North (Y)',True))
+    window.open_xyz()
+    assert asked==['wgs'] and window.selected_grid().crs=='EPSG:20918'
+    assert window.selected_grid().x.min()>18000000
+    window.close()
