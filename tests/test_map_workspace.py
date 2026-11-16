@@ -206,3 +206,65 @@ def test_xyz_import_asks_source_crs_independently_of_ml(tmp_path,monkeypatch,qt_
     assert asked==['wgs'] and window.selected_grid().crs=='EPSG:20918'
     assert window.selected_grid().x.min()>18000000
     window.close()
+
+
+def test_shared_title_layout_persistence_and_export(tmp_path,monkeypatch,qt_application_lifetime):
+    from PyQt5.QtCore import QSettings
+    import geogarmodel.maps_ui as ui
+    real_settings=QSettings
+    monkeypatch.setattr(ui,'QSettings',lambda *a:real_settings(str(tmp_path/'layout.ini'),real_settings.IniFormat))
+    window=MainWindow(); window.add_grid(grid('A')); first=window.layers.currentItem()
+    window.map_title.setText('Общий заголовок'); window.redraw()
+    window.add_grid(grid('B')); second=window.layers.currentItem()
+    assert window.figure.axes[0].get_title()=='Общий заголовок'
+    window.layers.setCurrentItem(first); assert window.figure.axes[0].get_title()=='Общий заголовок'
+    ax=window.figure.axes[0]; ax.set_xlim(100,400); ax.set_ylim(100,300)
+    dialog=window.map_toolbar.configure_subplots()
+    dialog._spinboxes['left'].setValue(.2); dialog._spinboxes['bottom'].setValue(.25)
+    dialog.close(); window.layers.setCurrentItem(second); window.palette.setCurrentText('terrain')
+    np.testing.assert_allclose(window.figure.axes[0].get_xlim(),[100,400])
+    np.testing.assert_allclose(window.figure.axes[0].get_ylim(),[100,300])
+    assert window.figure.subplotpars.left==pytest.approx(.2)
+    assert window.figure.subplotpars.bottom==pytest.approx(.25)
+    window.figure.savefig(tmp_path/'export.png')
+    np.testing.assert_allclose(window.figure.axes[0].get_xlim(),[100,400])
+    path=tmp_path/'title.ggmaps'; monkeypatch.setattr(QFileDialog,'getSaveFileName',lambda *a:(str(path),''))
+    window.save_map_project(); manifest,rows=load_project(path)
+    assert manifest['presentation']['title']=='Общий заголовок'
+    assert all('title' not in r['style'] for r in rows)
+    other=MainWindow(); other.add_grid(grid()); assert other.figure.subplotpars.left==pytest.approx(.2)
+    window.close(); other.close()
+
+
+def test_sun_mouse_direction_and_independent_layers(qt_application_lifetime):
+    from PyQt5.QtTest import QTest
+    window=MainWindow(); window.add_grid(grid('A')); first=window.layers.currentItem()
+    window.shade.setChecked(True); window.sun_azimuth.setValue(90); window.sun_intensity.setValue(75)
+    original=window.selected_grid().values.copy()
+    window.add_grid(grid('B')); second=window.layers.currentItem()
+    window.sun_azimuth.setValue(180); window.sun_intensity.setValue(20)
+    window.layers.setCurrentItem(first)
+    assert window.sun_azimuth.value()==90 and window.sun_intensity.value()==75
+    window.sun_picker.resize(200,180)
+    center,radius=window.sun_picker.geometry_values()
+    QTest.mouseClick(window.sun_picker,Qt.LeftButton,pos=QPoint(int(center.x()),int(center.y()+radius/2)))
+    assert window.sun_azimuth.value()==pytest.approx(180)
+    assert window.sun_altitude.value()==pytest.approx(45,abs=2)
+    assert first.data(Qt.UserRole)['style']['sun_intensity']==.75
+    assert second.data(Qt.UserRole)['style']['sun_intensity']==.2
+    window.sun_intensity_slider.setValue(60)
+    assert window.sun_intensity.value()==60 and first.data(Qt.UserRole)['style']['sun_intensity']==.6
+    np.testing.assert_array_equal(window.selected_grid().values,original)
+    window.close()
+
+
+def test_hillshade_illumination_and_intensity():
+    from matplotlib.figure import Figure
+    from geogarmodel.plotting import draw_map
+    model=grid(); model.values=np.broadcast_to(model.y[:,None],model.values.shape).copy()
+    figure=Figure(); ax=draw_map(figure,model,hillshade=True,sun_azimuth=0,sun_altitude=45,sun_relief=1,sun_intensity=.7)
+    north=np.asarray(ax.images[1].get_array()).mean()
+    ax=draw_map(figure,model,hillshade=True,sun_azimuth=180,sun_altitude=45,sun_relief=1,sun_intensity=.2)
+    south=np.asarray(ax.images[1].get_array()).mean()
+    assert south>north  # A surface rising northward faces south (origin='lower').
+    assert ax.images[1].get_alpha()==pytest.approx(.2)

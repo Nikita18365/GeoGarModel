@@ -2,6 +2,25 @@
 import numpy as np
 from pyproj import CRS,Transformer
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
+from matplotlib.backends.backend_qt import SubplotToolQt
+
+
+class MapSubplotTool(SubplotToolQt):
+    def __init__(self,workbench):
+        self.workbench=workbench
+        super().__init__(workbench.figure,workbench)
+
+    def _on_value_changed(self):
+        views=[(ax,ax.get_xlim(),ax.get_ylim()) for ax in self._figure.axes]
+        super()._on_value_changed()
+        for ax,x,y in views: ax.set_xlim(x); ax.set_ylim(y)
+        self.workbench.remember_map_layout()
+
+    def _tight_layout(self):
+        views=[(ax,ax.get_xlim(),ax.get_ylim()) for ax in self._figure.axes]
+        super()._tight_layout()
+        for ax,x,y in views: ax.set_xlim(x); ax.set_ylim(y)
+        self.workbench.remember_map_layout()
 
 
 class MapToolbar(NavigationToolbar2QT):
@@ -11,6 +30,12 @@ class MapToolbar(NavigationToolbar2QT):
 
     def home(self,*args):
         self.workbench.guard(self.workbench.fit_maps)
+
+    def configure_subplots(self):
+        if self._subplot_dialog is None: self._subplot_dialog=MapSubplotTool(self.workbench)
+        self._subplot_dialog.update_from_current_subplotpars()
+        self._subplot_dialog.setModal(True); self._subplot_dialog.show()
+        return self._subplot_dialog
 
 
 def north_direction(crs,x,y):

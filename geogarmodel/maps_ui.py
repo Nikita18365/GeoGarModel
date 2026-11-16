@@ -1,10 +1,11 @@
 """Layer tree, independent layer styling and portable map workspaces."""
 from pathlib import Path
+import json
 import numpy as np
-from PyQt5.QtCore import Qt,QMimeData
+from PyQt5.QtCore import Qt,QMimeData,QSettings
 from PyQt5.QtGui import QColor,QKeySequence,QDrag
 from PyQt5.QtWidgets import (QListWidgetItem,QAbstractItemView,QMenu,QShortcut,QInputDialog,
-    QFileDialog,QMessageBox,QDoubleSpinBox,QSpinBox,QLineEdit,QCheckBox,QColorDialog,QStyledItemDelegate,QPushButton,QComboBox,QDialog,QDialogButtonBox,QFormLayout)
+    QFileDialog,QMessageBox,QDoubleSpinBox,QSpinBox,QLineEdit,QCheckBox,QColorDialog,QStyledItemDelegate,QPushButton,QComboBox,QDialog,QDialogButtonBox,QFormLayout,QSlider,QWidget,QHBoxLayout)
 from PyQt5.QtWidgets import QListWidget
 from PyQt5.QtWidgets import QLabel
 from matplotlib.patches import Rectangle
@@ -12,6 +13,7 @@ from matplotlib.transforms import blended_transform_factory,IdentityTransform
 from .map_project import read_vector,save_project,load_project,reproject_grid
 from .plotting import draw_map
 from .map_navigation import north_direction
+from .sun_picker import SunPicker
 
 
 class LayerNameDelegate(QStyledItemDelegate):
@@ -65,6 +67,9 @@ class MapWorkspace:
     def setup_map_workspace(self,style_form,transform_form,project_layout):
         self.map_project_name='Без названия'; self.map_project_path=None; self.map_dirty=False
         self.map_project_crs=''
+        self.map_layout_settings=QSettings('GeoGarModel','MapLayout')
+        try: self._map_layout=json.loads(self.map_layout_settings.value('subplot_layout','null'))
+        except (ValueError,TypeError): self._map_layout=None
         self._map_selected=None; self._map_loading=False; self._map_fit=True
         self.map_style_group.setTitle('')
         self.map_style_heading=QLabel('Оформление карты — выберите карту')
@@ -87,7 +92,10 @@ class MapWorkspace:
         self.map_delete=QShortcut(QKeySequence.Delete,self.layers)
         self.map_delete.setContext(Qt.WidgetShortcut); self.map_delete.activated.connect(lambda:self.guard(self.delete_map_layer))
         self.map_style_widgets={'cmap':self.palette,'mode':self.norm,'vmin':self.minimum,'vmax':self.maximum,
-            'title':self.map_title,'contours':self.contours,'hillshade':self.shade}
+            'contours':self.contours,'hillshade':self.shade}
+        style_form.labelForField(self.map_title).setText('Общий заголовок (пусто — имя проекта)')
+        self.shade.setText('Теневой рельеф')
+        self.map_title.editingFinished.connect(lambda:self.guard(self.redraw))
         def number(minimum,maximum,value,decimals=2):
             w=QDoubleSpinBox(); w.setDecimals(decimals); w.setRange(minimum,maximum); w.setValue(value); return w
         self.contour_step=number(0,1e12,0,6); self.contour_step.setSpecialValueText('Авто')
@@ -101,6 +109,23 @@ class MapWorkspace:
                             ('contour_labels','',self.contour_labels),('alpha','Непрозрачность слоя',self.map_alpha)]:
             style_form.addRow(label,w); self.map_style_widgets[key]=w
         self.map_style_widgets['contour_color']=self.contour_color
+        self.sun_azimuth=number(0,360,315,1); self.sun_azimuth.setWrapping(True)
+        self.sun_altitude=number(0,90,45,1); self.sun_intensity=number(0,100,25,1)
+        self.sun_relief=number(.001,1e6,1,3)
+        self.sun_picker=SunPicker(); self.sun_picker.changed.connect(self.sun_from_mouse)
+        self.sun_picker.setAccessibleName('Положение солнца: азимут и высота')
+        self.sun_intensity_slider=QSlider(Qt.Horizontal); self.sun_intensity_slider.setRange(0,100)
+        self.sun_intensity_slider.setValue(25); self.sun_intensity_slider.setTracking(False)
+        self.sun_intensity_slider.valueChanged.connect(self.sun_intensity.setValue)
+        def sync_intensity(value):
+            self.sun_intensity_slider.blockSignals(True); self.sun_intensity_slider.setValue(round(value)); self.sun_intensity_slider.blockSignals(False)
+        self.sun_intensity.valueChanged.connect(sync_intensity)
+        self.sun_intensity_row=QWidget(); intensity_layout=QHBoxLayout(self.sun_intensity_row); intensity_layout.setContentsMargins(0,0,0,0)
+        intensity_layout.addWidget(self.sun_intensity_slider,1); intensity_layout.addWidget(self.sun_intensity)
+        style_form.addRow('Солнце: перетащите мышью',self.sun_picker)
+        for key,label,w in [('sun_azimuth','Азимут света, °',self.sun_azimuth),('sun_altitude','Высота солнца, °',self.sun_altitude),
+                            ('sun_intensity','Интенсивность тени, %',self.sun_intensity),('sun_relief','Усиление рельефа',self.sun_relief)]:
+            style_form.addRow(label,self.sun_intensity_row if key=='sun_intensity' else w); self.map_style_widgets[key]=w
         color_button=QPushButton('Выбрать цвет…'); self.contour_color_button=color_button
         color_button.clicked.connect(lambda:self.guard(self.choose_contour_color))
         style_form.insertRow(style_form.getWidgetPosition(self.contour_width)[0],'Цвет изолиний',color_button)
@@ -116,6 +141,10 @@ class MapWorkspace:
         style_form.addRow('Шаг линейки',self.scale_step); style_form.addRow('Число делений',self.scale_count)
         style_form.addRow(self.scale_crs)
         def show_details():
+            for widget in (self.sun_picker,self.sun_azimuth,self.sun_altitude,self.sun_intensity_row,self.sun_relief):
+                widget.setVisible(self.shade.isChecked())
+                label=style_form.labelForField(widget)
+                if label: label.setVisible(self.shade.isChecked())
             for widget in (self.contour_step,self.contour_width,self.contour_labels):
                 widget.setVisible(self.contours.isChecked())
                 label=style_form.labelForField(widget)
@@ -126,7 +155,7 @@ class MapWorkspace:
                 widget.setVisible(self.scale_on.isChecked())
                 label=style_form.labelForField(widget)
                 if label: label.setVisible(self.scale_on.isChecked())
-        self.contours.toggled.connect(show_details); self.scale_on.toggled.connect(show_details); show_details()
+        self.contours.toggled.connect(show_details); self.scale_on.toggled.connect(show_details); self.shade.toggled.connect(show_details); show_details()
         self.scale_unit.currentIndexChanged.connect(self.change_scale_unit)
         for w in [*self.map_style_widgets.values(),self.scale_on,self.scale_step,self.scale_count,self.scale_unit,self.scale_crs,self.north_symbol]:
             signal=(w.editingFinished if isinstance(w,QLineEdit) else w.toggled if isinstance(w,QCheckBox)
@@ -149,6 +178,16 @@ class MapWorkspace:
                self.degree:operation in ('trend','detrend')}
         for widget,visible in shown.items():
             widget.setVisible(visible); self.transform_rows[widget].setVisible(visible)
+
+    def remember_map_layout(self):
+        keys=('left','right','top','bottom','wspace','hspace')
+        self._map_layout={key:float(getattr(self.figure.subplotpars,key)) for key in keys}
+        self.map_layout_settings.setValue('subplot_layout',json.dumps(self._map_layout)); self.map_layout_settings.sync()
+
+    def sun_from_mouse(self,azimuth,altitude):
+        for widget,value in ((self.sun_azimuth,azimuth),(self.sun_altitude,altitude)):
+            widget.blockSignals(True); widget.setValue(value); widget.blockSignals(False)
+        self.guard(self.redraw)
 
     def change_scale_unit(self):
         if self._map_loading: return
@@ -229,6 +268,7 @@ class MapWorkspace:
         for key,w in self.map_style_widgets.items():
             result[key]=(w.text() if isinstance(w,QLineEdit) else w.isChecked() if isinstance(w,QCheckBox)
                          else w.currentText() if key=='cmap' else w.currentData() if key=='mode' else w.value())
+            if key=='sun_intensity': result[key]/=100
         return result
 
     def map_selection(self,item,previous):
@@ -244,6 +284,7 @@ class MapWorkspace:
                 elif isinstance(w,QCheckBox): w.setChecked(value)
                 elif key=='cmap': w.setCurrentText(value)
                 elif key=='mode': w.setCurrentIndex(w.findData(value))
+                elif key=='sun_intensity': w.setValue(value*100)
                 else: w.setValue(value)
             self._map_loading=False
         self.guard(self.redraw)
@@ -252,12 +293,16 @@ class MapWorkspace:
         rows=[]
         for i in range(self.layers.count()):
             item=self.layers.item(i); row=item.data(Qt.UserRole)
+            row['style'].pop('title',None)
             row.update(name=item.text(),visible=item.checkState()==Qt.Checked)
             if row['kind']=='grid': row['data'].name=item.text()
             rows.append(row)
         return rows
 
     def add_map_layer(self,row):
+        if row['kind']=='grid':
+            for key,value in dict(sun_azimuth=315.,sun_altitude=45.,sun_intensity=.25,sun_relief=1.).items():
+                row['style'].setdefault(key,value)
         self._map_loading=True
         item=LayerItem(row['name']); item.setData(Qt.UserRole,row)
         item.setForeground(QColor('#dbe7f6'))
@@ -281,7 +326,7 @@ class MapWorkspace:
                 if not self.apply_project_crs(grid.crs): return
             else:
                 self.map_project_crs=grid.crs; self.update_project_label()
-        style=self.read_map_style(); style.update(vmin='',vmax='',title='')
+        style=self.read_map_style(); style.update(vmin='',vmax='')
         self.add_map_layer(dict(kind='grid',name=grid.name,visible=True,style=style,data=grid))
 
     def map_reordered(self):
@@ -342,6 +387,7 @@ class MapWorkspace:
         self.map_style_heading.setText('Оформление карты — '+item.text() if item and item.data(Qt.UserRole)['kind']=='grid' else 'Оформление карты — выберите карту')
         self.map_style_group.setToolTip(self.map_style_heading.text())
         self.contour_color_button.setIcon(self.color_icon())
+        self.sun_picker.set_light(self.sun_azimuth.value(),self.sun_altitude.value())
         if item and item.data(Qt.UserRole)['kind']=='grid': item.data(Qt.UserRole)['style'].update(self.read_map_style())
         rows=self.map_layer_rows(); grids=[r for r in rows if r['visible'] and r['kind']=='grid']
         self._map_decorations=[]
@@ -355,10 +401,10 @@ class MapWorkspace:
                 raise ValueError('Для совместного отображения задайте всем картам одинаковые CRS и единицы координат.')
             for row in reversed(grids):
                 before=set(ax.get_children()) if ax is not None else set()
-                options=dict(row['style']); options['title']=options.get('title') or row['name']
+                options=dict(row['style']); options['title']=self.map_title.text().strip() or self.map_project_name
                 for k in ('vmin','vmax'): options[k]=float(options[k]) if str(options.get(k,'')).strip() else None
                 if not QColor(options.get('contour_color','#dbe7f6')).isValid(): raise ValueError('Выберите допустимый цвет изолиний.')
-                ax=draw_map(self.figure,row['data'],target_ax=ax,**options)
+                ax=draw_map(self.figure,row['data'],target_ax=ax,auto_layout=False,**options)
                 order=(len(rows)-next(i for i,r in enumerate(rows) if r is row))*10
                 for artist in set(ax.get_children())-before:
                     if artist in ax.images or artist in ax.collections or artist in ax.texts:
@@ -374,7 +420,8 @@ class MapWorkspace:
             ax.relim(); ax.autoscale_view()
             self._map_home=(ax.get_xlim(),ax.get_ylim())
             if view: ax.set_xlim(view[0]); ax.set_ylim(view[1])
-            self.figure.subplots_adjust(bottom=(.23 if self.scale_crs.isChecked() else .20) if self.scale_on.isChecked() else .13,top=.84)
+            if self._map_layout: self.figure.subplots_adjust(**self._map_layout)
+            else: self.figure.subplots_adjust(left=.14,right=.9,bottom=(.23 if self.scale_crs.isChecked() else .20) if self.scale_on.isChecked() else .13,top=.84)
             self.draw_north(ax,self.figure.axes[1],crs)
             if self.scale_on.isChecked():
                 if grids[0]['data'].coordinate_unit=='degrees': raise ValueError('Масштабная линейка в метрах требует метрических координат.')
@@ -474,6 +521,7 @@ class MapWorkspace:
 
     def reset_map_project(self,name='Без названия'):
         self._map_loading=True; self._map_selected=None; self.layers.clear(); self._map_loading=False
+        self.map_title.clear()
         self.grids=[]; self.overlays=[]; self.map_project_name=name; self.map_project_path=None; self.map_project_crs=''
         self._map_loading=True; self.scale_on.setChecked(False); self.scale_step.setValue(0); self.scale_count.setValue(4); self._map_loading=False
         self._map_loading=True; self.scale_unit.setCurrentIndex(0); self.scale_crs.setChecked(False); self.north_symbol.setCurrentIndex(0); self._map_loading=False
@@ -499,7 +547,8 @@ class MapWorkspace:
         view=[list(ax.get_xlim()),list(ax.get_ylim())] if ax else None
         save_project(path,self.map_project_name,self.map_layer_rows(),view,
                      dict(enabled=self.scale_on.isChecked(),step=self.scale_step.value(),count=self.scale_count.value(),
-                          unit=self.scale_unit.currentText(),show_crs=self.scale_crs.isChecked(),north=self.north_symbol.currentData()),self.map_project_crs)
+                          unit=self.scale_unit.currentText(),show_crs=self.scale_crs.isChecked(),north=self.north_symbol.currentData()),
+                     self.map_project_crs,presentation=dict(title=self.map_title.text()))
         self.map_project_path=path; self.map_dirty=False; return True
 
     def open_map_project(self):
@@ -512,6 +561,7 @@ class MapWorkspace:
                 if row['kind']=='vector': row['data']=row['data'].reproject(project_crs)
         if not self.confirm_map_close(): return
         self.reset_map_project(manifest['name'])
+        self.map_title.setText(manifest.get('presentation',{}).get('title',''))
         self.map_project_crs=project_crs; self.update_project_label()
         for row in reversed(rows): self.add_map_layer(row)
         self._map_loading=True

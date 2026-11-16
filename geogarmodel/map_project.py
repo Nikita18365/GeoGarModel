@@ -91,7 +91,7 @@ def read_vector(path,source_crs=None):
     return Vector(features,crs)
 
 
-def save_project(path,name,layers,view,scale,crs=''):
+def save_project(path,name,layers,view,scale,crs='',presentation=None):
     arrays={}; rows=[]
     for i,layer in enumerate(layers):
         row={k:layer[k] for k in ('name','visible','style','kind')}
@@ -101,7 +101,7 @@ def save_project(path,name,layers,view,scale,crs=''):
             row['metadata']={k:getattr(value,k) for k in ('name','unit','crs','coordinate_unit','history')}
         else: row.update(features=value.features,crs=value.crs)
         rows.append(row)
-    arrays['manifest']=json.dumps(dict(version=1,name=name,layers=rows,view=view,scale=scale,crs=crs),ensure_ascii=False)
+    arrays['manifest']=json.dumps(dict(version=1,name=name,layers=rows,view=view,scale=scale,crs=crs,presentation=presentation or {}),ensure_ascii=False)
     path=Path(path)
     with tempfile.NamedTemporaryFile(dir=path.parent,suffix='.tmp',delete=False) as stream:
         temporary=stream.name
