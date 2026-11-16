@@ -8,7 +8,8 @@ from .theme import style_figure
 def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=None,
              contours=False, hillshade=False, title=None, overlays=(), points=None,
              contour_step=0, contour_color='#dbe7f6', contour_width=.5,
-             contour_labels=True, alpha=1., target_ax=None):
+             contour_labels=True, alpha=1., target_ax=None,auto_layout=True,
+             sun_azimuth=315.,sun_altitude=45.,sun_intensity=.25,sun_relief=1.):
     finite = grid.values[np.isfinite(grid.values)]
     if mode == "percentile":
         low, high = np.percentile(finite, [2, 98])
@@ -51,9 +52,9 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
     if hillshade:
         # Shade an independent intensity layer so the colourbar still represents values.
         filled = np.where(np.isfinite(grid.values), grid.values, np.nanmedian(grid.values))
-        shade = LightSource(315, 45).hillshade(filled, dx=grid.dx, dy=grid.dy, vert_exag=1)
+        shade = LightSource(sun_azimuth, sun_altitude).hillshade(filled, dx=grid.dx, dy=-grid.dy, vert_exag=sun_relief)
         shade = np.ma.array(shade, mask=~np.isfinite(grid.values))
-        ax.imshow(shade, origin="lower", extent=extent, interpolation="nearest", cmap="gray", alpha=.25, rasterized=True)
+        ax.imshow(shade, origin="lower", extent=extent, interpolation="nearest", cmap="gray", vmin=0,vmax=1,alpha=sun_intensity*alpha, rasterized=True)
     if contours and np.ptp(finite) > 0:
         sy, sx = max(1, int(np.ceil(len(grid.y) / 512))), max(1, int(np.ceil(len(grid.x) / 512)))
         levels=10
@@ -81,7 +82,7 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
     ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     bar = figure.colorbar(image, ax=ax, label=grid.unit, fraction=.045, pad=.04) if target_ax is None else None
     style_figure(figure)
-    figure.tight_layout()
+    if auto_layout: figure.tight_layout()
     if fast:
         figure._map_cache = (grid, ax, image, bar)
     return ax
