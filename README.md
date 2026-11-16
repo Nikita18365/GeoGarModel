@@ -62,6 +62,7 @@ python -m pip install -e ".[boosting,neural,geo]"
 - [Структура проекта и проверки](docs/ARCHITECTURE.md)
 - [3D-плотностное и магнитное моделирование: входы, физика, CPU/GPU и визуализация](docs/INVERSION.md)
 - [Начальная модель, импорт вокселей, математические операции](docs/INITIAL_MODEL.md)
+- [Уведомления о завершении расчёта в Telegram](docs/TELEGRAM.md)
 - [Архив старой инструкции (можно не открывать)](docs/LEGACY_MANUAL.md)
 
 ## Тесты
