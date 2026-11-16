@@ -26,6 +26,7 @@ from .parameter_files import validate_parameters, read_parameters, best_snapshot
 from .window_theme import apply_window_theme
 from .ui_layout import Disclosure,details,form_details,workflow_sections,quiet_button,prepare_forms
 from .maps_ui import MapWorkspace,LayerList
+from .map_navigation import MapToolbar
 
 
 class Worker(QThread):
@@ -144,7 +145,8 @@ class MainWindow(MapWorkspace,QMainWindow):
         self.canvas = FigureCanvasQTAgg(self.figure)
         plot = QWidget()
         plot_layout = QVBoxLayout(plot)
-        plot_layout.addWidget(NavigationToolbar2QT(self.canvas, self))
+        self.map_toolbar=MapToolbar(self.canvas,self)
+        plot_layout.addWidget(self.map_toolbar)
         plot_layout.addWidget(self.canvas)
         controls = QWidget()
         root_panel = QVBoxLayout(controls)
@@ -162,7 +164,8 @@ class MainWindow(MapWorkspace,QMainWindow):
         self.button("Убрать векторные наложения", self.clear_overlays, panel)
         self.button("Обрезать по текущему виду карты", self.crop_view, panel)
         main_data_panel.addWidget(Disclosure('Контуры и обрезка',overlay_group))
-        style_group=QGroupBox('Оформление карты'); panel=QVBoxLayout(style_group); root_panel.addWidget(style_group)
+        style_group=QGroupBox('Оформление карты'); self.map_style_group=style_group
+        panel=QVBoxLayout(style_group); root_panel.addWidget(style_group)
         form = QFormLayout()
         panel.addLayout(form)
         self.palette = QComboBox()

@@ -81,3 +81,43 @@ def test_geojson_and_shp_without_geopandas(tmp_path):
     shp.with_suffix('.prj').write_text(CRS.from_epsg(4326).to_wkt())
     imported=read_vector(shp); assert len(imported.features)==1
     imported.draw(ax,'EPSG:3857'); assert len(ax.lines)==2
+
+
+def test_home_wheel_heading_scale_and_name_editor(qt_application_lifetime):
+    from types import SimpleNamespace
+    from PyQt5.QtWidgets import QStyleOptionViewItem,QLineEdit
+    window=MainWindow(); window.add_grid(grid('ГФО_Grav'))
+    window.show(); qt_application_lifetime.processEvents()
+    assert 'ГФО_Grav' in window.map_style_heading.text()
+    item=window.layers.currentItem(); window.layers.editItem(item)
+    qt_application_lifetime.processEvents()
+    editor=next(e for e in window.layers.findChildren(QLineEdit) if e.isVisible())
+    assert editor.height()>=28 and editor.text()=='ГФО_Grav'
+    editor.setText('Новое имя карты'); window.layers.itemDelegate().commitData.emit(editor)
+    window.layers.itemDelegate().closeEditor.emit(editor)
+    assert 'Новое имя карты' in window.map_style_heading.text()
+    ax=window.figure.axes[0]; full=(ax.get_xlim(),ax.get_ylim())
+    window.map_scroll(SimpleNamespace(inaxes=ax,xdata=200.,ydata=150.,step=1))
+    assert np.ptp(ax.get_xlim())<np.ptp(full[0])
+    # The cursor's relative position is preserved by wheel zoom.
+    assert (200-ax.get_xlim()[0])/np.ptp(ax.get_xlim())==pytest.approx((200-full[0][0])/np.ptp(full[0]))
+    window.map_toolbar.home(); ax=window.figure.axes[0]
+    np.testing.assert_allclose(ax.get_xlim(),full[0]); np.testing.assert_allclose(ax.get_ylim(),full[1])
+    window.contours.setChecked(True); assert window.contour_color.isHidden()
+    assert window.contour_color_button.isHidden() is False
+    window.scale_on.setChecked(True); ax=window.figure.axes[0]; window.canvas.draw()
+    assert all(p.get_y()<0 and not p.get_clip_on() for p in ax.patches)
+    first=min(t for t in ax.get_xticks() if min(ax.get_xlim())<=t<=max(ax.get_xlim()))
+    assert ax.patches[0].get_x()==pytest.approx(first)
+    window.close()
+
+
+def test_geographic_north_uses_crs():
+    from geogarmodel.map_navigation import north_direction
+    from pyproj import Transformer
+    project=Transformer.from_crs(4326,20918,always_xy=True)
+    central=north_direction('EPSG:20918',*project.transform(105,70))
+    west=north_direction('EPSG:20918',*project.transform(103,70))
+    east=north_direction('EPSG:20918',*project.transform(107,70))
+    np.testing.assert_allclose(central,[0,1],atol=1e-5)
+    assert west[0]>0 and east[0]<0 and west[1]>0 and east[1]>0

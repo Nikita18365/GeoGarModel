@@ -4,13 +4,27 @@ import numpy as np
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor,QKeySequence
 from PyQt5.QtWidgets import (QListWidgetItem,QAbstractItemView,QMenu,QShortcut,QInputDialog,
-    QFileDialog,QMessageBox,QDoubleSpinBox,QSpinBox,QLineEdit,QCheckBox,QColorDialog)
+    QFileDialog,QMessageBox,QDoubleSpinBox,QSpinBox,QLineEdit,QCheckBox,QColorDialog,QStyledItemDelegate,QPushButton)
 from PyQt5.QtWidgets import QListWidget
 from PyQt5.QtWidgets import QLabel
 from matplotlib.patches import Rectangle
 from matplotlib.transforms import blended_transform_factory
 from .map_project import read_vector,save_project,load_project
 from .plotting import draw_map
+from .map_navigation import north_direction
+
+
+class LayerNameDelegate(QStyledItemDelegate):
+    def sizeHint(self,option,index):
+        size=super().sizeHint(option,index); size.setHeight(max(size.height(),34)); return size
+
+    def createEditor(self,parent,option,index):
+        editor=QLineEdit(parent)
+        editor.setStyleSheet('QLineEdit {padding: 2px 4px; border: 1px solid #38bdf8; color: #f1f7ff; background: #101c2f; selection-color: white;}')
+        return editor
+
+    def updateEditorGeometry(self,editor,option,index):
+        editor.setGeometry(option.rect.adjusted(0,0,0,0))
 
 
 class LayerItem(QListWidgetItem):
@@ -36,6 +50,10 @@ class MapWorkspace:
     def setup_map_workspace(self,style_form,transform_form,project_layout):
         self.map_project_name='Без названия'; self.map_project_path=None; self.map_dirty=False
         self._map_selected=None; self._map_loading=False; self._map_fit=True
+        self.map_style_group.setTitle('')
+        self.map_style_heading=QLabel('Оформление карты — выберите карту')
+        self.map_style_heading.setWordWrap(True)
+        self.map_style_group.layout().insertWidget(0,self.map_style_heading)
         self.project_label=QLabel('Проект: Без названия'); self.project_label.setWordWrap(True)
         project_layout.insertWidget(0,self.project_label)
         help_label=QLabel('✓ — показать слой · верхний слой впереди\nПеретащите для порядка · F2 — имя · Delete — удалить')
@@ -43,6 +61,7 @@ class MapWorkspace:
         self.layers.currentRowChanged.disconnect()
         self.layers.setSelectionMode(QAbstractItemView.SingleSelection)
         self.layers.setDragDropMode(QAbstractItemView.InternalMove)
+        self.layers.setItemDelegate(LayerNameDelegate(self.layers))
         self.layers.setContextMenuPolicy(Qt.CustomContextMenu)
         self.layers.customContextMenuRequested.connect(self.map_context)
         self.layers.currentItemChanged.connect(self.map_selection)
@@ -55,25 +74,30 @@ class MapWorkspace:
         def number(minimum,maximum,value,decimals=2):
             w=QDoubleSpinBox(); w.setDecimals(decimals); w.setRange(minimum,maximum); w.setValue(value); return w
         self.contour_step=number(0,1e12,0,6); self.contour_step.setSpecialValueText('Авто')
-        self.contour_color=QLineEdit('#dbe7f6'); self.contour_width=number(.1,10,.7)
+        # Keep the serialized colour value for compatibility; only the palette button is shown.
+        self.contour_color=QLineEdit('#dbe7f6',self.layers); self.contour_color.hide()
+        self.contour_width=number(.1,10,.7)
         self.contour_labels=QCheckBox('Подписывать значения'); self.contour_labels.setChecked(True)
         self.map_alpha=number(0,1,1); self.map_alpha.setSingleStep(.1)
         for key,label,w in [('contour_step','Сечение изолиний (единицы поля)',self.contour_step),
-                            ('contour_color','Цвет изолиний (имя или #RRGGBB)',self.contour_color),
                             ('contour_width','Толщина изолиний',self.contour_width),
                             ('contour_labels','',self.contour_labels),('alpha','Непрозрачность слоя',self.map_alpha)]:
             style_form.addRow(label,w); self.map_style_widgets[key]=w
-        color_button=self.button('Выбрать цвет изолиний…',self.choose_contour_color,style_form)
+        self.map_style_widgets['contour_color']=self.contour_color
+        color_button=QPushButton('Выбрать цвет…'); self.contour_color_button=color_button
+        color_button.clicked.connect(lambda:self.guard(self.choose_contour_color))
+        style_form.insertRow(style_form.getWidgetPosition(self.contour_width)[0],'Цвет изолиний',color_button)
         self.scale_on=QCheckBox('Масштабная линейка'); style_form.addRow(self.scale_on)
         self.scale_step=number(0,1e9,0); self.scale_step.setSpecialValueText('Авто')
         self.scale_count=QSpinBox(); self.scale_count.setRange(1,20); self.scale_count.setValue(4)
         style_form.addRow('Шаг линейки, м',self.scale_step); style_form.addRow('Число делений',self.scale_count)
         def show_details():
-            for widget in (self.contour_step,self.contour_color,self.contour_width,self.contour_labels):
+            for widget in (self.contour_step,self.contour_width,self.contour_labels):
                 widget.setVisible(self.contours.isChecked())
                 label=style_form.labelForField(widget)
                 if label: label.setVisible(self.contours.isChecked())
             color_button.setVisible(self.contours.isChecked())
+            style_form.labelForField(color_button).setVisible(self.contours.isChecked())
             for widget in (self.scale_step,self.scale_count):
                 widget.setVisible(self.scale_on.isChecked()); style_form.labelForField(widget).setVisible(self.scale_on.isChecked())
         self.contours.toggled.connect(show_details); self.scale_on.toggled.connect(show_details); show_details()
@@ -83,6 +107,8 @@ class MapWorkspace:
             signal.connect(lambda *a:self.guard(self.redraw))
         self.transform_rows={w:transform_form.labelForField(w) for w in (self.height,self.wave,self.degree)}
         self.operation.currentIndexChanged.connect(self.update_transform_parameters); self.update_transform_parameters()
+        self.canvas.mpl_connect('scroll_event',self.map_scroll)
+        self.canvas.mpl_connect('draw_event',self.map_drawn)
         menu=self.menuBar().addMenu('Проект карт')
         for title,fn in [('Создать…',self.new_map_project),('Открыть…',self.open_map_project),
                          ('Сохранить',self.save_map_project),('Сохранить как…',lambda:self.save_map_project(True)),
@@ -194,8 +220,12 @@ class MapWorkspace:
     def redraw(self):
         if not hasattr(self,'_map_loading') or self._map_loading: return
         item=self.layers.currentItem()
+        self.map_style_heading.setText('Оформление карты — '+item.text() if item and item.data(Qt.UserRole)['kind']=='grid' else 'Оформление карты — выберите карту')
+        self.map_style_group.setToolTip(self.map_style_heading.text())
+        self.contour_color_button.setIcon(self.color_icon())
         if item and item.data(Qt.UserRole)['kind']=='grid': item.data(Qt.UserRole)['style'].update(self.read_map_style())
         rows=self.map_layer_rows(); grids=[r for r in rows if r['visible'] and r['kind']=='grid']
+        self._map_decorations=[]
         old=self.figure.axes[0] if self.figure.axes else None
         if old is not None and old.images: self._map_view=(old.get_xlim(),old.get_ylim())
         view=getattr(self,'_map_view',None) if not self._map_fit else None
@@ -223,7 +253,10 @@ class MapWorkspace:
                     order=(len(rows)-next(i for i,r in enumerate(rows) if r is row))*10
                     for artist in set(ax.get_children())-before: artist.set_zorder(order+2)
             ax.relim(); ax.autoscale_view()
+            self._map_home=(ax.get_xlim(),ax.get_ylim())
             if view: ax.set_xlim(view[0]); ax.set_ylim(view[1])
+            self.figure.subplots_adjust(bottom=.24 if self.scale_on.isChecked() else .13,top=.84)
+            self.draw_north(ax,self.figure.axes[1],crs)
             if self.scale_on.isChecked():
                 if grids[0]['data'].coordinate_unit=='degrees': raise ValueError('Масштабная линейка в метрах требует метрических координат.')
                 self.draw_scale(ax)
@@ -232,6 +265,47 @@ class MapWorkspace:
             from .theme import style_figure
             style_figure(self.figure)
         self._map_fit=False; self.map_dirty=True; self.canvas.draw_idle()
+
+    def color_icon(self):
+        from PyQt5.QtGui import QPixmap,QIcon
+        pixmap=QPixmap(24,16); pixmap.fill(QColor(self.contour_color.text())); return QIcon(pixmap)
+
+    def map_scroll(self,event):
+        if not self.figure.axes: return
+        ax=self.figure.axes[0]
+        if event.inaxes is not ax or event.xdata is None or event.ydata is None: return
+        factor=1.2**(-event.step)
+        ax.set_xlim(*[event.xdata+(v-event.xdata)*factor for v in ax.get_xlim()])
+        ax.set_ylim(*[event.ydata+(v-event.ydata)*factor for v in ax.get_ylim()])
+        self.map_dirty=True; self.canvas.draw_idle()
+
+    def map_drawn(self,event):
+        # Decorations depend on final axes positions after aspect adjustment and resize.
+        changed=False
+        for update in getattr(self,'_map_decorations',[]): changed=update() or changed
+        if changed: self.canvas.draw_idle()
+
+    def draw_north(self,ax,bar,crs):
+        self._map_decorations=[]
+        arrow=bar.annotate('',xy=(0,0),xytext=(0,0),xycoords='figure pixels',textcoords='figure pixels',
+                           arrowprops=dict(arrowstyle='-|>',color='#dbe7f6',lw=1.5),annotation_clip=False)
+        label=bar.text(.5,1.16,'N' if crs else 'N сетки',transform=bar.transAxes,ha='center',fontsize=10,color='#dbe7f6',clip_on=False)
+        def update(_=None):
+            x=np.mean(ax.get_xlim()); y=np.mean(ax.get_ylim())
+            try:
+                direction=north_direction(crs,x,y) if crs else np.array([0.,1.])
+                points=ax.transData.transform([[x,y],[x+direction[0],y+direction[1]]])
+                delta=points[1]-points[0]; delta/=np.linalg.norm(delta)
+                base=bar.transAxes.transform((.5,1.035)); tip=base+delta*25*self.figure.dpi/100
+                changed=not np.allclose(arrow.xy,tip) or not np.allclose(arrow.get_position(),base)
+                arrow.xy=tip; arrow.set_position(base); arrow.set_visible(True)
+                label.set_text('N' if crs else 'N сетки')
+                return changed
+            except (ValueError,RuntimeError):
+                arrow.set_visible(False); label.set_text('N ?')
+                return False
+        update(); self._map_decorations.append(update)
+        ax.callbacks.connect('xlim_changed',update); ax.callbacks.connect('ylim_changed',update)
 
     def draw_scale(self,ax):
         artists=[]
@@ -242,15 +316,16 @@ class MapWorkspace:
             if step==0:
                 desired=abs(hi-lo)*.25/count; base=10**np.floor(np.log10(max(desired,1e-12)))
                 step=next(v*base for v in (1,2,5,10) if v*base>=desired)
-            x=min(lo,hi)+abs(hi-lo)*.05
+            ticks=[v for v in ax.get_xticks() if min(lo,hi)<=v<=max(lo,hi)]
+            x=(min(ticks) if lo<hi else max(ticks)) if ticks else min(lo,hi)
             trans=blended_transform_factory(ax.transData,ax.transAxes)
             for i in range(count):
-                patch=Rectangle((x+i*step,.045),step,.015,transform=trans,
-                                facecolor='white' if i%2 else 'black',edgecolor='white',linewidth=.7,zorder=200)
+                patch=Rectangle((x+i*step,-.25),step,.02,transform=trans,clip_on=False,
+                                facecolor='white' if i%2 else 'black',edgecolor='white',linewidth=.7,zorder=100000)
                 ax.add_patch(patch); artists.append(patch)
             for i in range(count+1):
-                artists.append(ax.text(x+i*step,.07,f'{i*step:g}',transform=trans,ha='center',fontsize=8,color='white',zorder=200))
-            artists.append(ax.text(x+count*step,.025,'м',transform=trans,ha='right',fontsize=9,color='white',zorder=200))
+                artists.append(ax.text(x+i*step,-.21,f'{i*step:g}',transform=trans,ha='center',fontsize=8,color='white',zorder=100000,clip_on=False))
+            artists.append(ax.text(x+count*step,-.29,'м',transform=trans,ha='right',fontsize=9,color='white',zorder=100000,clip_on=False))
         update(); ax.callbacks.connect('xlim_changed',update)
 
     def fit_maps(self): self._map_fit=True; self.redraw()
