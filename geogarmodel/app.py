@@ -157,7 +157,7 @@ class MainWindow(MapWorkspace,QMainWindow):
         self.layers.setMinimumHeight(100); self.layers.setMaximumHeight(180)
         self.layers.currentRowChanged.connect(lambda _: self.guard(self.redraw))
         panel.addWidget(self.layers)
-        self.button("CRS и единицы карты…", self.metadata, panel)
+        self.button("СК и False East слоя…", self.layer_coordinates, panel)
         overlay_group=QWidget(); overlay_layout=QVBoxLayout(overlay_group)
         main_data_panel=panel; panel=overlay_layout
         self.button("Добавить SHP / GeoJSON", self.open_vector, panel)
@@ -431,7 +431,12 @@ class MainWindow(MapWorkspace,QMainWindow):
     def open_grid(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Сетки", "", "Grid (*.zmap *.dat *.npz);;Все файлы (*)")
         for path in paths:
-            self.add_grid(load_grid(path))
+            grid=load_grid(path)
+            source=self.choose_source_crs(grid.crs,grid.name)
+            if source is None: continue
+            from pyproj import CRS
+            grid.crs=source; grid.coordinate_unit='degrees' if CRS(source).is_geographic else 'm'
+            self.add_grid(grid)
 
     def open_xyz(self):
         path, _ = QFileDialog.getOpenFileName(self, "Таблица: первые 3 столбца X Y поле", "", "Таблицы (*.xlsx *.csv *.txt)")
@@ -455,30 +460,22 @@ class MainWindow(MapWorkspace,QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Метаданные: координаты должны быть в одной системе")
         form = QFormLayout(dialog)
-        crs, unit = QLineEdit(grid.crs), QLineEdit(grid.unit)
-        presets = QComboBox()
-        presets.addItem("Выберите зону ГСК-2011…", "")
-        for code, name in gsk2011_zones():
-            presets.addItem(f"{code} | {name}", code)
+        from .crs_editor import CRSEditor
+        crs, unit = CRSEditor(grid.crs,dialog), QLineEdit(grid.unit)
         coord_unit = QComboBox()
         coord_unit.addItems(["unknown", "m", "degrees"])
         coord_unit.setCurrentText(grid.coordinate_unit)
-        def use_preset():
-            if presets.currentData():
-                crs.setText(presets.currentData())
-                coord_unit.setCurrentText("m")
-        presets.currentIndexChanged.connect(use_preset)
-        form.addRow("ГСК-2011 / Гаусса—Крюгера (6°)", presets)
-        form.addRow("CRS, например EPSG:32647", crs)
+        form.addRow(crs)
         form.addRow("Единицы поля, например mGal / nT / m", unit)
         form.addRow("Единицы X и Y", coord_unit)
-        form.addRow(QLabel("Изменение метаданных не пересчитывает координаты.\nДля FFT нужны плоские координаты в метрах."))
+        note=QLabel("Укажите СК текущих координат слоя. В проекте координаты будут пересчитаны в СК проекта.\nFalse East — полное значение проекции, а не величина вычитания.")
+        note.setWordWrap(True); form.addRow(note)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
         if dialog.exec_():
-            checked = validate_crs(crs.text().strip(), coord_unit.currentText())
+            checked = validate_crs(crs.value(), coord_unit.currentText())
             if self.map_project_crs:
                 if not checked: raise ValueError('В проекте с заданной СК укажите исходную СК карты.')
                 from .grids import Grid

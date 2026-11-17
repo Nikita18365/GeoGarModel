@@ -73,7 +73,11 @@ class Vector:
             return dict(type=g['type'],coordinates=coordinates(g['coordinates']))
         return Vector([geometry(g) for g in self.features],CRS.from_user_input(target_crs).to_string())
 
-    def draw(self,ax,crs):
+    def draw(self,ax,crs,style=None):
+        from matplotlib.path import Path as PlotPath
+        from matplotlib.patches import PathPatch
+        from matplotlib.colors import to_rgba
+        style=style or {}; color=style.get('line_color','#fbbf24'); width=style.get('line_width',1.)
         transform=Transformer.from_crs(self.crs,crs,always_xy=True)
         def geometry(g):
             kind=g['type']; coords=g.get('coordinates',[])
@@ -83,11 +87,22 @@ class Vector:
                 child={'MultiPolygon':'Polygon','MultiLineString':'LineString','MultiPoint':'Point'}[kind]
                 for c in coords: geometry(dict(type=child,coordinates=c))
             elif kind=='Polygon':
+                if style.get('fill',False):
+                    vertices=[]; codes=[]
+                    for i,ring in enumerate(coords):
+                        if len(ring)<3: continue
+                        a=np.asarray(ring)[:,:2]; x,y=transform.transform(a[:,0],a[:,1]); a=np.column_stack((x,y))
+                        if not np.array_equal(a[0],a[-1]): a=np.vstack((a,a[0]))
+                        area=np.sum(a[:-1,0]*a[1:,1]-a[1:,0]*a[:-1,1])
+                        if (area>0)!=(i==0): a=a[::-1]
+                        vertices.extend(a); codes.extend([PlotPath.MOVETO]+[PlotPath.LINETO]*(len(a)-2)+[PlotPath.CLOSEPOLY])
+                    if vertices:
+                        ax.add_patch(PathPatch(PlotPath(vertices,codes),facecolor=to_rgba(style.get('fill_color',color),style.get('fill_alpha',.3)),edgecolor='none',zorder=100))
                 for ring in coords: geometry(dict(type='LineString',coordinates=ring))
             elif kind=='Point':
-                x,y=transform.transform(*coords[:2]); ax.scatter([x],[y],s=18,c='#fbbf24',zorder=100)
+                x,y=transform.transform(*coords[:2]); ax.scatter([x],[y],s=18,c=color,zorder=100)
             elif kind=='LineString' and coords:
-                a=np.asarray(coords); x,y=transform.transform(a[:,0],a[:,1]); ax.plot(x,y,color='#fbbf24',linewidth=1,zorder=100)
+                a=np.asarray(coords); x,y=transform.transform(a[:,0],a[:,1]); ax.plot(x,y,color=color,linewidth=width,zorder=100)
         for feature in self.features:
             if feature: geometry(feature)
 

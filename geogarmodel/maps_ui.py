@@ -14,6 +14,7 @@ from .map_project import read_vector,save_project,load_project,reproject_grid
 from .plotting import draw_map
 from .map_navigation import north_direction
 from .sun_picker import SunPicker
+from .crs_editor import CRSEditor
 
 
 class LayerNameDelegate(QStyledItemDelegate):
@@ -80,6 +81,8 @@ class MapWorkspace:
         help_label=QLabel('✓ — показать слой · верхний слой впереди\nПеретащите для порядка · F2 — имя · Delete — удалить')
         help_label.setWordWrap(True); project_layout.insertWidget(1,help_label)
         self.button('СК проекта…',self.project_crs_dialog,project_layout)
+        self.vector_style_button=self.button('Оформление SHP / GeoJSON…',self.vector_style_dialog,project_layout)
+        self.vector_style_button.setEnabled(False)
         self.layers.currentRowChanged.disconnect()
         self.layers.setSelectionMode(QAbstractItemView.SingleSelection)
         self.layers.setDragDropMode(QAbstractItemView.InternalMove)
@@ -207,16 +210,40 @@ class MapWorkspace:
         return f'{source.name} ({authority[0]}:{authority[1]})' if authority else source.name
 
     def update_project_label(self):
-        self.project_label.setText('Проект: '+self.map_project_name+('\nСК: '+self.map_project_crs if self.map_project_crs else ''))
+        from .crs_editor import false_easting
+        caption=self.crs_caption() if self.map_project_crs else ''
+        if self.map_project_crs:
+            east=false_easting(self.map_project_crs)
+            if east is not None: caption+=f' · False East {east:,.3f} м'
+        self.project_label.setText('Проект: '+self.map_project_name+('\nСК: '+caption if caption else ''))
 
     def source_crs(self,known,name):
         from pyproj import CRS
         if known: return CRS.from_user_input(known).to_string()
-        value,ok=QInputDialog.getText(self,'Исходная СК — '+name,
-            'У файла не указана исходная СК. Введите EPSG или PROJ/WKT.\nЭто СК координат исходного файла, до преобразования:')
-        if not ok: return None
-        if not value.strip(): raise ValueError('Укажите исходную СК файла.')
-        return CRS.from_user_input(value.strip()).to_string()
+        return self.choose_source_crs(known,name)
+
+    def choose_source_crs(self,known,name):
+        dialog=QDialog(self); dialog.setWindowTitle('Исходная СК — '+name); dialog.resize(620,320)
+        form=QFormLayout(dialog); editor=CRSEditor(known,dialog); form.addRow(editor)
+        note=QLabel('Укажите СК координат файла до преобразования в СК проекта.\n'
+            'False East — полное смещение проекции, а не число, которое нужно вычесть.\n'
+            'Пример: исходный False East 17 500 000, в проекте 500 000 → X уменьшается на 17 000 000 м.')
+        note.setWordWrap(True); form.addRow(note)
+        buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
+        return editor.value() if dialog.exec_()==QDialog.Accepted else None
+
+    def layer_coordinates(self):
+        item=self.layers.currentItem()
+        if item is None: raise ValueError('Выберите слой.')
+        row=item.data(Qt.UserRole)
+        if row['kind']=='grid': return self.metadata()
+        source=self.choose_source_crs(row['data'].crs,item.text()+' (текущие координаты слоя)')
+        if source is None: return
+        from .map_project import Vector
+        revised=Vector(row['data'].features,source)
+        row['data']=revised.reproject(self.map_project_crs) if self.map_project_crs else revised
+        self._map_fit=True; self.map_reordered()
 
     def apply_project_crs(self,crs):
         from pyproj import CRS
@@ -235,19 +262,17 @@ class MapWorkspace:
         self._map_fit=True; self.map_reordered(); return True
 
     def project_crs_dialog(self,new=False):
-        from .coordinates import gsk2011_zones
         dialog=QDialog(self); dialog.setWindowTitle('Новый проект карт' if new else 'Система координат проекта')
         dialog.resize(540,260); form=QFormLayout(dialog); form.setRowWrapPolicy(QFormLayout.WrapAllRows)
-        name=QLineEdit('' if new else self.map_project_name); crs=QComboBox(); crs.setEditable(True)
-        for code,label in gsk2011_zones(): crs.addItem(code+' | '+label)
-        crs.setCurrentText('EPSG:20918 | GSK-2011 / Gauss-Kruger zone 18' if new else self.map_project_crs or 'EPSG:20918')
+        name=QLineEdit('' if new else self.map_project_name)
+        crs=CRSEditor('EPSG:20918' if new else self.map_project_crs or 'EPSG:20918',dialog)
         form.addRow('Название проекта',name); form.addRow('СК проекта (EPSG / PROJ / WKT)',crs)
         note=QLabel('Все карты и контуры приводятся к этой СК. Растры интерполируются на регулярную сетку.\nДля файлов без СК потребуется указать исходную систему.')
         note.setWordWrap(True); form.addRow(note)
         buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
         if dialog.exec_()!=QDialog.Accepted: return
-        value=crs.currentText().split('|')[0].strip()
+        value=crs.value()
         if not name.text().strip(): raise ValueError('Введите название проекта.')
         if new:
             from pyproj import CRS
@@ -273,6 +298,7 @@ class MapWorkspace:
 
     def map_selection(self,item,previous):
         if self._map_loading: return
+        self.vector_style_button.setEnabled(bool(item and item.data(Qt.UserRole)['kind']=='vector'))
         if previous and previous.data(Qt.UserRole)['kind']=='grid': previous.data(Qt.UserRole)['style'].update(self.read_map_style())
         self._map_selected=item
         if item and item.data(Qt.UserRole)['kind']=='grid':
@@ -342,6 +368,9 @@ class MapWorkspace:
         if item is None: return
         self.layers.setCurrentItem(item); menu=QMenu(self)
         menu.addAction('Переименовать',lambda:self.layers.editItem(item))
+        menu.addAction('СК и False East…',lambda:self.guard(self.layer_coordinates))
+        if item.data(Qt.UserRole)['kind']=='vector':
+            menu.addAction('Оформление контура…',lambda:self.guard(self.vector_style_dialog))
         menu.addAction('Выше',lambda:self.move_map_layer(-1))
         menu.addAction('Ниже',lambda:self.move_map_layer(1))
         menu.addAction('Удалить',lambda:self.guard(self.delete_map_layer))
@@ -368,8 +397,9 @@ class MapWorkspace:
         path,_=QFileDialog.getOpenFileName(self,'Добавить векторный слой','','Vector (*.shp *.geojson *.json)')
         if path:
             source=None
-            if Path(path).suffix.lower()=='.shp' and not Path(path).with_suffix('.prj').exists():
-                source=self.source_crs('',Path(path).stem)
+            if Path(path).suffix.lower()=='.shp':
+                prj=Path(path).with_suffix('.prj')
+                source=self.choose_source_crs(prj.read_text(encoding='utf-8-sig',errors='replace') if prj.exists() else '',Path(path).stem)
                 if source is None: return
             vector=read_vector(path,source)
             vector=vector.reproject(crs)
@@ -380,6 +410,40 @@ class MapWorkspace:
         for i in reversed(range(self.layers.count())):
             if self.layers.item(i).data(Qt.UserRole)['kind']=='vector': self.layers.takeItem(i)
         self._map_loading=False; self.map_selection(self.layers.currentItem(),None); self.map_reordered()
+
+    def vector_style_dialog(self):
+        item=self.layers.currentItem()
+        if item is None or item.data(Qt.UserRole)['kind']!='vector': return
+        row=item.data(Qt.UserRole); style=row['style']
+        dialog=QDialog(self); dialog.setWindowTitle('Оформление контура — '+item.text())
+        form=QFormLayout(dialog)
+        def color_button(value):
+            button=QPushButton('Выбрать цвет…'); button.setProperty('color',value)
+            def update(): button.setStyleSheet('QPushButton {border: 3px solid '+button.property('color')+';}')
+            def choose():
+                color=QColorDialog.getColor(QColor(button.property('color')),dialog,'Выберите цвет')
+                if color.isValid(): button.setProperty('color',color.name()); update()
+            button.clicked.connect(choose); update(); return button
+        line=color_button(style.get('line_color','#fbbf24'))
+        width=QDoubleSpinBox(); width.setRange(.1,20); width.setValue(style.get('line_width',1)); width.setSuffix(' pt')
+        fill=QCheckBox('Заливка (FILL)'); fill.setChecked(style.get('fill',False))
+        face=color_button(style.get('fill_color','#fbbf24'))
+        opacity=QSpinBox(); opacity.setRange(0,100); opacity.setValue(round(style.get('fill_alpha',.3)*100)); opacity.setSuffix(' %')
+        def polygon(g):
+            return bool(g) and (g['type'] in ('Polygon','MultiPolygon') or
+                g['type']=='GeometryCollection' and any(polygon(c) for c in g['geometries']))
+        has_polygon=any(polygon(g) for g in row['data'].features)
+        form.addRow('Цвет линии',line); form.addRow('Толщина линии',width)
+        if has_polygon:
+            form.addRow(fill); form.addRow('Цвет заливки',face); form.addRow('Непрозрачность заливки',opacity)
+            fill.toggled.connect(face.setEnabled); fill.toggled.connect(opacity.setEnabled)
+            face.setEnabled(fill.isChecked()); opacity.setEnabled(fill.isChecked())
+        buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
+        if dialog.exec_()==QDialog.Accepted:
+            style.update(line_color=line.property('color'),line_width=width.value(),fill=has_polygon and fill.isChecked(),
+                         fill_color=face.property('color'),fill_alpha=opacity.value()/100)
+            self.redraw()
 
     def redraw(self):
         if not hasattr(self,'_map_loading') or self._map_loading: return
@@ -414,9 +478,9 @@ class MapWorkspace:
             self.figure.axes[1]._colorbar.set_label(grids[0]['data'].unit)
             for row in rows:
                 if row['visible'] and row['kind']=='vector':
-                    before=set(ax.get_children()); row['data'].draw(ax,crs)
+                    before=set(ax.get_children()); row['data'].draw(ax,crs,row['style'])
                     order=(len(rows)-next(i for i,r in enumerate(rows) if r is row))*10
-                    for artist in set(ax.get_children())-before: artist.set_zorder(order+2)
+                    for artist in set(ax.get_children())-before: artist.set_zorder(order+1 if isinstance(artist,Rectangle) or artist in ax.patches else order+2)
             ax.relim(); ax.autoscale_view()
             self._map_home=(ax.get_xlim(),ax.get_ylim())
             if view: ax.set_xlim(view[0]); ax.set_ylim(view[1])
