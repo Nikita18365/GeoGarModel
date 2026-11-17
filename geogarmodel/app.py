@@ -157,7 +157,7 @@ class MainWindow(MapWorkspace,QMainWindow):
         self.layers.setMinimumHeight(100); self.layers.setMaximumHeight(180)
         self.layers.currentRowChanged.connect(lambda _: self.guard(self.redraw))
         panel.addWidget(self.layers)
-        self.button("СК и False East слоя…", self.layer_coordinates, panel)
+        self.button("СК и параметры слоя…", self.layer_coordinates, panel)
         overlay_group=QWidget(); overlay_layout=QVBoxLayout(overlay_group)
         main_data_panel=panel; panel=overlay_layout
         self.button("Добавить SHP / GeoJSON", self.open_vector, panel)
@@ -468,7 +468,7 @@ class MainWindow(MapWorkspace,QMainWindow):
         form.addRow(crs)
         form.addRow("Единицы поля, например mGal / nT / m", unit)
         form.addRow("Единицы X и Y", coord_unit)
-        note=QLabel("Укажите СК текущих координат слоя. В проекте координаты будут пересчитаны в СК проекта.\nFalse East — полное значение проекции, а не величина вычитания.")
+        note=QLabel("Укажите СК текущих координат слоя. В проекте координаты будут пересчитаны в СК проекта.\nПараметры соответствуют выбранной СК или импортированному .prj.")
         note.setWordWrap(True); form.addRow(note)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)

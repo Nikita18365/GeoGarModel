@@ -14,7 +14,7 @@ from .map_project import read_vector,save_project,load_project,reproject_grid
 from .plotting import draw_map
 from .map_navigation import north_direction
 from .sun_picker import SunPicker
-from .crs_editor import CRSEditor
+from .crs_editor import CRSEditor,read_prj
 
 
 class LayerNameDelegate(QStyledItemDelegate):
@@ -210,11 +210,7 @@ class MapWorkspace:
         return f'{source.name} ({authority[0]}:{authority[1]})' if authority else source.name
 
     def update_project_label(self):
-        from .crs_editor import false_easting
         caption=self.crs_caption() if self.map_project_crs else ''
-        if self.map_project_crs:
-            east=false_easting(self.map_project_crs)
-            if east is not None: caption+=f' · False East {east:,.3f} м'
         self.project_label.setText('Проект: '+self.map_project_name+('\nСК: '+caption if caption else ''))
 
     def source_crs(self,known,name):
@@ -226,8 +222,8 @@ class MapWorkspace:
         dialog=QDialog(self); dialog.setWindowTitle('Исходная СК — '+name); dialog.resize(620,320)
         form=QFormLayout(dialog); editor=CRSEditor(known,dialog); form.addRow(editor)
         note=QLabel('Укажите СК координат файла до преобразования в СК проекта.\n'
-            'False East — полное смещение проекции, а не число, которое нужно вычесть.\n'
-            'Пример: исходный False East 17 500 000, в проекте 500 000 → X уменьшается на 17 000 000 м.')
+            'Параметры берутся из выбранной СК или импортированного .prj.\n'
+            'Смещения — полные значения параметров проекции, а не величины вычитания.')
         note.setWordWrap(True); form.addRow(note)
         buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
@@ -368,7 +364,7 @@ class MapWorkspace:
         if item is None: return
         self.layers.setCurrentItem(item); menu=QMenu(self)
         menu.addAction('Переименовать',lambda:self.layers.editItem(item))
-        menu.addAction('СК и False East…',lambda:self.guard(self.layer_coordinates))
+        menu.addAction('СК и параметры проекции…',lambda:self.guard(self.layer_coordinates))
         if item.data(Qt.UserRole)['kind']=='vector':
             menu.addAction('Оформление контура…',lambda:self.guard(self.vector_style_dialog))
         menu.addAction('Выше',lambda:self.move_map_layer(-1))
@@ -399,7 +395,7 @@ class MapWorkspace:
             source=None
             if Path(path).suffix.lower()=='.shp':
                 prj=Path(path).with_suffix('.prj')
-                source=self.choose_source_crs(prj.read_text(encoding='utf-8-sig',errors='replace') if prj.exists() else '',Path(path).stem)
+                source=self.choose_source_crs(read_prj(prj) if prj.exists() else '',Path(path).stem)
                 if source is None: return
             vector=read_vector(path,source)
             vector=vector.reproject(crs)
