@@ -135,6 +135,8 @@ def save_project(path,name,layers,view,scale,crs='',presentation=None):
         else: row.update(features=value.features,crs=value.crs)
         rows.append(row)
     arrays['manifest']=json.dumps(dict(version=1,name=name,layers=rows,view=view,scale=scale,crs=crs,presentation=presentation or {}),ensure_ascii=False)
+    if hasattr(path,'write'):
+        np.savez_compressed(path,**arrays); return
     path=Path(path)
     with tempfile.NamedTemporaryFile(dir=path.parent,suffix='.tmp',delete=False) as stream:
         temporary=stream.name
@@ -145,6 +147,12 @@ def save_project(path,name,layers,view,scale,crs='',presentation=None):
 
 
 def load_project(path):
+    # The map reader also accepts a complete application project.
+    from zipfile import ZipFile
+    from io import BytesIO
+    with ZipFile(path) as archive:
+        if 'manifest.json' in archive.namelist(): return load_project(BytesIO(archive.read('maps.npz')))
+    if hasattr(path,'seek'): path.seek(0)
     layers=[]
     with np.load(path,allow_pickle=False) as data:
         manifest=json.loads(str(data['manifest']))

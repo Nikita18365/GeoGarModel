@@ -37,6 +37,7 @@ class ModelDocument(QMdiSubWindow):
             self.changed.emit(); return
         if self.view._expanded_dialog is not None: self.view._expanded_dialog.accept()
         if self.selected is not None: self.states[self.selected.key]=self.view.capture_state()
+        if entry.key in self.states: self.view.restore_state(self.states[entry.key],refresh=False)
         self.view.render(entry.result)
         if entry.key in self.states: self.view.restore_state(self.states[entry.key])
         self.selected=entry; self.changed.emit()
@@ -54,8 +55,18 @@ class ModelDocument(QMdiSubWindow):
     def closeEvent(self,event):
         self.view.shutdown(); self.closed.emit(self); super().closeEvent(event)
 
+    def remember_geometry(self):
+        if not self.isMinimized() and not self.isMaximized(): self._normal_rect=self.geometry().getRect()
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event); self.remember_geometry()
+
+    def moveEvent(self,event):
+        super().moveEvent(event); self.remember_geometry()
+
 
 class ModelWorkspace(QWidget):
+    changed=pyqtSignal()
     def __init__(self,parent=None,import_callback=None):
         super().__init__(parent); self.registry={}; self._next_window=1; self._pending_result=None
         root=QVBoxLayout(self); root.setContentsMargins(0,0,0,0)
@@ -123,14 +134,21 @@ class ModelWorkspace(QWidget):
         self._documents.append(document); self.mdi.addSubWindow(document)
         document.installEventFilter(self); document.view.installEventFilter(self)
         document.changed.connect(self.refresh)
+        document.changed.connect(self.changed)
+        for w in document.view.state_controls().values():
+            signal=w.currentTextChanged if isinstance(w,QComboBox) else w.toggled if hasattr(w,'toggled') else w.valueChanged
+            signal.connect(self.modified)
+        document.view.state_changed.connect(self.modified)
         document.closed.connect(self.document_closed)
         document.show(); self.mdi.setActiveSubWindow(document)
         if entry is not None: document.add_entry(entry)
-        self.refresh(); return document
+        self.refresh(); self.changed.emit(); return document
+
+    def modified(self,*args): self.changed.emit()
 
     def document_closed(self,document):
         if document in self._documents: self._documents.remove(document)
-        if not getattr(self,'_closing',False): self.refresh()
+        if not getattr(self,'_closing',False): self.refresh(); self.changed.emit()
 
     def render(self,result,path=None,name=None,source_key=None):
         entry=self.register(result,path,name,source_key); document=self.active_document() or self.new_window()
@@ -151,6 +169,43 @@ class ModelWorkspace(QWidget):
                 if obj is document or obj is document.view:
                     self.mdi.setActiveSubWindow(document); break
         return super().eventFilter(obj,event)
+
+    def snapshot(self):
+        windows=[]; active=self.active_document()
+        for document in self._documents:
+            states=dict(document.states)
+            if document.selected is not None: states[document.selected.key]=document.view.capture_state()
+            x,y,w,h=getattr(document,'_normal_rect',document.geometry().getRect()); width=max(1,self.mdi.width()); height=max(1,self.mdi.height())
+            windows.append(dict(title=document.windowTitle(),entries=[entry.key for entry in document.entries],
+                selected=document.selected.key if document.selected else None,states=states,
+                geometry=[x/width,y/height,w/width,h/height],
+                state='minimized' if document.isMinimized() else 'maximized' if document.isMaximized() else 'normal',active=document is active))
+        return windows
+
+    def restore(self,entries,windows):
+        from importlib.util import find_spec
+        self.reset()
+        self.registry={entry.key:entry for entry in entries}; self.refresh_catalogue()
+        active=None
+        for saved in windows:
+            document=self.new_window(); document.setWindowTitle(saved['title'])
+            document.entries=[self.registry[key] for key in saved['entries']]
+            document.states=saved['states']
+            key=saved['selected']
+            if key is not None:
+                entry=self.registry[key]
+                if find_spec('pyvistaqt') is not None: document.select(entry)
+                else:
+                    document.selected=entry; document.view.result=entry.result
+                    document.view.restore_state(document.states.get(key,{}),refresh=False)
+                    document.view.info.setText('Модель восстановлена. Для интерактивного 3D установите geogarmodel[volume].')
+            x,y,w,h=saved['geometry']; width=max(400,self.mdi.width()); height=max(300,self.mdi.height())
+            document.setGeometry(int(min(.8,max(0,x))*width),int(min(.8,max(0,y))*height),max(350,int(w*width)),max(250,int(h*height)))
+            if saved['state']=='maximized': document.showMaximized()
+            elif saved['state']=='minimized': document.showMinimized()
+            if saved.get('active'): active=document
+        if active is not None: self.mdi.setActiveSubWindow(active)
+        self.refresh()
 
     def active_changed(self,*args): self.refresh()
 
@@ -219,3 +274,7 @@ class ModelWorkspace(QWidget):
         self.window_selector.clear(); self.models.clear()
         for document in list(self._documents): document.close()
         self.registry.clear()
+
+    def reset(self):
+        self.shutdown(); self._closing=False; self._next_window=1; self._pending_result=None
+        self.refresh_catalogue(); self.refresh()

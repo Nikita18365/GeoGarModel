@@ -44,9 +44,9 @@ class InitialModelPanel(QGroupBox):
         mesh=self.tab.new_mesh()
         return VoxelModel(mesh,np.full((mesh.size,3) if self.tab.mode.currentData()=='vector' else (mesh.size,),self.tab.initial.value()),self.tab.mode.currentData(),self.tab.crs.currentText().split('|')[0].strip())
 
-    def assign(self,model,previous=None):
+    def assign(self,model,previous=None,check_crs=True):
         crs=self.tab.crs.currentText().split('|')[0].strip()
-        if self.tab.table is not None and model.crs and crs and model.crs!=crs:
+        if check_crs and self.tab.table is not None and model.crs and crs and model.crs!=crs:
             raise ValueError('CRS загруженной модели отличается от CRS наблюдений. Согласуйте координаты и CRS перед загрузкой.')
         self.undo_model=previous.copy() if previous is not None else (self.model.copy() if self.model is not None else None)
         if previous is not None: model.source_path=''; model.source_array=''

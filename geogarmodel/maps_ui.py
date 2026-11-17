@@ -207,12 +207,13 @@ class MapWorkspace:
         self.operation.currentIndexChanged.connect(self.update_transform_parameters); self.update_transform_parameters()
         self.canvas.mpl_connect('scroll_event',self.map_scroll)
         self.canvas.mpl_connect('draw_event',self.map_drawn)
-        menu=self.menuBar().addMenu('Проект карт')
+        menu=self.menuBar().addMenu('Проект')
         for title,fn in [('Создать…',self.new_map_project),('Открыть…',self.open_map_project),
                          ('Сохранить',self.save_map_project),('Сохранить как…',lambda:self.save_map_project(True)),
                          ('Система координат…',self.project_crs_dialog),
                          ('Закрыть',self.close_map_project),('Вписать все видимые карты',self.fit_maps)]:
-            menu.addAction(title).triggered.connect(lambda checked=False,fn=fn:self.guard(fn))
+            action=menu.addAction(title); action.triggered.connect(lambda checked=False,fn=fn:self.guard(fn))
+            if title in ('Создать…','Открыть…','Сохранить'): action.setShortcut(QKeySequence({'Создать…':'Ctrl+N','Открыть…':'Ctrl+O','Сохранить':'Ctrl+S'}[title]))
 
     def update_transform_parameters(self):
         operation=self.operation.currentData()
@@ -343,7 +344,7 @@ class MapWorkspace:
         self._map_fit=True; self.map_reordered(); return True
 
     def project_crs_dialog(self,new=False):
-        dialog=QDialog(self); dialog.setWindowTitle('Новый проект карт' if new else 'Система координат проекта')
+        dialog=QDialog(self); dialog.setWindowTitle('Новый проект GeoGarModel' if new else 'Система координат проекта')
         dialog.resize(540,260); form=QFormLayout(dialog); form.setRowWrapPolicy(QFormLayout.WrapAllRows)
         name=QLineEdit('' if new else self.map_project_name)
         crs=CRSEditor('EPSG:20918' if new else self.map_project_crs or 'EPSG:20918',dialog)
@@ -731,12 +732,15 @@ class MapWorkspace:
         path,_=QFileDialog.getOpenFileName(self,'Открыть проект карт','','GeoGarModel карты (*.ggmaps)')
         if not path: return
         manifest,rows=load_project(path)
+        if not self.confirm_map_close(): return
+        self.restore_map_project(manifest,rows,path)
+
+    def restore_map_project(self,manifest,rows,path=None):
         project_crs=manifest.get('crs','') or next((r['data'].crs for r in rows if r['kind']=='grid' and r['data'].crs),'')
         if project_crs:
             for row in rows:
                 if row['kind']=='vector': row['data']=row['data'].reproject(project_crs)
-        if not self.confirm_map_close(): return
-        self.reset_map_project(manifest['name'])
+        MapWorkspace.reset_map_project(self,manifest['name'])
         self.map_title.setText(manifest.get('presentation',{}).get('title',''))
         self.restore_geography(manifest.get('presentation',{}).get('geography'))
         self.auto_map_layout.blockSignals(True); self.auto_map_layout.setChecked(manifest.get('presentation',{}).get('auto_layout',True)); self.auto_map_layout.blockSignals(False)

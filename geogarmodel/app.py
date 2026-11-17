@@ -27,6 +27,7 @@ from .window_theme import apply_window_theme
 from .ui_layout import Disclosure,details,form_details,workflow_sections,quiet_button,prepare_forms
 from .maps_ui import MapWorkspace,LayerList
 from .map_navigation import MapToolbar
+from .project_ui import ProjectWorkspace
 
 
 class Worker(QThread):
@@ -49,7 +50,7 @@ class Worker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
-class MainWindow(MapWorkspace,QMainWindow):
+class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GeoGarModel 2.3 · интерпретация и моделирование")
@@ -100,6 +101,7 @@ class MainWindow(MapWorkspace,QMainWindow):
         settings_menu = self.menuBar().addMenu('Настройки')
         settings_menu.addAction('Уведомления Telegram…').triggered.connect(lambda: self.guard(self.telegram_settings))
         self.statusBar().showMessage("Загрузите карту или обучающую таблицу.")
+        self.setup_project()
 
     def telegram_settings(self):
         from .telegram_ui import TelegramDialog

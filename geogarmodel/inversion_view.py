@@ -1,7 +1,7 @@
 """VTK scene with cell thresholding, slices, volume and isosurfaces; lazy imports."""
 import numpy as np
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QDoubleSpinBox, QLabel, QSlider, QSpinBox, QPushButton, QDialog, QCheckBox, QScrollArea, QGroupBox, QFormLayout,QToolBar,QMessageBox,QToolBox
-from PyQt5.QtCore import Qt,QSize,QSignalBlocker,QTimer
+from PyQt5.QtCore import Qt,QSize,QSignalBlocker,QTimer,pyqtSignal
 from .palette_library import local_library,PaletteDialog,preview
 from .model_slices import property_values
 from .view_icons import view_icon
@@ -33,6 +33,7 @@ def vtk_grid(result, component='amplitude'):
 
 
 class ModelView(QWidget):
+    state_changed=pyqtSignal()
     def __init__(self,parent=None):
         super().__init__(parent)
         layout=QVBoxLayout(self)
@@ -221,7 +222,7 @@ class ModelView(QWidget):
 
     def resizeEvent(self,event):
         super().resizeEvent(event)
-        compact=self.width()<700 or self.height()<500
+        compact=self.width()<700 or self.height()<650
         if getattr(self,'plotter',None) is not None and compact!=getattr(self,'_compact_axes',None): self._resize_timer.start()
 
     def show_view_settings(self):
@@ -290,7 +291,7 @@ class ModelView(QWidget):
         self._moving=True; self.apply_detail()
 
     def interaction_finished(self,*args):
-        self._moving=False; self.apply_detail()
+        self._moving=False; self.apply_detail(); self.state_changed.emit()
 
     def apply_detail(self):
         if not self._lod_actors: return
@@ -356,7 +357,8 @@ class ModelView(QWidget):
             view.shutdown(); self._expanded_dialog=None; dialog.deleteLater()
         dialog.finished.connect(cleanup)
         try:
-            dialog.showMaximized(); view.render(self.result); view.restore_state(self.capture_state())
+            state=self.capture_state(include_expanded=False)
+            dialog.showMaximized(); view.restore_state(state,refresh=False); view.render(self.result); view.restore_state(state)
         except Exception:
             dialog.reject(); raise
 
@@ -369,15 +371,21 @@ class ModelView(QWidget):
             controls.update({f'{name}_{i}':w for i,w in enumerate(widgets)})
         return controls
 
-    def capture_state(self):
+    def capture_state(self,include_expanded=True):
+        if include_expanded and self._expanded_dialog is not None:
+            expanded=self._expanded_dialog.findChild(ModelView)
+            if expanded is not None and expanded.result is self.result and expanded.plotter is not None: return expanded.capture_state()
         state={}
         for name,w in self.state_controls().items():
             state[name]=w.currentText() if isinstance(w,QComboBox) else w.isChecked() if isinstance(w,QCheckBox) else w.value()
         if self.plotter is not None:
             state['camera_position']=tuple(tuple(p) for p in self.plotter.camera_position); state['camera_scale']=self.plotter.camera.parallel_scale
+        entry=self.palette_library.get(self.palette.currentText())
+        if entry: state['palette_entry']=entry
         return state
 
-    def restore_state(self,state):
+    def restore_state(self,state,refresh=True):
+        if state.get('palette_entry') and state.get('palette'): self.palette_library[state['palette']]=state['palette_entry']
         controls=self.state_controls(); blockers=[QSignalBlocker(w) for w in controls.values()]
         for name,w in controls.items():
             if name not in state: continue
@@ -388,7 +396,9 @@ class ModelView(QWidget):
             elif isinstance(w,QCheckBox): w.setChecked(value)
             else: w.setValue(value)
         del blockers
-        self._explicit_slices=set(range(3)); self.range_changed(); self.sync_depth_controls()
+        self._explicit_slices=set(range(3))
+        if not refresh: return
+        self.range_changed(); self.sync_depth_controls()
         if self.plotter is not None and 'camera_position' in state:
             self.plotter.camera_position=state['camera_position']; self.plotter.camera.parallel_scale=state['camera_scale']; self.plotter.render()
 
@@ -467,7 +477,7 @@ class ModelView(QWidget):
         self.info.setText(f'{result.mesh.active.sum():,} активных ячеек · {unit} · Оси: исходные East / North, Z = Up (вверх). Локальное начало геометрии: E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м. Вращение: ЛКМ; перемещение: средняя кнопка; масштаб: колесо.')
         self.component.setEnabled(result.model.ndim==2)
         values=grid['property']; amplitude=float(np.max(np.abs(values))); limit=max(amplitude,1e-15)
-        self._compact_axes=self.width()<700 or self.height()<500
+        self._compact_axes=self.width()<700 or self.height()<650
         font=min(self.axis_font.value(),11) if self._compact_axes else self.axis_font.value()
         cmap,norm,clim=self.colors_for(result)
         from matplotlib.colors import ListedColormap
@@ -547,6 +557,7 @@ class ModelView(QWidget):
         control.blockSignals(True); control.setValue(value); control.blockSignals(False)
         axis=(self.result.mesh.east,self.result.mesh.north,self.result.mesh.depth)[index]
         self.slices[index].setValue(round((value-axis[0])/(axis[-1]-axis[0])*100)); self._explicit_slices.add(index); self.sync_depth_controls()
+        self.state_changed.emit()
 
     def render_section_textures(self,origin,scale,cmap,clim,options):
         import pyvista as pv

@@ -9,6 +9,7 @@ def view_icon(kind):
     if kind in ('palette','maps'):
         for i,color in enumerate(['#142dff','#00cee6','#14df38','#fff51b','#ff8314','#ff144c']):
             p.fillRect(QRectF(3+i*3.7,6,4,16),QColor(color))
+        p.setBrush(Qt.NoBrush)
         p.drawRect(QRectF(3,6,22,16))
         if kind=='maps': p.drawLine(5,10,23,10); p.drawLine(5,15,23,15)
     elif kind=='fit':
