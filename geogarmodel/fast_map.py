@@ -79,7 +79,7 @@ class FastMap(pg.PlotWidget):
             xmin,xmax,ymin,ymax=extent
             image.setRect(QRectF(xmin,ymin,xmax-xmin,ymax-ymin))
             image.sample_key=key
-        if self.workbench.refresh_map_geography():
+        if self.workbench.refresh_map_geography(strict=False):
             self.workbench.canvas.draw_idle()
         self.update_north()
 
@@ -100,7 +100,8 @@ class FastMap(pg.PlotWidget):
         self.geo_items=[]
         for name,key in [('bottom','xticks'),('left','yticks')]:
             axis=self.getAxis(name)
-            axis.setTicks([[(p,degree_label(v,settings['notation'])) for p,v in data[key]]]) if data and settings['axes']=='geographic' else axis.setTicks(None)
+            if settings['axes']=='geographic': axis.setTicks([[(p,degree_label(v,settings['notation'])) for p,v in data[key]]] if data else [])
+            else: axis.setTicks(None)
         self.setLabel('bottom','Долгота' if settings['axes']=='geographic' else 'X, м')
         self.setLabel('left','Широта' if settings['axes']=='geographic' else 'Y, м')
         if not data: return

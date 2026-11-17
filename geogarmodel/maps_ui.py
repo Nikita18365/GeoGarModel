@@ -239,13 +239,19 @@ class MapWorkspace:
             w.blockSignals(False)
         self.geo_color=settings.get('color','#333333'); self._geo_key=None
 
-    def refresh_map_geography(self,update_fast=True):
+    def refresh_map_geography(self,update_fast=True,strict=True):
         if not self.figure.axes or not hasattr(self,'geo_widgets'): return False
         ax=self.figure.axes[0]; settings=self.read_geography()
         key=(self.map_project_crs,*ax.get_xlim(),*ax.get_ylim(),tuple(settings.items()))
         if key==getattr(self,'_geo_key',None): return False
         from .graticule import draw_geography
-        self._map_geo_data=draw_geography(ax,self.map_project_crs,settings); self._geo_key=key
+        try: self._map_geo_data=draw_geography(ax,self.map_project_crs,settings)
+        except ValueError as error:
+            if strict: raise
+            self._map_geo_data=None
+            if settings['axes']=='geographic': ax.set_xticks([]); ax.set_yticks([])
+            self.statusBar().showMessage(str(error),10000)
+        self._geo_key=key
         if update_fast and hasattr(self,'fast_map'): self.fast_map.draw_geography(self._map_geo_data,settings)
         return True
 
@@ -598,7 +604,7 @@ class MapWorkspace:
 
     def map_drawn(self,event):
         # Decorations depend on final axes positions after aspect adjustment and resize.
-        changed=self.refresh_map_geography()
+        changed=self.refresh_map_geography(strict=False)
         for update in getattr(self,'_map_decorations',[]): changed=update() or changed
         if hasattr(self,'auto_map_layout') and self.auto_map_layout.isChecked() and len(self.figure.axes)>1:
             ax=self.figure.axes[0]
