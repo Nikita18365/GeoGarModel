@@ -1,10 +1,28 @@
 """Interactive map viewport: persistent Qt scene and downsampled raster display."""
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QRectF,QTimer
-from PyQt5.QtGui import QPainterPath,QPen,QColor,QBrush,QPainter
+from PyQt5.QtCore import QRectF,QTimer,QPointF,Qt
+from PyQt5.QtGui import QPainterPath,QPen,QColor,QBrush,QPainter,QPolygonF,QFont
 from PyQt5.QtWidgets import QGraphicsPathItem
 from .plotting import map_colors
+from .map_sampling import sample_display
+
+
+class NorthMark(pg.GraphicsObject):
+    direction=np.array([0.,-1.])
+
+    def boundingRect(self): return QRectF(-18,-44,56,42)
+
+    def paint(self,painter,*args):
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.boundingRect(),QColor('white'))
+        direction=self.direction; center=np.array([0.,-23.]); base=center-direction*14.5; tip=center+direction*14.5
+        side=np.array([-direction[1],direction[0]])*7
+        painter.setPen(QPen(QColor('black'),3)); painter.drawLine(QPointF(*base),QPointF(*(tip-direction*9)))
+        painter.setBrush(QBrush(QColor('black'))); painter.setPen(Qt.NoPen)
+        painter.drawPolygon(QPolygonF([QPointF(*tip),QPointF(*(tip-direction*13+side)),QPointF(*(tip-direction*13-side))]))
+        painter.setPen(QColor('black')); font=QFont(); font.setPixelSize(20); font.setBold(True); painter.setFont(font)
+        painter.drawText(QPointF(max(base[0],tip[0])+8,-16),'N')
 
 
 class MapImage(pg.ImageItem):
@@ -28,6 +46,9 @@ class FastMap(pg.PlotWidget):
         self.getViewBox().sigRangeChanged.connect(lambda *args:self.refresh_timer.start())
         self.bar=pg.ColorBarItem(values=(0,1),interactive=False); self.bar.setParentItem(self.getPlotItem())
         self.getPlotItem().layout.addItem(self.bar,2,3)
+        self.north=NorthMark(); self.north.setParentItem(self.bar); self.north.setZValue(2000)
+        self.getPlotItem().layout.setRowMinimumHeight(0,48)
+        self.geo_items=[]
 
     def sync_view(self,*args):
         if self.updating: return
@@ -40,39 +61,86 @@ class FastMap(pg.PlotWidget):
     def update_rasters(self):
         x,y=self.viewRange()
         for image,grid,norm in self.rasters:
-            ix=np.clip(np.searchsorted(grid.x,sorted(x)),0,len(grid.x)); iy=np.clip(np.searchsorted(grid.y,sorted(y)),0,len(grid.y))
-            x0=max(0,ix[0]-1); x1=min(len(grid.x),ix[1]+1); y0=max(0,iy[0]-1); y1=min(len(grid.y),iy[1]+1)
-            if x1<=x0 or y1<=y0: image.hide(); continue
-            image.show(); step=max(1,int(np.ceil(max((x1-x0)/max(self.width(),200),(y1-y0)/max(self.height(),200)))))
-            key=(x0,x1,y0,y1,step)
+            ratio=self.devicePixelRatioF(); width=max(2,int(self.getViewBox().width()*ratio)); height=max(2,int(self.getViewBox().height()*ratio))
+            # Two samples per source cell suffice when zooming; QPainter handles
+            # the final subpixel stretch without repeatedly expanding tiny ROIs.
+            if image.smooth:
+                width=min(width,max(2,int(np.ceil((max(x)-min(x))/grid.dx))*2))
+                height=min(height,max(2,int(np.ceil((max(y)-min(y))/grid.dy))*2))
+            key=(*x,*y,width,height,image.smooth)
             if getattr(image,'sample_key',None)==key: continue
-            data=np.asarray(norm(grid.values[y0:y1:step,x0:x1:step]),dtype=np.float32)
+            sampled=sample_display(grid,(*sorted(x),*sorted(y)),width,height,image.smooth)
+            if sampled is None: image.hide(); continue
+            image.show(); values,extent=sampled
+            data=np.asarray(norm(values),dtype=np.float32)
             data=data/getattr(image,'display_divisor',1)
-            data[~np.isfinite(grid.values[y0:y1:step,x0:x1:step])]=np.nan
+            data[~np.isfinite(values)]=np.nan
             image.setImage(data,autoLevels=False,levels=(0,1))
-            image.setRect(QRectF(grid.x[x0]-grid.dx/2,grid.y[y0]-grid.dy/2,
-                min(step*data.shape[1],x1-x0)*grid.dx,min(step*data.shape[0],y1-y0)*grid.dy))
+            xmin,xmax,ymin,ymax=extent
+            image.setRect(QRectF(xmin,ymin,xmax-xmin,ymax-ymin))
             image.sample_key=key
+        if self.workbench.refresh_map_geography():
+            self.workbench.canvas.draw_idle()
+        self.update_north()
+
+    def update_north(self):
+        from .map_navigation import north_direction
+        try:
+            x,y=self.viewRange(); cx,cy=np.mean(x),np.mean(y)
+            direction=north_direction(self.workbench.map_project_crs,cx,cy)
+            a=self.getViewBox().mapViewToScene(QPointF(cx,cy)); b=self.getViewBox().mapViewToScene(QPointF(cx+direction[0],cy+direction[1]))
+            d=np.array([b.x()-a.x(),b.y()-a.y()]); self.north.direction=d/np.linalg.norm(d)
+            self.north.setPos(self.bar.vb.mapToItem(self.bar,QPointF(self.bar.vb.width()*.25,0)))
+            self.north.setVisible(bool(self.rasters)); self.north.update()
+        except (ValueError,RuntimeError): self.north.hide()
+
+    def draw_geography(self,data,settings):
+        from .graticule import degree_label
+        for item in self.geo_items: self.removeItem(item)
+        self.geo_items=[]
+        for name,key in [('bottom','xticks'),('left','yticks')]:
+            axis=self.getAxis(name)
+            axis.setTicks([[(p,degree_label(v,settings['notation'])) for p,v in data[key]]]) if data and settings['axes']=='geographic' else axis.setTicks(None)
+        self.setLabel('bottom','Долгота' if settings['axes']=='geographic' else 'X, м')
+        self.setLabel('left','Широта' if settings['axes']=='geographic' else 'Y, м')
+        if not data: return
+        mode=settings['mode']; pen=pg.mkPen(settings['color'],width=max(.1,settings['width_microns']*96/25400),style=Qt.DotLine if mode=='dotted' else Qt.SolidLine)
+        if mode in ('solid','dotted'):
+            for x,y in data['curves']:
+                item=pg.PlotCurveItem(x,y,pen=pen,connect='finite'); item.setZValue(1500); self.addItem(item); self.geo_items.append(item)
+        elif mode in ('crosses','edges'):
+            groups=[(data['crosses'],'+')]
+            if mode=='edges':
+                edges=np.asarray(data['edges']); groups=[]
+                if len(edges):
+                    lo,hi=self.workbench.figure.axes[0].get_ylim()
+                    vertical=np.isclose(edges[:,1],lo)|np.isclose(edges[:,1],hi)
+                    groups=[(edges[vertical].T,'|'),(edges[~vertical].T,'_')]
+            for xy,symbol in groups:
+                if len(xy)!=2: continue
+                item=pg.ScatterPlotItem(xy[0],xy[1],symbol=symbol,pen=pen,brush=None,size=8)
+                item.setZValue(1500); self.addItem(item); self.geo_items.append(item)
 
     def show_layers(self,rows,view=None):
         self.updating=True
         try:
-            self.clear(); self.rasters=[]
+            self.clear(); self.rasters=[]; self.geo_items=[]
             self.bar.setVisible(any(r['visible'] and r['kind']=='grid' for r in rows))
             self.setTitle(self.workbench.map_title.text().strip() or self.workbench.map_project_name,color='#dbe7f6')
+            self.getPlotItem().layout.setRowFixedHeight(0,58)
             for index,row in enumerate(reversed(rows)):
                 if not row['visible']: continue
                 value=row['data']; style=row['style']
                 if row['kind']=='grid':
                     cm,norm=map_colors(value,**style)
                     # Display copy only; calculations retain original values/precision.
-                    image=MapImage(axisOrder='row-major'); image.setAutoDownsample(True)
+                    image=MapImage(axisOrder='row-major'); image.setAutoDownsample(False)
                     from matplotlib.colors import BoundaryNorm
                     image.display_divisor=max(1,cm.N-1) if isinstance(norm,BoundaryNorm) else 1
                     image.setLookupTable((cm(np.linspace(0,1,256))*255).astype(np.uint8))
                     image.setRect(QRectF(value.x[0]-value.dx/2,value.y[0]-value.dy/2,len(value.x)*value.dx,len(value.y)*value.dy))
                     image.setOpacity(style.get('alpha',1)); image.setZValue(index*10)
-                    image.smooth=style.get('smooth',False)
+                    image.smooth=style.get('smooth',True)
                     self.addItem(image)
                     self.rasters.append((image,value,norm))
                     raw=np.linspace(norm.vmin,norm.vmax,256)
@@ -83,7 +151,7 @@ class FastMap(pg.PlotWidget):
                         filled=np.where(np.isfinite(value.values),value.values,np.nanmedian(value.values))
                         shade=LightSource(style.get('sun_azimuth',315),style.get('sun_altitude',45)).hillshade(filled,dx=value.dx,dy=-value.dy,vert_exag=style.get('sun_relief',1))
                         shade[~np.isfinite(value.values)]=np.nan
-                        shadow=pg.ImageItem(shade.astype(np.float32),axisOrder='row-major',autoLevels=False,levels=(0,1))
+                        shadow=MapImage(shade.astype(np.float32),axisOrder='row-major',autoLevels=False,levels=(0,1)); shadow.smooth=image.smooth
                         shadow.setAutoDownsample(True); shadow.setRect(image.boundingRect())
                         shadow.setRect(QRectF(value.x[0]-value.dx/2,value.y[0]-value.dy/2,len(value.x)*value.dx,len(value.y)*value.dy))
                         shadow.setOpacity(style.get('sun_intensity',.25)*style.get('alpha',1)); shadow.setZValue(index*10+1); self.addItem(shadow)
@@ -117,6 +185,7 @@ class FastMap(pg.PlotWidget):
             axes=self.workbench.figure.axes
             if axes:
                 for collection in axes[0].collections:
+                    if collection in getattr(axes[0],'_geo_artists',[]): continue
                     if not hasattr(collection,'get_paths'): continue
                     for path in collection.get_paths():
                         item=QGraphicsPathItem(); shape=QPainterPath()
@@ -132,4 +201,5 @@ class FastMap(pg.PlotWidget):
                     if text.get_transform()!=axes[0].transData: continue
                     label=pg.TextItem(text.get_text(),color=text.get_color(),anchor=(.5,.5)); label.setPos(*text.get_position()); label.setZValue(1000); self.addItem(label)
         finally: self.updating=False
+        self.draw_geography(getattr(self.workbench,'_map_geo_data',None),self.workbench.read_geography())
         self.update_rasters()

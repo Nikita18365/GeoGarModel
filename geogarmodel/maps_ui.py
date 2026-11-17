@@ -16,6 +16,7 @@ from .map_navigation import north_direction
 from .sun_picker import SunPicker
 from .crs_editor import CRSEditor,read_prj
 from .palette_library import local_library,PaletteDialog,preview
+from .ui_layout import Disclosure
 
 
 class LayerNameDelegate(QStyledItemDelegate):
@@ -108,7 +109,9 @@ class MapWorkspace:
         style_form.insertRow(1,palette_button)
         self.map_discrete=QCheckBox('Дискретные цветовые зоны')
         self.map_bins=QSpinBox(); self.map_bins.setRange(2,255); self.map_bins.setValue(32)
-        self.map_reverse=QCheckBox('Обратить палитру'); self.map_smooth=QCheckBox('Сглаживание изображения')
+        self.map_reverse=QCheckBox('Обратить палитру'); self.map_smooth=QCheckBox('Плавное изображение (рекомендуется)')
+        self.map_smooth.setChecked(True)
+        self.map_smooth.setToolTip('Интерполяция значений перед раскраской; исходные данные не меняются. Выключите, чтобы видеть ячейки сетки.')
         self.map_zone_values=QCheckBox('Использовать границы значений из ZON')
         for key,label,w in [('discrete','',self.map_discrete),('bins','Число зон',self.map_bins),('reverse','',self.map_reverse),('smooth','',self.map_smooth)]:
             style_form.addRow(label,w); self.map_style_widgets[key]=w
@@ -154,9 +157,28 @@ class MapWorkspace:
         self.scale_count=QSpinBox(); self.scale_count.setRange(1,20); self.scale_count.setValue(4)
         self.scale_unit=QComboBox(); self.scale_unit.addItems(['м','км'])
         self.scale_crs=QCheckBox('Подписывать СК под линейкой')
-        self.north_symbol=QComboBox()
-        for label,key in [('Стрелка N','arrow'),('Стрелка С','russian'),('Компасная стрелка','compass'),('Скрыть','none')]: self.north_symbol.addItem(label,key)
-        style_form.addRow('Символ севера',self.north_symbol)
+        self.north_symbol=QComboBox(self.layers); self.north_symbol.addItem('Север N','arrow'); self.north_symbol.hide()
+        self.auto_map_layout=QCheckBox('Автокомпоновка белого листа'); self.auto_map_layout.setChecked(True)
+        style_form.addRow(self.auto_map_layout); self.auto_map_layout.toggled.connect(lambda *a:self.guard(self.redraw))
+        geo_panel=QWidget(); geo_form=QFormLayout(geo_panel); self.geo_widgets={}
+        axes=QComboBox(); axes.addItem('X / Y, метры','projected'); axes.addItem('Долгота / широта','geographic')
+        mode=QComboBox()
+        for label,key in [('Нет','none'),('Кресты','crosses'),('Пунктирные линии','dotted'),('Сплошные линии','solid'),('Только засечки по рамке','edges')]: mode.addItem(label,key)
+        notation=QComboBox(); notation.addItem('Десятичные градусы','decimal'); notation.addItem('ГГГ.ММСС / подписи Г°М′С″','dms')
+        lon=number(0,360,0,4); lat=number(0,180,0,4)
+        for step in (lon,lat): step.setSpecialValueText('Авто')
+        thickness=number(1,2000,100,1)
+        for key,label,w in [('axes','Подписи осей',axes),('mode','Географическая сетка',mode),('notation','Формат углов',notation),
+                            ('longitude_step','Шаг долготы (0 — авто)',lon),('latitude_step','Шаг широты (0 — авто)',lat),('width_microns','Толщина линий, мкм',thickness)]:
+            geo_form.addRow(label,w); self.geo_widgets[key]=w
+            signal=w.currentIndexChanged if isinstance(w,QComboBox) else w.valueChanged
+            signal.connect(lambda *a:self.guard(self.redraw))
+        self.geo_color='#333333'; geo_color=QPushButton('Выбрать цвет…')
+        def choose_geo_color():
+            selected=QColorDialog.getColor(QColor(self.geo_color),self,'Цвет географической сетки')
+            if selected.isValid(): self.geo_color=selected.name(); self.redraw()
+        geo_color.clicked.connect(choose_geo_color); geo_form.addRow('Цвет линий',geo_color)
+        style_form.addRow(Disclosure('Оси и географическая сетка',geo_panel))
         style_form.addRow('Единицы линейки',self.scale_unit)
         style_form.addRow('Шаг линейки',self.scale_step); style_form.addRow('Число делений',self.scale_count)
         style_form.addRow(self.scale_crs)
@@ -203,6 +225,29 @@ class MapWorkspace:
         keys=('left','right','top','bottom','wspace','hspace')
         self._map_layout={key:float(getattr(self.figure.subplotpars,key)) for key in keys}
         self.map_layout_settings.setValue('subplot_layout',json.dumps(self._map_layout)); self.map_layout_settings.sync()
+
+    def read_geography(self):
+        return {**{k:w.currentData() if isinstance(w,QComboBox) else w.value() for k,w in self.geo_widgets.items()},'color':self.geo_color}
+
+    def restore_geography(self,settings=None):
+        settings=settings or dict(axes='projected',mode='none',notation='decimal',longitude_step=0,latitude_step=0,width_microns=100,color='#333333')
+        for key,w in self.geo_widgets.items():
+            w.blockSignals(True)
+            if key in settings:
+                if isinstance(w,QComboBox): w.setCurrentIndex(max(0,w.findData(settings[key])))
+                else: w.setValue(settings[key])
+            w.blockSignals(False)
+        self.geo_color=settings.get('color','#333333'); self._geo_key=None
+
+    def refresh_map_geography(self,update_fast=True):
+        if not self.figure.axes or not hasattr(self,'geo_widgets'): return False
+        ax=self.figure.axes[0]; settings=self.read_geography()
+        key=(self.map_project_crs,*ax.get_xlim(),*ax.get_ylim(),tuple(settings.items()))
+        if key==getattr(self,'_geo_key',None): return False
+        from .graticule import draw_geography
+        self._map_geo_data=draw_geography(ax,self.map_project_crs,settings); self._geo_key=key
+        if update_fast and hasattr(self,'fast_map'): self.fast_map.draw_geography(self._map_geo_data,settings)
+        return True
 
     def sun_from_mouse(self,azimuth,altitude):
         for widget,value in ((self.sun_azimuth,azimuth),(self.sun_altitude,altitude)):
@@ -326,6 +371,7 @@ class MapWorkspace:
             if key=='sun_intensity': result[key]/=100
         entry=self.palette_library.get(result['cmap'])
         if entry: result.update(palette_colors=entry['colors'],palette_zones=entry.get('zones'))
+        result['render_quality']=2
         return result
 
     def map_selection(self,item,previous):
@@ -362,6 +408,8 @@ class MapWorkspace:
 
     def add_map_layer(self,row):
         if row['kind']=='grid':
+            if row['style'].get('render_quality',0)<2:
+                row['style'].update(smooth=True,render_quality=2)
             for key,value in dict(sun_azimuth=315.,sun_altitude=45.,sun_intensity=.25,sun_relief=1.).items():
                 row['style'].setdefault(key,value)
         self._map_loading=True
@@ -483,6 +531,7 @@ class MapWorkspace:
 
     def redraw(self):
         if not hasattr(self,'_map_loading') or self._map_loading: return
+        self._auto_layout_key=None
         item=self.layers.currentItem()
         self.map_style_heading.setText('Оформление карты — '+item.text() if item and item.data(Qt.UserRole)['kind']=='grid' else 'Оформление карты — выберите карту')
         self.map_style_group.setToolTip(self.map_style_heading.text())
@@ -520,7 +569,8 @@ class MapWorkspace:
             ax.relim(); ax.autoscale_view()
             self._map_home=(ax.get_xlim(),ax.get_ylim())
             if view: ax.set_xlim(view[0]); ax.set_ylim(view[1])
-            if self._map_layout: self.figure.subplots_adjust(**self._map_layout)
+            self._geo_key=None; self.refresh_map_geography(update_fast=False)
+            if self._map_layout and not self.auto_map_layout.isChecked(): self.figure.subplots_adjust(**self._map_layout)
             else: self.figure.subplots_adjust(left=.14,right=.9,bottom=(.23 if self.scale_crs.isChecked() else .20) if self.scale_on.isChecked() else .13,top=.84)
             self.draw_north(ax,self.figure.axes[1],crs)
             if self.scale_on.isChecked():
@@ -528,8 +578,8 @@ class MapWorkspace:
                 self.draw_scale(ax)
         else:
             ax=self.figure.add_subplot(111); ax.set_xlabel('X, м'); ax.set_ylabel('Y, м')
-            from .theme import style_figure
-            style_figure(self.figure)
+            from .theme import style_map_figure
+            style_map_figure(self.figure)
         self._map_fit=False; self.map_dirty=True; self.canvas.draw_idle()
         if hasattr(self,'fast_map'): self.fast_map.show_layers(rows,(ax.get_xlim(),ax.get_ylim()) if grids else None)
 
@@ -548,32 +598,41 @@ class MapWorkspace:
 
     def map_drawn(self,event):
         # Decorations depend on final axes positions after aspect adjustment and resize.
-        changed=False
+        changed=self.refresh_map_geography()
         for update in getattr(self,'_map_decorations',[]): changed=update() or changed
+        if hasattr(self,'auto_map_layout') and self.auto_map_layout.isChecked() and len(self.figure.axes)>1:
+            ax=self.figure.axes[0]
+            key=(*self.figure.bbox.bounds,*ax.get_xlim(),*ax.get_ylim())
+            if key!=getattr(self,'_auto_layout_key',None):
+                self._auto_layout_key=key
+                self.figure.tight_layout(pad=1.4,rect=(.01,.02,.99,.98)); changed=True
         if changed: self.canvas.draw_idle()
 
     def draw_north(self,ax,bar,crs):
         self._map_decorations=[]
-        symbol=self.north_symbol.currentData()
-        if symbol=='none': return
         arrow=bar.annotate('',xy=(0,0),xytext=(0,0),xycoords='figure pixels',textcoords='figure pixels',
-                           arrowprops=dict(arrowstyle='<|-|>' if symbol=='compass' else '-|>',color='#dbe7f6',lw=1.5),annotation_clip=False)
-        letter='С' if symbol=='russian' else 'N'
-        label=bar.text(.5,1.16,letter,transform=bar.transAxes,ha='center',fontsize=10,color='#dbe7f6',clip_on=False)
+                           arrowprops=dict(arrowstyle='-|>',color='black',lw=2.5,mutation_scale=18,shrinkA=0,shrinkB=0),annotation_clip=False)
+        label=bar.text(0,0,'N',transform=IdentityTransform(),ha='left',va='center',fontsize=14,fontweight='bold',color='black',clip_on=False)
         def update(_=None):
             x=np.mean(ax.get_xlim()); y=np.mean(ax.get_ylim())
             try:
-                direction=north_direction(crs,x,y) if crs else np.array([0.,1.])
+                if not crs: raise ValueError('СК не задана')
+                direction=north_direction(crs,x,y)
                 points=ax.transData.transform([[x,y],[x+direction[0],y+direction[1]]])
                 delta=points[1]-points[0]; delta/=np.linalg.norm(delta)
-                base=bar.transAxes.transform((.5,1.035)); tip=base+delta*25*self.figure.dpi/100
+                center=bar.transAxes.transform((.15,1))+np.array([0,22*self.figure.dpi/100])
+                base=center-delta*15*self.figure.dpi/100; tip=center+delta*15*self.figure.dpi/100
                 changed=not np.allclose(arrow.xy,tip) or not np.allclose(arrow.get_position(),base)
                 arrow.xy=tip; arrow.set_position(base); arrow.set_visible(True)
-                label.set_text(letter if crs else letter+' сетки')
+                label.set_position((max(base[0],tip[0])+10*self.figure.dpi/100,center[1])); label.set_text('N'); label.set_visible(True)
                 return changed
             except (ValueError,RuntimeError):
-                arrow.set_visible(False); label.set_text('N ?')
+                arrow.set_visible(False); label.set_visible(False)
                 return False
+        original_draw=arrow.draw
+        def draw_arrow(renderer):
+            update(); original_draw(renderer)
+        arrow.draw=draw_arrow
         update(); self._map_decorations.append(update)
         ax.callbacks.connect('xlim_changed',update); ax.callbacks.connect('ylim_changed',update)
 
@@ -586,10 +645,14 @@ class MapWorkspace:
             if step==0:
                 desired=abs(hi-lo)*.25/count; base=10**np.floor(np.log10(max(desired,1e-12)))
                 step=next(v*base for v in (1,2,5,10) if v*base>=desired)
+            if self.auto_map_layout.isChecked() and step*count>abs(hi-lo)*.75:
+                desired=abs(hi-lo)*.75/count; base=10**np.floor(np.log10(max(desired,1e-12)))
+                step=max(v*base for v in (.1,.2,.5,1,2,5,10) if v*base<=desired)
             ticks=[v for v in ax.get_xticks() if min(lo,hi)<=v<=max(lo,hi)]
             x=(min(ticks) if lo<hi else max(ticks)) if ticks else min(lo,hi)
             pixels=self.figure.dpi/72
-            bottom=ax.xaxis.label.get_window_extent(self.canvas.get_renderer()).y0
+            renderer=_ if hasattr(_,'points_to_pixels') else self.canvas.get_renderer()
+            bottom=ax.xaxis.label.get_window_extent(renderer).y0
             base=bottom-23*pixels
             current=(lo,hi,x,step,base)
             if state and np.allclose(state[0],current,rtol=0,atol=.01): return False
@@ -599,14 +662,18 @@ class MapWorkspace:
             trans=blended_transform_factory(ax.transData,IdentityTransform())
             for i in range(count):
                 patch=Rectangle((x+i*step,base),step,5*pixels,transform=trans,clip_on=False,
-                                facecolor='white' if i%2 else 'black',edgecolor='white',linewidth=.7,zorder=100000)
+                                facecolor='white' if i%2 else 'black',edgecolor='black',linewidth=.7,zorder=100000)
                 ax.add_patch(patch); artists.append(patch)
             for i in range(count+1):
-                artists.append(ax.text(x+i*step,base+9*pixels,f'{i*step/factor:g}',transform=trans,ha='center',fontsize=8,color='white',zorder=100000,clip_on=False))
-            artists.append(ax.text(x+count*step,base-11*pixels,self.scale_unit.currentText(),transform=trans,ha='right',fontsize=9,color='white',zorder=100000,clip_on=False))
+                artists.append(ax.text(x+i*step,base+9*pixels,f'{i*step/factor:g}',transform=trans,ha='center',fontsize=8,color='#222222',zorder=100000,clip_on=False))
+            artists.append(ax.text(x+count*step,base-11*pixels,self.scale_unit.currentText(),transform=trans,ha='right',fontsize=9,color='#222222',zorder=100000,clip_on=False))
             if self.scale_crs.isChecked():
-                artists.append(ax.text(x,base-24*pixels,self.crs_caption(),transform=trans,ha='left',fontsize=8,color='#a9bbd3',zorder=100000,clip_on=False))
+                artists.append(ax.text(x,base-24*pixels,self.crs_caption(),transform=trans,ha='left',fontsize=8,color='#222222',zorder=100000,clip_on=False))
             return True
+        original_draw=ax.draw
+        def draw_with_scale(renderer):
+            ax.xaxis.get_tightbbox(renderer); update(renderer); original_draw(renderer)
+        ax.draw=draw_with_scale
         update(); self._map_decorations.append(update); ax.callbacks.connect('xlim_changed',update)
 
     def fit_maps(self): self._map_fit=True; self.redraw()
@@ -623,6 +690,8 @@ class MapWorkspace:
     def reset_map_project(self,name='Без названия'):
         self._map_loading=True; self._map_selected=None; self.layers.clear(); self._map_loading=False
         self.map_title.clear()
+        self.restore_geography()
+        self.auto_map_layout.blockSignals(True); self.auto_map_layout.setChecked(True); self.auto_map_layout.blockSignals(False)
         self.grids=[]; self.overlays=[]; self.map_project_name=name; self.map_project_path=None; self.map_project_crs=''
         self._map_loading=True; self.scale_on.setChecked(False); self.scale_step.setValue(0); self.scale_count.setValue(4); self._map_loading=False
         self._map_loading=True; self.scale_unit.setCurrentIndex(0); self.scale_crs.setChecked(False); self.north_symbol.setCurrentIndex(0); self._map_loading=False
@@ -649,7 +718,7 @@ class MapWorkspace:
         save_project(path,self.map_project_name,self.map_layer_rows(),view,
                      dict(enabled=self.scale_on.isChecked(),step=self.scale_step.value(),count=self.scale_count.value(),
                           unit=self.scale_unit.currentText(),show_crs=self.scale_crs.isChecked(),north=self.north_symbol.currentData()),
-                     self.map_project_crs,presentation=dict(title=self.map_title.text()))
+                     self.map_project_crs,presentation=dict(title=self.map_title.text(),geography=self.read_geography(),auto_layout=self.auto_map_layout.isChecked()))
         self.map_project_path=path; self.map_dirty=False; return True
 
     def open_map_project(self):
@@ -663,6 +732,8 @@ class MapWorkspace:
         if not self.confirm_map_close(): return
         self.reset_map_project(manifest['name'])
         self.map_title.setText(manifest.get('presentation',{}).get('title',''))
+        self.restore_geography(manifest.get('presentation',{}).get('geography'))
+        self.auto_map_layout.blockSignals(True); self.auto_map_layout.setChecked(manifest.get('presentation',{}).get('auto_layout',True)); self.auto_map_layout.blockSignals(False)
         self.map_project_crs=project_crs; self.update_project_label()
         for row in reversed(rows): self.add_map_layer(row)
         self._map_loading=True

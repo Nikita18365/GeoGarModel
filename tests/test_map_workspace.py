@@ -177,16 +177,16 @@ def test_project_crs_reprojects_raster_vector_and_persists(tmp_path,monkeypatch,
     window.add_map_layer(dict(kind='vector',name='Точки',visible=True,style={},data=vector))
     window.scale_on.setChecked(True); window.scale_step.setValue(1000); window.scale_unit.setCurrentText('км')
     assert window.scale_step.value()==1
-    window.scale_crs.setChecked(True); window.north_symbol.setCurrentIndex(2)
+    window.scale_crs.setChecked(True); window.north_symbol.setCurrentIndex(0)
     path=tmp_path/'crs.ggmaps'; monkeypatch.setattr(QFileDialog,'getSaveFileName',lambda *a:(str(path),''))
     assert window.save_map_project()
     manifest,rows=load_project(path)
     assert manifest['crs']=='EPSG:20918' and manifest['scale']['unit']=='км'
-    assert manifest['scale']['north']=='compass' and manifest['scale']['show_crs']
+    assert manifest['scale']['north']=='arrow' and manifest['scale']['show_crs']
     window.reset_map_project(); monkeypatch.setattr(QFileDialog,'getOpenFileName',lambda *a:(str(path),''))
     window.open_map_project()
     assert window.scale_unit.currentText()=='км' and window.scale_step.value()==1
-    assert window.map_project_crs=='EPSG:20918' and window.north_symbol.currentData()=='compass'
+    assert window.map_project_crs=='EPSG:20918' and window.north_symbol.currentData()=='arrow'
     window.close()
 
 
@@ -244,7 +244,8 @@ def test_shared_title_layout_persistence_and_export(tmp_path,monkeypatch,qt_appl
     window.save_map_project(); manifest,rows=load_project(path)
     assert manifest['presentation']['title']=='Общий заголовок'
     assert all('title' not in r['style'] for r in rows)
-    other=MainWindow(); other.add_grid(grid()); assert other.figure.subplotpars.left==pytest.approx(.2)
+    other=MainWindow(); other.add_grid(grid()); assert other.auto_map_layout.isChecked()
+    other.auto_map_layout.setChecked(False); assert other.figure.subplotpars.left==pytest.approx(.2)
     window.close(); other.close()
 
 

@@ -32,6 +32,7 @@ class MapToolbar(NavigationToolbar2QT):
         self.workbench.guard(self.workbench.fit_maps)
 
     def configure_subplots(self):
+        self.workbench.auto_map_layout.setChecked(False)
         if self._subplot_dialog is None: self._subplot_dialog=MapSubplotTool(self.workbench)
         self._subplot_dialog.update_from_current_subplotpars()
         self._subplot_dialog.setModal(True); self._subplot_dialog.show()
