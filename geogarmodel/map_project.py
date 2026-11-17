@@ -4,7 +4,6 @@ import importlib
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 import numpy as np
@@ -18,13 +17,13 @@ def _load_pyshp():
     try:
         return importlib.import_module('shapefile')
     except ImportError as error:
-        executable=subprocess.list2cmdline([sys.executable])
+        executable="& '"+sys.executable.replace("'","''")+"'"
         detail=(f'\nПричина импорта: {error}' if not isinstance(error,ModuleNotFoundError)
                 or error.name!='shapefile' else '')
         raise ValueError(
             'Библиотека pyshp не доступна в Python, которым запущен GeoGarModel:\n'
             f'{sys.executable}\n\n'
-            'Закройте программу, выполните в терминале:\n'
+            'Закройте программу, выполните в PowerShell:\n'
             f'{executable} -m pip install "pyshp>=2.3,<3"\n\n'
             'Затем снова запустите GeoGarModel этим же Python.'+detail
         ) from None
