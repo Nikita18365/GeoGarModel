@@ -1,7 +1,9 @@
 """VTK scene with cell thresholding, slices, volume and isosurfaces; lazy imports."""
 import numpy as np
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QDoubleSpinBox, QLabel, QSlider, QSpinBox, QPushButton, QDialog, QCheckBox, QScrollArea, QGroupBox, QFormLayout
-from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QDoubleSpinBox, QLabel, QSlider, QSpinBox, QPushButton, QDialog, QCheckBox, QScrollArea, QGroupBox, QFormLayout,QToolBar,QMessageBox,QToolBox
+from PyQt5.QtCore import Qt,QSize
+from .palette_library import local_library,PaletteDialog,preview
+from .model_slices import property_values
 
 
 def vtk_grid(result, component='amplitude'):
@@ -38,7 +40,7 @@ class ModelView(QWidget):
         self.controls=QHBoxLayout(); layout.addLayout(self.controls)
         self.kind=QComboBox(); self.kind.addItems(['Воксели','Объём','Изоповерхности','Срезы XYZ','Интерактивное отсечение'])
         self.component=QComboBox(); self.component.addItems(['amplitude','East','North','Down'])
-        self.threshold=QDoubleSpinBox(); self.threshold.setRange(0,99); self.threshold.setValue(20); self.threshold.setSuffix('% от max |m|')
+        self.threshold=QDoubleSpinBox(); self.threshold.setRange(0,99); self.threshold.setValue(0); self.threshold.setSuffix('% от max |m|')
         for w in (self.kind,self.component,self.threshold): self.controls.addWidget(w)
         slices=QHBoxLayout(); layout.addLayout(slices); self.slices=[]
         for name in ('East','North','Up'):
@@ -62,7 +64,7 @@ class ModelView(QWidget):
         self.axis_font.setSuffix(' px'); self.axis_font.setKeyboardTracking(False)
         view_row.addWidget(self.axis_font)
         self.axis_unit=QComboBox(); self.axis_unit.addItems(['м','км']); view_row.addWidget(self.axis_unit)
-        self.camera_view=QComboBox(); self.camera_view.addItems(['Изометрия','Сверху XY','Спереди XZ','Сбоку YZ'])
+        self.camera_view=QComboBox(); self.camera_view.addItems(['Изометрия','Сверху XY','Спереди XZ','Сбоку YZ','Снизу XY','Сзади XZ','С другой стороны YZ'])
         view_row.addWidget(self.camera_view)
         self.fit=QPushButton('Вписать модель'); view_row.addWidget(self.fit)
         self.expand=QPushButton('Большое окно'); view_row.addWidget(self.expand)
@@ -124,7 +126,7 @@ class ModelView(QWidget):
         layout.setAlignment(Qt.AlignTop)
         for title,fields in [
             ('Отображение',[('Компонента',self.component),('Порог вокселей',self.threshold)]),
-            ('Сечения',[('East',self.slices[0]),('North',self.slices[1]),('Up',self.slices[2])]),
+            ('Сечения',[('East',self.slices[0]),('North',self.slices[1]),('Глубина Down',self.slices[2])]),
             ('Пропорции модели',[('Растянуть X',self.axis_scales[0]),('Растянуть Y',self.axis_scales[1]),('Растянуть Z',self.axis_scales[2]),('',self.reset_scale)]),
             ('Камера и оси',[('Ракурс',self.camera_view),('Единицы',self.axis_unit),('Размер подписей',self.axis_font),('',self.fit)]),
             ('Цвета',[('Палитра',self.palette),('',self.reverse_palette),('Диапазон',self.color_range),('Минимум',self.color_min),('Максимум',self.color_max),('',self.apply_colors),('',self.color_note)]),
@@ -136,9 +138,160 @@ class ModelView(QWidget):
                 else: form.addRow(widget)
             settings_rows.addWidget(group)
         done=QPushButton('Готово'); done.clicked.connect(self.view_settings.close); outer.addWidget(done)
+        self.palette_library=local_library(); self.palette.setIconSize(QSize(120,18))
+        name='geophysics/colour.tbl'; self.palette.addItem(preview(self.palette_library[name]['colors']),name)
+        self.palette.setCurrentText(name)
+        self.palette_button=QPushButton('Библиотека палитр…'); self.palette_button.clicked.connect(self.choose_palette)
+        colors_group=QGroupBox('Палитры и оформление'); color_form=QFormLayout(colors_group)
+        color_form.addRow(self.palette_button)
+        self.color_distribution=QComboBox(); self.color_distribution.addItem('Линейное','linear'); self.color_distribution.addItem('Равная площадь (гистограмма)','equal_area')
+        color_form.addRow('Распределение цветов',self.color_distribution)
+        self.color_distribution.currentIndexChanged.connect(self.refresh_if_ready)
+        self.discrete_colors=QCheckBox('Дискретные цветовые зоны'); self.color_bins=QSpinBox(); self.color_bins.setRange(2,255); self.color_bins.setValue(32)
+        self.zone_values=QCheckBox('Использовать границы значений ZON')
+        color_form.addRow(self.discrete_colors); color_form.addRow('Число зон',self.color_bins); color_form.addRow(self.zone_values)
+        self.discrete_colors.toggled.connect(self.refresh_if_ready); self.zone_values.toggled.connect(self.refresh_if_ready); self.color_bins.valueChanged.connect(self.refresh_if_ready)
+        self.opacity=QDoubleSpinBox(); self.opacity.setRange(0,1); self.opacity.setValue(1); self.opacity.setSingleStep(.05); self.opacity.setKeyboardTracking(False)
+        self.opacity.setToolTip('0 — полностью прозрачно; 1 — непрозрачно.')
+        self.edges=QCheckBox('Рёбра ячеек'); self.outline=QCheckBox('Рамка модели'); self.outline.setChecked(True)
+        self.smooth_colors=QCheckBox('Плавная окраска поверхности'); self.smooth_colors.setChecked(True)
+        self.smooth_colors.setToolTip('Интерполяция для изображения. Свойства ячеек модели и экспорт не изменяются.')
+        color_form.addRow('Непрозрачность',self.opacity); color_form.addRow(self.edges); color_form.addRow(self.outline)
+        color_form.addRow(self.smooth_colors)
+        for control in (self.opacity,self.edges,self.outline,self.smooth_colors):
+            (control.valueChanged if isinstance(control,QDoubleSpinBox) else control.toggled).connect(self.refresh_if_ready)
+        settings_rows.insertWidget(settings_rows.count()-1,colors_group)
+        performance=QGroupBox('Быстродействие'); performance_form=QFormLayout(performance)
+        self.moving_detail,self.rest_detail=QSpinBox(),QSpinBox()
+        for w,value in ((self.moving_detail,10),(self.rest_detail,100)):
+            w.setRange(1,100); w.setValue(value); w.setSuffix(' %'); w.setKeyboardTracking(False); w.valueChanged.connect(self.refresh_if_ready)
+        self.full_resolution=QCheckBox('Всегда полная детализация'); self.full_resolution.toggled.connect(self.refresh_if_ready)
+        self.high_quality_transparency=QCheckBox('Качественная прозрачность'); self.high_quality_transparency.setChecked(True); self.high_quality_transparency.toggled.connect(self.refresh_if_ready)
+        performance_form.addRow('Во время движения',self.moving_detail); performance_form.addRow('В неподвижном виде',self.rest_detail)
+        performance_form.addRow(self.full_resolution); performance_form.addRow(self.high_quality_transparency)
+        settings_rows.insertWidget(settings_rows.count()-1,performance)
+        sections=QGroupBox('Координаты сечений'); sections_form=QFormLayout(sections)
+        self.slice_coordinates=[]; self.slice_enabled=[]
+        for i,label in enumerate(('X / East, м','Y / North, м','Глубина Down, м')):
+            spin=QDoubleSpinBox(); spin.setRange(-1e12,1e12); spin.setDecimals(3); spin.setKeyboardTracking(False)
+            enabled=QCheckBox('Показать'); enabled.setChecked(True); enabled.toggled.connect(self.refresh_if_ready)
+            spin.valueChanged.connect(lambda value,i=i:self.coordinate_changed(i,value))
+            self.slice_coordinates.append(spin); self.slice_enabled.append(enabled)
+            sections_form.addRow(label,spin); sections_form.addRow(enabled)
+        settings_rows.insertWidget(settings_rows.count()-1,sections)
+        clipping=QGroupBox('Пространственное отсечение'); clip_form=QFormLayout(clipping)
+        self.clip_enabled=QCheckBox('Ограничить область XYZ'); clip_form.addRow(self.clip_enabled); self.clip_ranges=[]
+        for name in ('East','North','Глубина Down'):
+            bounds=[]
+            for end in ('мин.','макс.'):
+                w=QDoubleSpinBox(); w.setRange(-1e12,1e12); w.setDecimals(3); w.setKeyboardTracking(False); clip_form.addRow(name+' '+end+', м',w); bounds.append(w)
+            self.clip_ranges.append(bounds)
+        apply_clip=QPushButton('Применить отсечение'); apply_clip.clicked.connect(self.refresh_if_ready); clip_form.addRow(apply_clip)
+        self.clip_enabled.toggled.connect(self.refresh_if_ready)
+        self.clip_normal=QComboBox(); self.clip_normal.addItems(['X','Y','Z']); self.clip_normal.currentIndexChanged.connect(self.refresh_if_ready); clip_form.addRow('Нормаль интерактивной плоскости',self.clip_normal)
+        settings_rows.insertWidget(settings_rows.count()-1,clipping)
+        self.navigation=QToolBar(); self.navigation.setToolButtonStyle(Qt.ToolButtonTextOnly); layout.insertWidget(1,self.navigation)
+        for text,index in [('XYZ',0),('Сверху',1),('Спереди',2),('Справа',3),('Снизу',4),('Сзади',5),('Слева',6)]:
+            self.navigation.addAction(text).triggered.connect(lambda checked=False,index=index:self.set_camera(index))
+        self.navigation.addAction('Вписать').triggered.connect(self.fit_model)
+        for text,index in [('Срез X',0),('Срез Y',1),('Срез Z',2)]: self.navigation.addAction(text).triggered.connect(lambda checked=False,index=index:self.single_slice(index))
+        self.navigation.addAction('Карты глубин…').triggered.connect(self.open_slice_maps)
+        self.navigation.addAction('Палитры…').triggered.connect(self.choose_palette)
+        self._geometry_key=None; self._geometry=None; self._lod_actors=[]; self._active_actor=None; self._moving=False
+        self._slice_dialogs=[]
+        self._explicit_slices=set()
+        for i,slider in enumerate(self.slices):
+            slider.sliderReleased.disconnect(); slider.sliderReleased.connect(lambda i=i:self.slider_changed(i))
+        sections_box=QToolBox()
+        while settings_rows.count():
+            group=settings_rows.takeAt(0).widget()
+            title=group.title(); group.setTitle(''); sections_box.addItem(group,title)
+        settings_rows.addWidget(sections_box)
 
     def show_view_settings(self):
         self.view_settings.show(); self.view_settings.raise_(); self.view_settings.activateWindow()
+
+    def choose_palette(self):
+        dialog=PaletteDialog(self.palette_library,self)
+        if dialog.exec_()!=QDialog.Accepted: return
+        name=dialog.selected
+        if self.palette.findText(name)<0: self.palette.addItem(preview(self.palette_library[name]['colors']),name)
+        self.palette.setCurrentText(name)
+
+    def colors_for(self,result,values=None):
+        from types import SimpleNamespace
+        from .plotting import map_colors
+        values=property_values(result,self.component.currentText())[result.mesh.active] if values is None else np.asarray(values)
+        limit=max(float(np.max(np.abs(values))),1e-15)
+        clim=(0,limit) if np.min(values)>=0 else (-limit,limit)
+        if self.color_range.currentIndex()==1: clim=(-limit,limit)
+        elif self.color_range.currentIndex()==2:
+            clim=(self.color_min.value(),self.color_max.value())
+            if clim[0]>=clim[1]: raise ValueError('Цветовой минимум должен быть меньше максимума.')
+        name=self.palette.currentText() if self.palette.currentIndex()>0 else ('viridis' if np.min(values)>=0 else 'coolwarm')
+        entry=self.palette_library.get(name)
+        cmap,norm=map_colors(SimpleNamespace(values=values),cmap=name,mode=self.color_distribution.currentData(),vmin=clim[0],vmax=clim[1],
+            palette_colors=entry['colors'] if entry else None,reverse=self.reverse_palette.isChecked(),
+            discrete=self.discrete_colors.isChecked(),bins=self.color_bins.value(),
+            palette_zones=entry.get('zones') if entry else None,zone_values=self.zone_values.isChecked())
+        return cmap,norm,(norm.vmin,norm.vmax)
+
+    def set_camera(self,index):
+        self.camera_view.setCurrentIndex(index); self.fit_model()
+
+    def single_slice(self,index):
+        for i,w in enumerate(self.slice_enabled): w.blockSignals(True); w.setChecked(i==index); w.blockSignals(False)
+        if self.kind.currentIndex()==3: self.refresh_if_ready()
+        else: self.kind.setCurrentIndex(3)
+
+    def coordinate_changed(self,index,value):
+        if self.result is None: return
+        axis=(self.result.mesh.east,self.result.mesh.north,self.result.mesh.depth)[index]
+        slider=self.slices[index]; slider.blockSignals(True); slider.setValue(round((value-axis[0])/(axis[-1]-axis[0])*100)); slider.blockSignals(False)
+        self._explicit_slices.add(index); self.refresh_if_ready()
+
+    def slider_changed(self,index):
+        self._explicit_slices.discard(index); self.refresh_if_ready()
+
+    def open_slice_maps(self):
+        if self.result is None:
+            QMessageBox.information(self,'Срезы','Сначала загрузите модель или результат моделирования.'); return
+        from .slice_gallery import SliceDepthDialog,SliceGallery
+        dialog=SliceDepthDialog(self.result.mesh,self)
+        if dialog.exec_()!=QDialog.Accepted: return
+        try: cmap,norm,_=self.colors_for(self.result)
+        except ValueError as error: QMessageBox.warning(self,'Цветовая шкала',str(error)); return
+        gallery=SliceGallery(self.result,dialog.depths,cmap,norm,self.component.currentText(),self)
+        self._slice_dialogs.append(gallery)
+        gallery.finished.connect(lambda:self._slice_dialogs.remove(gallery) if gallery in self._slice_dialogs else None)
+        gallery.show()
+
+    def interaction_started(self,*args):
+        self._moving=True; self.apply_detail()
+
+    def interaction_finished(self,*args):
+        self._moving=False; self.apply_detail()
+
+    def apply_detail(self):
+        if not self._lod_actors: return
+        desired=100 if self.full_resolution.isChecked() else (self.moving_detail.value() if self._moving else self.rest_detail.value())
+        chosen=min(self._lod_actors,key=lambda pair:abs(pair[0]-desired))[1]
+        for _,actor in self._lod_actors: actor.visibility=actor is chosen
+        if self.plotter is not None: self.plotter.render()
+
+    def prepare_lod(self,grid,actor,options,key):
+        self._lod_actors=[(100,actor)]
+        if self.full_resolution.isChecked() or grid.n_cells<500: return
+        requested={self.moving_detail.value(),self.rest_detail.value()}-{100}
+        cache_key=(key,tuple(sorted(requested)))
+        if cache_key!=getattr(self,'_lod_cache_key',None):
+            surface=grid.extract_surface().triangulate().cell_data_to_point_data()
+            self._lod_cache={level:surface.decimate_pro(1-level/100,preserve_topology=True,splitting=False) for level in requested}
+            self._lod_cache_key=cache_key
+        for level,mesh in self._lod_cache.items():
+            low=self.plotter.add_mesh(mesh,show_scalar_bar=False,opacity=self.opacity.value(),**options)
+            self._lod_actors.append((level,low))
+        self.apply_detail()
 
     def rescale(self):
         self._fit_pending=True
@@ -164,7 +317,9 @@ class ModelView(QWidget):
     def fit_model(self):
         if self.plotter is None or self.result is None: return
         p=self.plotter
-        [p.view_isometric,p.view_xy,p.view_xz,p.view_yz][self.camera_view.currentIndex()]()
+        index=self.camera_view.currentIndex()
+        if index<4: [p.view_isometric,p.view_xy,p.view_xz,p.view_yz][index]()
+        else: [p.view_xy,p.view_xz,p.view_yz][index-4](negative=True)
         p.reset_camera(); p.camera.zoom(.82); p.render()
 
     def expanded_view(self):
@@ -179,25 +334,40 @@ class ModelView(QWidget):
         for source,target in zip(self.axis_scales,view.axis_scales): target.setValue(source.value())
         for source,target in ((self.kind,view.kind),(self.component,view.component),
                               (self.axis_unit,view.axis_unit),(self.camera_view,view.camera_view),
-                              (self.palette,view.palette),(self.color_range,view.color_range)):
+                              (self.color_range,view.color_range),(self.color_distribution,view.color_distribution)):
             target.setCurrentIndex(source.currentIndex())
+        name=self.palette.currentText()
+        if view.palette.findText(name)<0: view.palette.addItem(preview(self.palette_library[name]['colors']),name)
+        view.palette.setCurrentText(name)
         view.color_min.setValue(self.color_min.value()); view.color_max.setValue(self.color_max.value())
         view.reverse_palette.setChecked(self.reverse_palette.isChecked())
         view.threshold.setValue(self.threshold.value()); view.axis_font.setValue(self.axis_font.value())
         for source,target in zip(self.slices,view.slices): target.setValue(source.value())
+        for source,target in ((self.opacity,view.opacity),(self.color_bins,view.color_bins),(self.moving_detail,view.moving_detail),(self.rest_detail,view.rest_detail)): target.setValue(source.value())
+        for source,target in ((self.discrete_colors,view.discrete_colors),(self.zone_values,view.zone_values),(self.edges,view.edges),(self.outline,view.outline),(self.smooth_colors,view.smooth_colors),(self.full_resolution,view.full_resolution),(self.high_quality_transparency,view.high_quality_transparency)):
+            target.setChecked(source.isChecked())
+        view.clip_normal.setCurrentIndex(self.clip_normal.currentIndex())
+        for source,target in zip(self.slice_enabled,view.slice_enabled): target.setChecked(source.isChecked())
         def cleanup():
             view.shutdown(); self._expanded_dialog=None; dialog.deleteLater()
         dialog.finished.connect(cleanup)
         try:
             dialog.showMaximized(); view.render(self.result)
+            for source,target in zip(self.slices,view.slices): target.setValue(source.value())
+            for source,target in zip(self.slice_coordinates,view.slice_coordinates): target.blockSignals(True); target.setValue(source.value()); target.blockSignals(False)
+            view._explicit_slices=set(range(3))
+            for source_pair,target_pair in zip(self.clip_ranges,view.clip_ranges):
+                for source,target in zip(source_pair,target_pair): target.setValue(source.value())
+            view.clip_enabled.blockSignals(True); view.clip_enabled.setChecked(self.clip_enabled.isChecked()); view.clip_enabled.blockSignals(False)
+            view.refresh_if_ready()
         except Exception:
             dialog.reject(); raise
 
     def refresh_if_ready(self):
         if self.result is not None and self.plotter is not None:
-            self.render(self.result)
+            self.render(self.result,reuse_geometry=True)
 
-    def render(self,result):
+    def render(self,result,reuse_geometry=False):
         try:
             from pyvistaqt import QtInteractor
         except ImportError as exc:
@@ -205,8 +375,10 @@ class ModelView(QWidget):
         if self.plotter is None:
             self.plotter=QtInteractor(self)
             self.plotter.enable_parallel_projection()
+            self.plotter.iren.add_observer('StartInteractionEvent',self.interaction_started)
+            self.plotter.iren.add_observer('EndInteractionEvent',self.interaction_finished)
             self.layout().addWidget(self.plotter.interactor,1)
-        new_model=self.result is not result
+        new_model=self._geometry_key is None or self._geometry_key[0]!=id(result)
         self.result=result
         p=self.plotter
         if self.color_range.currentIndex()==2 and self.color_min.value()>=self.color_max.value():
@@ -216,64 +388,97 @@ class ModelView(QWidget):
         camera=p.camera_position if p.renderer.actors else None
         camera_scale=p.camera.parallel_scale
         p.clear(); p.clear_plane_widgets()
-        p.set_background('#101c2f')
-        grid=vtk_grid(result,self.component.currentText())
+        p.set_background('white'); self._lod_actors=[]
+        if self.high_quality_transparency.isChecked(): p.enable_depth_peeling(number_of_peels=4,occlusion_ratio=.05)
+        else: p.disable_depth_peeling()
         # Use a local origin only in the display; exported VTK retains full CRS coordinates.
         origin=np.array([result.mesh.east[0],result.mesh.north[0],0.])
-        grid.translate(-origin,inplace=True)
         # Transform display geometry only, so slices and clip widgets share its coordinates.
         # Axes below retain the unscaled physical coordinate ranges.
-        physical_bounds=np.array(grid.bounds)
         scale=np.array([widget.value() for widget in self.axis_scales])
-        grid.scale(scale,inplace=True)
+        geometry_key=(id(result),self.component.currentText(),tuple(scale))
+        if not reuse_geometry or geometry_key!=self._geometry_key:
+            grid=vtk_grid(result,self.component.currentText()); grid.translate(-origin,inplace=True)
+            if grid.__class__.__name__=='UnstructuredGrid': grid=grid.clean(produce_merge_map=False)
+            self._physical_bounds=np.array(grid.bounds); grid.scale(scale,inplace=True)
+            self._geometry=grid; self._geometry_key=geometry_key; self._lod_cache_key=None
+        grid=self._geometry; physical_bounds=self._physical_bounds
         self.display_grid=grid
         self._display_scale=scale.copy()
         mode=result.settings['mode']
         unit='g/cm³' if mode=='gravity' else ('SI' if mode=='induced' else 'A/m')
-        self.info.setText(f'{result.mesh.active.sum():,} активных ячеек · {unit} · X = East − E₀, Y = North − N₀; E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м; Z = Up (вверх). Вращение: ЛКМ, масштаб: колесо.')
+        if new_model or not getattr(self,'_coordinate_ready',False):
+            self._explicit_slices.clear()
+            self.clip_enabled.blockSignals(True); self.clip_enabled.setChecked(False); self.clip_enabled.blockSignals(False)
+            for i,axis in enumerate((result.mesh.east,result.mesh.north,result.mesh.depth)):
+                self.slices[i].setValue(50)
+                w=self.slice_coordinates[i]; w.blockSignals(True); w.setRange(axis[0],axis[-1]); w.setValue((axis[0]+axis[-1])/2); w.blockSignals(False)
+                for control,value in zip(self.clip_ranges[i],(axis[0],axis[-1])): control.setValue(value)
+            self._coordinate_ready=True
+        for i,axis in enumerate((result.mesh.east,result.mesh.north,result.mesh.depth)):
+            if i in self._explicit_slices: continue
+            w=self.slice_coordinates[i]; w.blockSignals(True); w.setValue(axis[0]+(axis[-1]-axis[0])*self.slices[i].value()/100); w.blockSignals(False)
+        if self.clip_enabled.isChecked():
+            limits=[(a.value(),b.value()) for a,b in self.clip_ranges]
+            if any(a>=b for a,b in limits): self.color_note.setText('Минимальные границы отсечения должны быть меньше максимальных.'); return
+            bounds=[(limits[0][0]-origin[0])*scale[0],(limits[0][1]-origin[0])*scale[0],(limits[1][0]-origin[1])*scale[1],(limits[1][1]-origin[1])*scale[1],-limits[2][1]*scale[2],-limits[2][0]*scale[2]]
+            grid=grid.clip_box(bounds,invert=False)
+            if grid.n_cells==0: self.color_note.setText('В выбранной области нет активных ячеек.'); p.render(); return
+        self.info.setText(f'{result.mesh.active.sum():,} активных ячеек · {unit} · Оси: исходные East / North, Z = Up (вверх). Локальное начало геометрии: E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м. Вращение: ЛКМ; перемещение: средняя кнопка; масштаб: колесо.')
         self.component.setEnabled(result.model.ndim==2)
         values=grid['property']; amplitude=float(np.max(np.abs(values))); limit=max(amplitude,1e-15)
-        cmap='viridis' if np.min(values)>=0 else 'coolwarm'
-        clim=(0,limit) if np.min(values)>=0 else (-limit,limit)
-        if self.palette.currentIndex()>0: cmap=self.palette.currentText()
-        if self.reverse_palette.isChecked(): cmap+='_r'
-        if self.color_range.currentIndex()==1: clim=(-limit,limit)
-        elif self.color_range.currentIndex()==2: clim=(self.color_min.value(),self.color_max.value())
+        cmap,norm,clim=self.colors_for(result)
+        from matplotlib.colors import ListedColormap
+        cmap=ListedColormap(cmap(norm(np.linspace(clim[0],clim[1],1024))))
         if self.color_range.currentIndex()!=2:
             self.color_min.setValue(clim[0]); self.color_max.setValue(clim[1])
         options=dict(scalars='property',cmap=cmap,clim=clim,scalar_bar_args={
-            'title':unit,'color':'#f0f5ff','title_font_size':14,'label_font_size':12,
+            'title':unit,'color':'#222222','title_font_size':self.axis_font.value(),'label_font_size':max(10,self.axis_font.value()-4),
             'n_labels':4,'fmt':'%.3g','position_x':.80,'position_y':.18,'width':.05,'height':.65,'vertical':True})
         kind=self.kind.currentIndex()
         if kind==0:
             chosen=grid.extract_cells(np.flatnonzero(np.abs(values)>=amplitude*self.threshold.value()/100))
-            if chosen.n_cells: p.add_mesh(chosen,show_edges=True,edge_color='#33465a',**options)
+            if chosen.n_cells:
+                if self.smooth_colors.isChecked(): chosen=chosen.cell_data_to_point_data(pass_cell_data=True)
+                actor=p.add_mesh(chosen,show_edges=self.edges.isChecked(),edge_color='#333333',opacity=self.opacity.value(),interpolate_before_map=True,**options)
+                lod_options={k:v for k,v in options.items() if k!='scalar_bar_args'}
+                key=(self._geometry_key,self.threshold.value(),self.clip_enabled.isChecked(),tuple(w.value() for pair in self.clip_ranges for w in pair))
+                self.prepare_lod(chosen,actor,lod_options,key)
         elif kind==1:
             if grid.__class__.__name__=='UnstructuredGrid':
-                p.add_mesh(grid,opacity=.3,**options)
-                self.info.setText(self.info.text()+' · Обрезанные призмы: полупрозрачная геометрия.')
+                p.add_mesh(grid,opacity=self.opacity.value(),**options)
+                self.info.setText(self.info.text()+' · Обрезанные призмы: геометрия ячеек.')
             else:
-                p.add_volume(grid.cell_data_to_point_data(),opacity='sigmoid',**options)
+                actor=p.add_volume(grid.cell_data_to_point_data(),opacity=self.opacity.value()/(1+np.exp(-np.linspace(-6,6,256))),**options)
+                if hasattr(actor.mapper,'SetInteractiveAdjustSampleDistances'): actor.mapper.SetInteractiveAdjustSampleDistances(not self.full_resolution.isChecked())
         elif kind==2:
             points=grid.cell_data_to_point_data()
             lo,hi=float(values.min()),float(values.max())
             if hi>lo:
                 surface=points.contour(np.linspace(lo,hi,7)[1:-1],scalars='property')
-                if surface.n_points: p.add_mesh(surface,opacity=.65,**options)
+                if surface.n_points: p.add_mesh(surface,opacity=self.opacity.value(),**options)
         elif kind==3:
-            centers=[grid.bounds[2*i]+(grid.bounds[2*i+1]-grid.bounds[2*i])*slider.value()/100 for i,slider in enumerate(self.slices)]
+            centers=[(self.slice_coordinates[i].value()-origin[i])*scale[i] if i<2 else -self.slice_coordinates[i].value()*scale[i] for i in range(3)]
             # One mapper keeps the same explicit color range on all three slices.
-            p.add_mesh(grid.slice_orthogonal(x=centers[0],y=centers[1],z=centers[2]).combine(),**options)
-            p.add_mesh(grid.outline(),color='#93a9c4')
+            parts=[grid.slice(normal=axis,origin=centers) for axis,enabled in zip(('x','y','z'),self.slice_enabled) if enabled.isChecked()]
+            import pyvista as pv
+            combined=pv.MultiBlock(parts).combine() if parts else None
+            if combined is not None and combined.n_cells:
+                if self.smooth_colors.isChecked(): combined=combined.cell_data_to_point_data(pass_cell_data=True)
+                p.add_mesh(combined,opacity=self.opacity.value(),**options)
         else:
-            p.add_mesh_clip_plane(grid,normal='x',**options)
-        p.add_axes(xlabel='X / East',ylabel='Y / North',zlabel='Z / Up',color='#f0f5ff')
+            if self.smooth_colors.isChecked(): grid=grid.cell_data_to_point_data(pass_cell_data=True)
+            p.add_mesh_clip_plane(grid,normal=self.clip_normal.currentText().lower(),opacity=self.opacity.value(),**options)
+        if self.outline.isChecked(): p.add_mesh(grid.outline(),color='#333333')
+        p.add_axes(xlabel='X / East',ylabel='Y / North',zlabel='Z / Up',color='#222222')
         divisor=1000 if self.axis_unit.currentText()=='км' else 1
         unit_label='km' if divisor==1000 else 'm'
-        self.bounds_axes=p.show_grid(bounds=grid.bounds,axes_ranges=physical_bounds/divisor,
-                    color='#e3edff',font_size=self.axis_font.value(),bold=True,fmt='%.3g',
+        physical_bounds=np.array(grid.bounds)/np.repeat(scale,2)
+        self.bounds_axes=p.show_bounds(bounds=grid.bounds,axes_ranges=(physical_bounds+np.repeat(origin,2))/divisor,
+                    grid='back' if self.outline.isChecked() else False,all_edges=self.outline.isChecked(),location='outer',
+                    color='#222222',font_size=self.axis_font.value(),bold=True,fmt='%.3f' if divisor==1000 else '%.0f',
                     use_2d=False,use_3d_text=False,
-                    xtitle=f'X ({unit_label})',ytitle=f'Y ({unit_label})',
+                    xtitle=f'East ({unit_label})',ytitle=f'North ({unit_label})',
                     ztitle=f'Z ({unit_label})',n_xlabels=4,n_ylabels=4,n_zlabels=4)
         self.bounds_axes.GetProperty().SetLineWidth(1.5)
         if camera is None or new_model or self._reorient_pending: self.fit_model()
@@ -288,8 +493,9 @@ class ModelView(QWidget):
         p.render()
 
     def shutdown(self):
+        for dialog in list(self._slice_dialogs): dialog.close()
         self.view_settings.close()
         if self._expanded_dialog is not None:
             self._expanded_dialog.close()
         if self.plotter is not None:
-            self.plotter.close()
+            self._lod_actors=[]; self.plotter.close(); self.plotter=None

@@ -167,6 +167,7 @@ class InversionTab(QWidget):
         details(rl,self.log,'Журнал расчёта')
         actions=QHBoxLayout(); rl.addLayout(actions)
         self.button('Открыть / обновить 3D',self.open_3d,actions)
+        self.button('Карты срезов…',self.open_slice_maps,actions)
         from PyQt5.QtWidgets import QMenu
         export_button=QPushButton('Сохранить результат…'); export_menu=QMenu(export_button)
         for title,callback in [('Модель и отчёт · NPZ',self.save),('Модель · UBC',self.save_ubc),
@@ -521,6 +522,8 @@ class InversionTab(QWidget):
         if self.result is None: raise ValueError('Сначала завершите 3D-моделирование.')
         return self.result
     def open_3d(self): self.scene.render(self.require_result()); self.tabs.setCurrentIndex(0)
+    def open_slice_maps(self):
+        self.scene.result=self.require_result(); self.scene.open_slice_maps()
     def load_result(self):
         path,_=QFileDialog.getOpenFileName(self,'Сохранённый результат 3D-моделирования','','NPZ (*.npz)')
         if path:
