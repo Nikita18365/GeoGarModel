@@ -34,6 +34,7 @@ def test_complete_project_restores_data_optuna_predictions_and_model_windows(qt_
         t=window.inversion; t.crs.setCurrentText('EPSG:20918')
         t.assign_table(pd.DataFrame(dict(East=observations[:,0],North=observations[:,1],anomaly=result.observed)))
         initial=VoxelModel(mesh,values,'gravity','EPSG:20918'); t.initial_panel.assign(initial)
+        initial.history.append(dict(operation='test preparation'))
         t.finished_result(result,offer_export=False); t.nz.setValue(35); t.early_stop.setChecked(True)
         path=tmp_path/'original.npz'; initial.save(path)
         entry=t.scene.register(result,path=str(path)); other=t.scene.register(initial.result(),name='Начальная')
@@ -59,6 +60,7 @@ def test_complete_project_restores_data_optuna_predictions_and_model_windows(qt_
         doc=restored.inversion.scene._documents[0]; assert len(doc.entries)==2 and doc.isMinimized()
         assert doc.view.palette.currentText()=='plasma'
         assert doc.selected.path==str(path.resolve())
+        assert next(e for e in restored.inversion.scene.registry.values() if e.name.startswith('Начальная')).result.settings['voxel_history']==initial.history
         assert doc.states[entry.key]['coordinate_2']==250
         # Saving a restored model must preserve its fitted pipeline too.
         second=tmp_path/'again.ggproject'; restored.save_project_to(second)

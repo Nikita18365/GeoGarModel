@@ -41,7 +41,7 @@ class VoxelModel:
                             voxel_metadata=json.dumps(dict(mode=self.mode,crs=self.crs,history=self.history),ensure_ascii=False))
 
     def result(self):
-        return InversionResult(self.mesh,self.values,np.empty((0,3)),np.empty(0),np.empty(0),[],dict(mode=self.mode,crs=self.crs,source_path=self.source_path,source_array=self.source_array),'initial_model')
+        return InversionResult(self.mesh,self.values,np.empty((0,3)),np.empty(0),np.empty(0),[],dict(mode=self.mode,crs=self.crs,source_path=self.source_path,source_array=self.source_array,voxel_history=list(self.history)),'initial_model')
 
 
 def _numbers(path):
@@ -181,7 +181,8 @@ def combine_components(models):
             raise ValueError('JE/JN/JD должны иметь одинаковые грани сетки и CRS.')
     result=first.copy(); result.mode='vector'; result.mesh.active=np.logical_and.reduce([m.mesh.active for m in models])
     result.values=np.column_stack([m.values for m in models]); result.values[~result.mesh.active]=0
-    result.history.append(dict(operation='combine JE JN JD, A/m'))
+    result.source_path=''; result.source_array=''
+    result.history.append(dict(operation='combine JE JN JD, A/m',sources=[m.source_path for m in models]))
     return result
 
 
