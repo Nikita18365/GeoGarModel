@@ -62,6 +62,9 @@ def save_grid(grid, path):
 
 def load_grid(path):
     path = Path(path)
+    if path.suffix.lower()=='.grd':
+        from .binary_grid import read_binary_grid
+        return read_binary_grid(path)
     if path.suffix.lower() == ".npz":
         with np.load(path, allow_pickle=False) as data:
             return Grid(data["x"], data["y"], data["values"], **json.loads(str(data["metadata"])))
