@@ -65,14 +65,21 @@ def test_slice_gallery_has_axes_units_and_common_colour_range(mode,unit,qt_appli
     finally: gallery.close()
 
 
-def test_lod_switching_cached_geometry_and_exact_slice_coordinates(qt_application_lifetime):
-    pytest.importorskip('pyvistaqt')
+def test_lod_switching_cached_geometry_and_exact_slice_coordinates(qt_application_lifetime,monkeypatch):
+    pvqt=pytest.importorskip('pyvistaqt')
+    def unsupported_probe(*args,**kwargs):
+        raise AssertionError('Do not create a second GL window to probe transparency.')
+    monkeypatch.setattr(pvqt.QtInteractor,'enable_depth_peeling',unsupported_probe)
     from geogarmodel.inversion_view import ModelView
     r=result(); r.mesh=Mesh(np.arange(13)*100.+18000000,np.arange(13)*100.+7800000,np.arange(13)*100.+10)
     r.model=np.linspace(-1,1,r.mesh.size)
     original=r.model.copy(); view=ModelView()
     try:
         view.render(r); geometry=view.display_grid
+        assert view.plotter.renderer.GetUseDepthPeeling()
+        view.high_quality_transparency.setChecked(False)
+        assert not view.plotter.renderer.GetUseDepthPeeling()
+        view.high_quality_transparency.setChecked(True)
         assert len(view._lod_actors)==2
         full=view._lod_actors[0][1]; assert full.visibility
         view.interaction_started(); assert not full.visibility

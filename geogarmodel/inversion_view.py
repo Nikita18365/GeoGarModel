@@ -389,8 +389,14 @@ class ModelView(QWidget):
         camera_scale=p.camera.parallel_scale
         p.clear(); p.clear_plane_widgets()
         p.set_background('white'); self._lod_actors=[]
-        if self.high_quality_transparency.isChecked(): p.enable_depth_peeling(number_of_peels=4,occlusion_ratio=.05)
-        else: p.disable_depth_peeling()
+        # Configure the current Qt OpenGL context. PyVista's convenience method
+        # probes a separate temporary window, which can crash software drivers.
+        # VTK falls back to standard blending when peeling is unavailable here.
+        p.renderer.SetUseDepthPeeling(self.high_quality_transparency.isChecked())
+        p.renderer.SetMaximumNumberOfPeels(4)
+        p.renderer.SetOcclusionRatio(.05)
+        p.render_window.SetAlphaBitPlanes(1)
+        p.render_window.SetMultiSamples(0)
         # Use a local origin only in the display; exported VTK retains full CRS coordinates.
         origin=np.array([result.mesh.east[0],result.mesh.north[0],0.])
         # Transform display geometry only, so slices and clip widgets share its coordinates.
