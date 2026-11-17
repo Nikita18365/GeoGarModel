@@ -15,6 +15,7 @@ from .plotting import draw_map
 from .map_navigation import north_direction
 from .sun_picker import SunPicker
 from .crs_editor import CRSEditor,read_prj
+from .palette_library import local_library,PaletteDialog,preview
 
 
 class LayerNameDelegate(QStyledItemDelegate):
@@ -81,6 +82,9 @@ class MapWorkspace:
         help_label=QLabel('✓ — показать слой · верхний слой впереди\nПеретащите для порядка · F2 — имя · Delete — удалить')
         help_label.setWordWrap(True); project_layout.insertWidget(1,help_label)
         self.button('СК проекта…',self.project_crs_dialog,project_layout)
+        self.ask_source_crs=QCheckBox('Уточнять исходную СК при импорте')
+        self.ask_source_crs.setToolTip('По умолчанию СК читается из файла; если её нет, используется СК проекта.')
+        project_layout.addWidget(self.ask_source_crs)
         self.vector_style_button=self.button('Оформление SHP / GeoJSON…',self.vector_style_dialog,project_layout)
         self.vector_style_button.setEnabled(False)
         self.layers.currentRowChanged.disconnect()
@@ -96,6 +100,19 @@ class MapWorkspace:
         self.map_delete.setContext(Qt.WidgetShortcut); self.map_delete.activated.connect(lambda:self.guard(self.delete_map_layer))
         self.map_style_widgets={'cmap':self.palette,'mode':self.norm,'vmin':self.minimum,'vmax':self.maximum,
             'contours':self.contours,'hillshade':self.shade}
+        self.palette_library=local_library()
+        self.palette.setIconSize(__import__('PyQt5.QtCore',fromlist=['QSize']).QSize(130,18))
+        for i in range(self.palette.count()):
+            name=self.palette.itemText(i); self.palette.setItemIcon(i,preview(self.palette_library[name]['colors']))
+        palette_button=QPushButton('Библиотека палитр…'); palette_button.clicked.connect(lambda:self.guard(self.choose_palette))
+        style_form.insertRow(1,palette_button)
+        self.map_discrete=QCheckBox('Дискретные цветовые зоны')
+        self.map_bins=QSpinBox(); self.map_bins.setRange(2,255); self.map_bins.setValue(32)
+        self.map_reverse=QCheckBox('Обратить палитру'); self.map_smooth=QCheckBox('Сглаживание изображения')
+        self.map_zone_values=QCheckBox('Использовать границы значений из ZON')
+        for key,label,w in [('discrete','',self.map_discrete),('bins','Число зон',self.map_bins),('reverse','',self.map_reverse),('smooth','',self.map_smooth)]:
+            style_form.addRow(label,w); self.map_style_widgets[key]=w
+        style_form.addRow(self.map_zone_values); self.map_style_widgets['zone_values']=self.map_zone_values
         style_form.labelForField(self.map_title).setText('Общий заголовок (пусто — имя проекта)')
         self.shade.setText('Теневой рельеф')
         self.map_title.editingFinished.connect(lambda:self.guard(self.redraw))
@@ -216,7 +233,24 @@ class MapWorkspace:
     def source_crs(self,known,name):
         from pyproj import CRS
         if known: return CRS.from_user_input(known).to_string()
+        if self.map_project_crs: return self.map_project_crs
         return self.choose_source_crs(known,name)
+
+    def ensure_map_project(self):
+        if not self.map_project_crs: self.project_crs_dialog()
+        return bool(self.map_project_crs)
+
+    def import_source_crs(self,known,name):
+        if self.ask_source_crs.isChecked(): return self.choose_source_crs(known or self.map_project_crs,name)
+        if not known: self.statusBar().showMessage('СК файла не найдена: используется СК проекта. Изменить: «СК и параметры слоя…».',12000)
+        return known or self.map_project_crs
+
+    def choose_palette(self):
+        dialog=PaletteDialog(self.palette_library,self)
+        if dialog.exec_()!=QDialog.Accepted: return
+        name=dialog.selected
+        if self.palette.findText(name)<0: self.palette.addItem(preview(self.palette_library[name]['colors']),name)
+        self.palette.setCurrentText(name)
 
     def choose_source_crs(self,known,name):
         dialog=QDialog(self); dialog.setWindowTitle('Исходная СК — '+name); dialog.resize(620,320)
@@ -290,6 +324,8 @@ class MapWorkspace:
             result[key]=(w.text() if isinstance(w,QLineEdit) else w.isChecked() if isinstance(w,QCheckBox)
                          else w.currentText() if key=='cmap' else w.currentData() if key=='mode' else w.value())
             if key=='sun_intensity': result[key]/=100
+        entry=self.palette_library.get(result['cmap'])
+        if entry: result.update(palette_colors=entry['colors'],palette_zones=entry.get('zones'))
         return result
 
     def map_selection(self,item,previous):
@@ -299,6 +335,9 @@ class MapWorkspace:
         self._map_selected=item
         if item and item.data(Qt.UserRole)['kind']=='grid':
             style=item.data(Qt.UserRole)['style']; self._map_loading=True
+            if style.get('palette_colors'):
+                self.palette_library[style['cmap']]=dict(colors=style['palette_colors'],zones=style.get('palette_zones'))
+                if self.palette.findText(style['cmap'])<0: self.palette.addItem(preview(style['palette_colors']),style['cmap'])
             for key,w in self.map_style_widgets.items():
                 value=style.get(key)
                 if value is None: continue
@@ -388,6 +427,7 @@ class MapWorkspace:
         self.map_reordered()
 
     def open_vector(self):
+        if not self.ensure_map_project(): return
         crs=self.map_project_crs
         if not crs: raise ValueError('Сначала задайте СК проекта.')
         path,_=QFileDialog.getOpenFileName(self,'Добавить векторный слой','','Vector (*.shp *.geojson *.json)')
@@ -395,7 +435,7 @@ class MapWorkspace:
             source=None
             if Path(path).suffix.lower()=='.shp':
                 prj=Path(path).with_suffix('.prj')
-                source=self.choose_source_crs(read_prj(prj) if prj.exists() else '',Path(path).stem)
+                source=self.import_source_crs(read_prj(prj) if prj.exists() else '',Path(path).stem)
                 if source is None: return
             vector=read_vector(path,source)
             vector=vector.reproject(crs)
@@ -491,6 +531,7 @@ class MapWorkspace:
             from .theme import style_figure
             style_figure(self.figure)
         self._map_fit=False; self.map_dirty=True; self.canvas.draw_idle()
+        if hasattr(self,'fast_map'): self.fast_map.show_layers(rows,(ax.get_xlim(),ax.get_ylim()) if grids else None)
 
     def color_icon(self):
         from PyQt5.QtGui import QPixmap,QIcon

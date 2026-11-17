@@ -147,11 +147,14 @@ class MainWindow(MapWorkspace,QMainWindow):
         plot_layout = QVBoxLayout(plot)
         self.map_toolbar=MapToolbar(self.canvas,self)
         plot_layout.addWidget(self.map_toolbar)
-        plot_layout.addWidget(self.canvas)
+        from .fast_map import FastMap
+        self.fast_map=FastMap(self); self.map_views=QTabWidget()
+        self.map_views.addTab(self.fast_map,'Быстрый просмотр'); self.map_views.addTab(self.canvas,'Оформление и экспорт')
+        plot_layout.addWidget(self.map_views)
         controls = QWidget()
         root_panel = QVBoxLayout(controls)
         data_group=QGroupBox('Открыть карту'); panel=QVBoxLayout(data_group); root_panel.addWidget(data_group)
-        self.button("Открыть ZMAP / DAT / NPZ", self.open_grid, panel)
+        self.button("Открыть GRD / ZMAP / DAT / NPZ", self.open_grid, panel)
         self.button("Таблица XYZ → регулярная сетка", self.open_xyz, panel)
         self.layers = LayerList()
         self.layers.setMinimumHeight(100); self.layers.setMaximumHeight(180)
@@ -173,6 +176,7 @@ class MainWindow(MapWorkspace,QMainWindow):
         self.norm = QComboBox()
         for text, value in [("Линейная", "linear"), ("2–98 процентили", "percentile"), ("Симметрично около 0", "symmetric")]:
             self.norm.addItem(text, value)
+        self.norm.addItem('Равная площадь (гистограмма)','equal_area')
         self.minimum, self.maximum, self.map_title = QLineEdit(), QLineEdit(), QLineEdit()
         self.contours, self.shade = QCheckBox("Изолинии"), QCheckBox("Отмывка")
         for label, widget in [("Палитра", self.palette), ("Нормировка", self.norm), ("Минимум (авто: пусто)", self.minimum),
@@ -429,22 +433,34 @@ class MainWindow(MapWorkspace,QMainWindow):
         return MapWorkspace.add_grid(self,grid)
 
     def open_grid(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Сетки", "", "Grid (*.zmap *.dat *.npz);;Все файлы (*)")
-        for path in paths:
-            grid=load_grid(path)
-            source=self.choose_source_crs(grid.crs,grid.name)
+        if not self.ensure_map_project(): return
+        paths, _ = QFileDialog.getOpenFileNames(self, "Сетки", "", "Grid (*.grd *.zmap *.dat *.npz);;Все файлы (*)")
+        if not paths: return
+        if sum(Path(path).stat().st_size for path in paths)>16*1024**2:
+            self.run_job(lambda:[(path,load_grid(path)) for path in paths],self.finish_grid_import)
+        else: self.finish_grid_import([(path,load_grid(path)) for path in paths])
+
+    def finish_grid_import(self,loaded):
+        for path,grid in loaded:
+            if not grid.crs:
+                companion=Path(path).with_suffix('.prj')
+                if companion.exists():
+                    from .crs_editor import read_prj
+                    grid.crs=read_prj(companion)
+            source=self.import_source_crs(grid.crs,grid.name)
             if source is None: continue
             from pyproj import CRS
             grid.crs=source; grid.coordinate_unit='degrees' if CRS(source).is_geographic else 'm'
             self.add_grid(grid)
 
     def open_xyz(self):
+        if not self.ensure_map_project(): return
         path, _ = QFileDialog.getOpenFileName(self, "Таблица: первые 3 столбца X Y поле", "", "Таблицы (*.xlsx *.csv *.txt)")
         if path:
             data = read_table(path)
             # Plain XYZ tables carry no reliable CRS: never borrow ML defaults.
             from pyproj import CRS
-            crs=self.source_crs('',Path(path).stem)
+            crs=self.import_source_crs('',Path(path).stem)
             if crs is None: return
             order,ok=QInputDialog.getItem(self,'Координаты таблицы','Первые два столбца:',
                 ['East (X), North (Y)','North (X), East (Y)'],0,False)

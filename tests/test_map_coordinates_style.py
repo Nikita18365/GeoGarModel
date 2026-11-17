@@ -26,7 +26,7 @@ def test_zonal_prefix_conversion_and_project_roundtrip(tmp_path):
     with pytest.raises(ValueError,match='метрах'): with_false_easting('EPSG:4326',500000)
 
 
-def test_shp_with_prj_still_requests_source_crs(tmp_path,monkeypatch,qt_application_lifetime):
+def test_shp_with_prj_reads_source_crs_automatically(tmp_path,monkeypatch,qt_application_lifetime):
     import shapefile
     from PyQt5.QtWidgets import QFileDialog
     from geogarmodel.app import MainWindow
@@ -41,7 +41,7 @@ def test_shp_with_prj_still_requests_source_crs(tmp_path,monkeypatch,qt_applicat
     monkeypatch.setattr(window,'choose_source_crs',choose)
     monkeypatch.setattr(QFileDialog,'getOpenFileName',lambda *a:(str(path),''))
     window.open_vector()
-    assert len(calls)==1 and CRS(calls[0]).equals(CRS('EPSG:20917'))
+    assert calls==[]
     np.testing.assert_allclose(window.layers.item(0).data(256)['data'].features[0]['coordinates'][0],[100000,7800000])
     editor=CRSEditor('EPSG:20917'); editor.fields[3].setValue(500000)
     assert false_easting(editor.value())==500000

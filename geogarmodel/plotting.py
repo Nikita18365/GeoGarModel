@@ -3,13 +3,41 @@ import numpy as np
 from matplotlib.colors import Normalize, TwoSlopeNorm, LightSource
 from matplotlib.ticker import MaxNLocator
 from .theme import style_figure
+from .palette_library import palette_map
+
+
+def map_colors(grid,cmap='viridis',mode='linear',vmin=None,vmax=None,palette_colors=None,discrete=False,bins=32,reverse=False,palette_zones=None,zone_values=False,**unused):
+    finite=grid.values[np.isfinite(grid.values)]
+    low,high=np.percentile(finite,[2,98]) if mode=='percentile' else (finite.min(),finite.max())
+    low=float(low if vmin is None or vmin=='' else vmin); high=float(high if vmax is None or vmax=='' else vmax)
+    if not np.isfinite([low,high]).all() or low>high: raise ValueError('Некорректный диапазон палитры.')
+    if low==high: high=low+max(abs(low)*1e-6,1e-6)
+    if zone_values and palette_zones and palette_colors:
+        from matplotlib.colors import BoundaryNorm,ListedColormap
+        zones=np.asarray(palette_zones)
+        if len(zones)<2 or not np.isfinite(zones).all() or not (np.diff(zones)>0).all():
+            raise ValueError('Границы ZON должны возрастать.')
+        colors=palette_colors[::-1] if reverse else palette_colors
+        return ListedColormap(colors),BoundaryNorm(np.r_[zones[0]-(zones[1]-zones[0]),zones],len(colors),clip=True)
+    if mode=='equal_area':
+        from matplotlib.colors import FuncNorm
+        ranks=np.linspace(0,1,1025); quantiles,index=np.unique(np.quantile(finite,ranks),return_index=True)
+        positions=ranks[index]
+        if len(quantiles)<2: quantiles=np.array([low,high]); positions=np.array([0.,1.])
+        positions[-1]=1
+        norm=FuncNorm((lambda x:np.interp(x,quantiles,positions),lambda x:np.interp(x,positions,quantiles)),vmin=low,vmax=high)
+    elif mode=='symmetric':
+        limit=max(abs(low),abs(high)); norm=TwoSlopeNorm(vcenter=0,vmin=-limit,vmax=limit)
+    else: norm=Normalize(low,high)
+    return palette_map(cmap,palette_colors,discrete,bins,reverse),norm
 
 
 def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=None,
              contours=False, hillshade=False, title=None, overlays=(), points=None,
              contour_step=0, contour_color='#dbe7f6', contour_width=.5,
              contour_labels=True, alpha=1., target_ax=None,auto_layout=True,
-             sun_azimuth=315.,sun_altitude=45.,sun_intensity=.25,sun_relief=1.):
+             sun_azimuth=315.,sun_altitude=45.,sun_intensity=.25,sun_relief=1.,
+             palette_colors=None,discrete=False,bins=32,reverse=False,smooth=False,palette_zones=None,zone_values=False):
     finite = grid.values[np.isfinite(grid.values)]
     if mode == "percentile":
         low, high = np.percentile(finite, [2, 98])
@@ -21,11 +49,7 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
         raise ValueError("Пределы палитры должны быть конечными, min ≤ max.")
     if low == high:
         high = low + max(abs(low) * 1e-6, 1e-6)
-    if mode == "symmetric":
-        limit = max(abs(low), abs(high))
-        norm = TwoSlopeNorm(vcenter=0., vmin=-limit, vmax=limit)
-    else:
-        norm = Normalize(low, high)
+    cmap,norm=map_colors(grid,cmap,mode,vmin,vmax,palette_colors,discrete,bins,reverse,palette_zones,zone_values)
     fast = target_ax is None and not contours and not hillshade and not overlays and points is None
     cached = getattr(figure, "_map_cache", None)
     if fast and cached is not None and cached[0] is grid:
@@ -47,7 +71,7 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
     extent = (grid.x[0] - grid.dx / 2, grid.x[-1] + grid.dx / 2,
               grid.y[0] - grid.dy / 2, grid.y[-1] + grid.dy / 2)
     image = ax.imshow(np.ma.masked_invalid(grid.values), origin="lower", extent=extent,
-                      interpolation="nearest", cmap=cmap, norm=norm, rasterized=True,alpha=alpha)
+                      interpolation="bilinear" if smooth else "nearest", cmap=cmap, norm=norm, rasterized=True,alpha=alpha)
     image.set_gid('map-field')
     if hillshade:
         # Shade an independent intensity layer so the colourbar still represents values.
