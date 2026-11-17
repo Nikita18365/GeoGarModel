@@ -49,6 +49,7 @@ class InitialModelPanel(QGroupBox):
         if self.tab.table is not None and model.crs and crs and model.crs!=crs:
             raise ValueError('CRS загруженной модели отличается от CRS наблюдений. Согласуйте координаты и CRS перед загрузкой.')
         self.undo_model=previous.copy() if previous is not None else (self.model.copy() if self.model is not None else None)
+        if previous is not None: model.source_path=''; model.source_array=''
         self.model=model; self.source.setCurrentIndex(1)
         m=model.mesh; v=model.values[m.active]
         self.info.setText(f'{m.shape} · {m.active.sum():,}/{m.size:,} активных · {model.mode}\nE: {m.east[0]:g}…{m.east[-1]:g}; N: {m.north[0]:g}…{m.north[-1]:g}\nDown: {m.depth[0]:g}…{m.depth[-1]:g} м; свойства {v.min():.5g}…{v.max():.5g}\nГеометрия загруженной модели используется при запуске. Nx/Ny/Nz применяются только к новой сетке или переносу.')
@@ -77,7 +78,11 @@ class InitialModelPanel(QGroupBox):
             if not ok: return None
             options['vertical']=vertical
         crs=self.tab.crs.currentText().split('|')[0].strip()
-        return lambda:load_voxel(path,mode,crs,**options)
+        def loader():
+            model=load_voxel(path,mode,crs,**options)
+            model.source_path=str(Path(path).resolve()); model.source_array=options.get('array',options.get('model_path',''))
+            return model
+        return loader
 
     def load(self):
         loader=self.ask_load(self.tab.mode.currentData())

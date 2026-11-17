@@ -18,6 +18,8 @@ class VoxelModel:
     mode: str = 'gravity'
     crs: str = ''
     history: list = field(default_factory=list)
+    source_path: str = ''
+    source_array: str = ''
 
     def __post_init__(self):
         self.values = np.asarray(self.values, dtype=float).copy()
@@ -31,7 +33,7 @@ class VoxelModel:
 
     def copy(self):
         m = self.mesh
-        return VoxelModel(Mesh(m.east.copy(),m.north.copy(),m.depth.copy(),m.active.copy(),None if m.bounds is None else m.bounds.copy()),self.values,self.mode,self.crs,list(self.history))
+        return VoxelModel(Mesh(m.east.copy(),m.north.copy(),m.depth.copy(),m.active.copy(),None if m.bounds is None else m.bounds.copy()),self.values,self.mode,self.crs,list(self.history),self.source_path,self.source_array)
 
     def save(self,path):
         np.savez_compressed(path,east=self.mesh.east,north=self.mesh.north,depth=self.mesh.depth,
@@ -39,7 +41,7 @@ class VoxelModel:
                             voxel_metadata=json.dumps(dict(mode=self.mode,crs=self.crs,history=self.history),ensure_ascii=False))
 
     def result(self):
-        return InversionResult(self.mesh,self.values,np.empty((0,3)),np.empty(0),np.empty(0),[],dict(mode=self.mode,crs=self.crs),'initial_model')
+        return InversionResult(self.mesh,self.values,np.empty((0,3)),np.empty(0),np.empty(0),[],dict(mode=self.mode,crs=self.crs,source_path=self.source_path,source_array=self.source_array),'initial_model')
 
 
 def _numbers(path):

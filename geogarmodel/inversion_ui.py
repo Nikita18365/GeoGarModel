@@ -13,7 +13,8 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg,NavigationToolbar2QT
 from threading import Event
 from .inversion import Mesh,FieldOperator,invert,InversionResult
-from .inversion_view import ModelView,vtk_grid
+from .inversion_view import vtk_grid
+from .model_workspace import ModelWorkspace
 from .models import read_table
 from .coordinates import gsk2011_zones,validate_crs
 from .compute import ComputationCancelled
@@ -155,7 +156,7 @@ class InversionTab(QWidget):
         self._notify_inversion=False
         self.clock_timer=QTimer(self); self.clock_timer.setInterval(250); self.clock_timer.timeout.connect(self.update_clock)
         self.tabs=QTabWidget(); rl.addWidget(self.tabs,1)
-        self.scene=ModelView(); self.tabs.addTab(self.scene,'3D-модель')
+        self.scene=ModelWorkspace(self,import_callback=lambda:self.workbench.guard(self.import_display_model)); self.tabs.addTab(self.scene,'3D-модели')
         self.figure=Figure(); self.canvas=FigureCanvasQTAgg(self.figure)
         plot=QWidget(); pl=QVBoxLayout(plot); pl.addWidget(NavigationToolbar2QT(self.canvas,self)); pl.addWidget(self.canvas)
         self.tabs.addTab(plot,'Срезы и поля')
@@ -220,7 +221,6 @@ class InversionTab(QWidget):
     def assign_table(self,table):
         if len(table.columns)<3: raise ValueError('Нужны минимум координаты и аномалия.')
         self.table=table; self.result=None
-        self.scene.result=None
         for combo in (self.east,self.north,self.height,self.value,self.error): combo.clear()
         for combo in (self.east,self.north,self.value): combo.addItems(list(table.columns))
         for combo in (self.height,self.error): combo.addItem('Константа'); combo.addItems(list(table.columns))
@@ -231,9 +231,8 @@ class InversionTab(QWidget):
         select(self.value,['anomaly','Δg','ΔT'],len(table.columns)-1)
         select(self.height,['height','Up','elevation'],0)
         select(self.error,['sigma'],0)
-        self.data_info.setText(f'{len(table):,} точек. Проверьте столбцы, единицы, CRS и высоту. Старые результаты очищены.')
+        self.data_info.setText(f'{len(table):,} точек. Проверьте столбцы, единицы, CRS и высоту. Результат расчёта очищен; открытые 3D-модели сохранены.')
         self.figure.clear(); self.canvas.draw_idle()
-        if self.scene.plotter is not None: self.scene.plotter.clear()
 
     def load_table(self):
         path,_=QFileDialog.getOpenFileName(self,'Наблюдения','', 'Таблицы (*.xlsx *.csv *.txt)')
@@ -522,12 +521,20 @@ class InversionTab(QWidget):
         if self.result is None: raise ValueError('Сначала завершите 3D-моделирование.')
         return self.result
     def open_3d(self): self.scene.render(self.require_result()); self.tabs.setCurrentIndex(0)
+    def import_display_model(self):
+        from PyQt5.QtWidgets import QInputDialog
+        labels={'Плотностная модель · г/см³':'gravity','Магнитная восприимчивость · SI':'induced','Векторная намагниченность · А/м':'vector'}
+        label,ok=QInputDialog.getItem(self,'Свойство 3D-модели','Для VTK, UBC и таблиц выберите свойство. NPZ хранит тип модели внутри файла.',list(labels),0,False)
+        if not ok: return
+        loader=self.initial_panel.ask_load(labels[label])
+        if loader is not None: self.model_task(loader,lambda model:self.scene.render(model.result()))
     def open_slice_maps(self):
         self.scene.result=self.require_result(); self.scene.open_slice_maps()
     def load_result(self):
         path,_=QFileDialog.getOpenFileName(self,'Сохранённый результат 3D-моделирования','','NPZ (*.npz)')
         if path:
             result=InversionResult.load(path)
+            result.settings['source_path']=str(Path(path).resolve())
             self.history=list(result.history)
             self.curve.setData([r['iteration'] for r in self.history],[r['rmse'] for r in self.history])
             self.finished_result(result,offer_export=False)
