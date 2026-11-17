@@ -1,13 +1,33 @@
 """Portable map projects and lightweight SHP/GeoJSON overlays."""
 from dataclasses import dataclass
+import importlib
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import numpy as np
 from pyproj import CRS,Transformer
 from .grids import Grid
 from scipy.interpolate import RegularGridInterpolator
+
+
+def _load_pyshp():
+    """Import pyshp and report the interpreter that actually needs it."""
+    try:
+        return importlib.import_module('shapefile')
+    except ImportError as error:
+        executable=subprocess.list2cmdline([sys.executable])
+        detail=(f'\nПричина импорта: {error}' if not isinstance(error,ModuleNotFoundError)
+                or error.name!='shapefile' else '')
+        raise ValueError(
+            'Библиотека pyshp не доступна в Python, которым запущен GeoGarModel:\n'
+            f'{sys.executable}\n\n'
+            'Закройте программу, выполните в терминале:\n'
+            f'{executable} -m pip install "pyshp>=2.3,<3"\n\n'
+            'Затем снова запустите GeoGarModel этим же Python.'+detail
+        ) from None
 
 
 def reproject_grid(grid,target_crs,source_crs=None):
@@ -75,8 +95,7 @@ class Vector:
 def read_vector(path,source_crs=None):
     path=Path(path)
     if path.suffix.lower()=='.shp':
-        try: import shapefile
-        except ImportError: raise ValueError('Для SHP обновите зависимости: python -m pip install -e .') from None
+        shapefile=_load_pyshp()
         prj=path.with_suffix('.prj')
         if not prj.exists() and not source_crs: raise ValueError('Рядом с SHP нужен файл .prj с системой координат.')
         crs=source_crs or CRS.from_wkt(prj.read_text()).to_string()

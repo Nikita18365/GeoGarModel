@@ -180,6 +180,18 @@ GeoJSON читается встроенными средствами, SHP — л
 .\.venv\Scripts\python -m pip install -e .
 ```
 
+Если после установки программа всё равно сообщает, что `pyshp` недоступен,
+библиотека установлена не в тот Python, которым запущен GeoGarModel. Новое
+сообщение об ошибке показывает полный путь к используемому `python.exe` и
+готовую команду установки. Закройте программу, выполните именно эту команду и
+запустите приложение тем же Python. Проверка локального окружения проекта:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -c "import sys, shapefile; print(sys.executable); print(shapefile.__version__)"
+.\.venv\Scripts\python.exe -m geogarmodel
+```
+
 ## Оси и масштабная линейка
 
 Подписи метрических осей — **X, м** и **Y, м**. Для старых карт с неизвестными

@@ -83,6 +83,18 @@ def test_geojson_and_shp_without_geopandas(tmp_path):
     imported.draw(ax,'EPSG:3857'); assert len(ax.lines)==2
 
 
+def test_missing_pyshp_reports_the_running_python(monkeypatch,tmp_path):
+    import geogarmodel.map_project as project
+    path=tmp_path/'contour.shp'; path.touch()
+    missing=ModuleNotFoundError("No module named 'shapefile'",name='shapefile')
+    monkeypatch.setattr(project.importlib,'import_module',lambda name: (_ for _ in ()).throw(missing))
+    with pytest.raises(ValueError) as error:
+        read_vector(path,'EPSG:4326')
+    message=str(error.value)
+    assert project.sys.executable in message
+    assert '-m pip install "pyshp>=2.3,<3"' in message
+
+
 def test_home_wheel_heading_scale_and_name_editor(qt_application_lifetime):
     from types import SimpleNamespace
     from PyQt5.QtWidgets import QStyleOptionViewItem,QLineEdit
