@@ -62,14 +62,7 @@ class TorchRegressor(RegressorMixin, BaseEstimator):
             torch.cuda.manual_seed_all(self.random_state)
         self.device_ = torch.device(self.device)
         self.n_features_in_ = X.shape[1]
-        if self.architecture == "transformer":
-            self.network_ = FeatureTransformer(X.shape[1], self.width, self.layers, self.heads, self.dropout)
-        elif self.architecture == "resnet":
-            self.network_ = nn.Sequential(nn.Linear(X.shape[1], self.width),
-                                          *[ResidualBlock(self.width, self.dropout) for _ in range(self.layers)],
-                                          nn.LayerNorm(self.width), nn.Linear(self.width, 1), nn.Flatten(0))
-        else:
-            raise ValueError("Неизвестная нейросетевая архитектура.")
+        self.network_ = self.build_network(X.shape[1])
         self.network_.to(self.device_)
         generator = torch.Generator().manual_seed(self.random_state)
         loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(torch.from_numpy(X.copy()),
@@ -93,6 +86,11 @@ class TorchRegressor(RegressorMixin, BaseEstimator):
             self.loss_curve_.append(total / len(X))
         self.network_.eval()
         return self
+
+    def build_network(self,features):
+        if self.architecture=='transformer': return FeatureTransformer(features,self.width,self.layers,self.heads,self.dropout)
+        if self.architecture=='resnet': return nn.Sequential(nn.Linear(features,self.width),*[ResidualBlock(self.width,self.dropout) for _ in range(self.layers)],nn.LayerNorm(self.width),nn.Linear(self.width,1),nn.Flatten(0))
+        raise ValueError('Неизвестная нейросетевая архитектура.')
 
     def predict(self, X):
         check_is_fitted(self, "network_")
