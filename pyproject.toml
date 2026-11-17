@@ -24,5 +24,8 @@ geogarmodel = "geogarmodel.app:main"
 [tool.setuptools.packages.find]
 include = ["geogarmodel*"]
 
+[tool.setuptools.package-data]
+geogarmodel = ["assets/*.zip", "assets/*.TBL"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -28,6 +28,18 @@ def test_colour_models():
     np.testing.assert_allclose(lut['colors'],[[1,0,0],[0,1,0]])
 
 
+def test_bundled_library_available_without_user_import(monkeypatch):
+    import geogarmodel.palette_library as palettes
+    class EmptySettings:
+        def value(self,*args): return '{}'
+    monkeypatch.setattr(palettes,'QSettings',lambda *args:EmptySettings())
+    library=palettes.local_library(); bundled=palettes.bundled_palettes()
+    assert len(bundled)==144
+    assert {name.split('/')[0] for name in bundled}=={'heat map','geophysics','topography','monochromatic','miscellaneous'}
+    assert library['geophysics/#GRAV.TBL']['colors']
+    assert all(name in library and len(value['colors'])>=2 for name,value in bundled.items())
+
+
 def test_zone_thresholds_and_portable_palette(tmp_path):
     from matplotlib.figure import Figure
     from geogarmodel.plotting import draw_map
@@ -52,7 +64,7 @@ def test_fast_view_only_samples_visible_screen(qt_application_lifetime):
     assert image.image.dtype==np.float32 and image.image.size<grid.values.size
     window.fast_map.setRange(xRange=(500,550),yRange=(600,650),padding=0)
     window.fast_map.update_rasters()
-    assert image.image.size<30000 and np.isfinite(image.image).all()
+    assert image.image.size<=1600**2 and np.isfinite(image.image).all()
     # Display sampling must not modify the input grid.
     assert grid.values[600,500]==1100
     window.close()

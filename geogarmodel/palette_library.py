@@ -2,6 +2,7 @@
 import json
 import re
 import zipfile
+from functools import lru_cache
 from pathlib import Path
 import numpy as np
 from matplotlib import colormaps
@@ -105,9 +106,18 @@ class PaletteDialog(QDialog):
         if item: self.selected=item.data(0,Qt.UserRole); self.accept()
 
 
+@lru_cache(maxsize=1)
+def bundled_palettes():
+    assets=Path(__file__).with_name('assets')
+    library=load_palettes(assets/'color_zones.zip')
+    library['geophysics/#GRAV.TBL']=parse_palette((assets/'#GRAV.TBL').read_text(encoding='utf-8-sig'),'#GRAV.TBL')
+    return library
+
+
 def local_library():
     try: library=json.loads(QSettings('GeoGarModel','Palettes').value('library','{}'))
     except (TypeError,ValueError): library={}
+    for name,value in bundled_palettes().items(): library.setdefault(name,value)
     for name in ('viridis','cividis','RdBu_r','coolwarm','terrain','seismic','rainbow','turbo'):
         library.setdefault(name,dict(colors=colormaps[name](np.linspace(0,1,256))[:,:3].tolist(),zones=None))
     return library
