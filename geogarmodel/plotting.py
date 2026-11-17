@@ -2,7 +2,7 @@
 import numpy as np
 from matplotlib.colors import Normalize, TwoSlopeNorm, LightSource
 from matplotlib.ticker import MaxNLocator
-from .theme import style_figure
+from .theme import style_map_figure
 from .palette_library import palette_map
 
 
@@ -37,7 +37,7 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
              contour_step=0, contour_color='#dbe7f6', contour_width=.5,
              contour_labels=True, alpha=1., target_ax=None,auto_layout=True,
              sun_azimuth=315.,sun_altitude=45.,sun_intensity=.25,sun_relief=1.,
-             palette_colors=None,discrete=False,bins=32,reverse=False,smooth=False,palette_zones=None,zone_values=False):
+             palette_colors=None,discrete=False,bins=32,reverse=False,smooth=True,palette_zones=None,zone_values=False,render_quality=2):
     finite = grid.values[np.isfinite(grid.values)]
     if mode == "percentile":
         low, high = np.percentile(finite, [2, 98])
@@ -56,12 +56,13 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
         _, ax, image, bar = cached
         image.set_cmap(cmap)
         image.set_norm(norm)
+        image.set_interpolation('bilinear' if smooth else 'nearest')
         bar.update_normal(image)
         bar.set_label(grid.unit)
         ax.set_title(grid.name if title is None else title)
         ax.set_xlabel('X, м' if grid.coordinate_unit in ('m','unknown') else 'X, °')
         ax.set_ylabel('Y, м' if grid.coordinate_unit in ('m','unknown') else 'Y, °')
-        style_figure(figure)
+        style_map_figure(figure)
         return ax
     figure._map_cache = None
     if target_ax is None:
@@ -71,14 +72,15 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
     extent = (grid.x[0] - grid.dx / 2, grid.x[-1] + grid.dx / 2,
               grid.y[0] - grid.dy / 2, grid.y[-1] + grid.dy / 2)
     image = ax.imshow(np.ma.masked_invalid(grid.values), origin="lower", extent=extent,
-                      interpolation="bilinear" if smooth else "nearest", cmap=cmap, norm=norm, rasterized=True,alpha=alpha)
+                      interpolation="bilinear" if smooth else "nearest", interpolation_stage='data',
+                      resample=True,cmap=cmap, norm=norm, rasterized=True,alpha=alpha)
     image.set_gid('map-field')
     if hillshade:
         # Shade an independent intensity layer so the colourbar still represents values.
         filled = np.where(np.isfinite(grid.values), grid.values, np.nanmedian(grid.values))
         shade = LightSource(sun_azimuth, sun_altitude).hillshade(filled, dx=grid.dx, dy=-grid.dy, vert_exag=sun_relief)
         shade = np.ma.array(shade, mask=~np.isfinite(grid.values))
-        ax.imshow(shade, origin="lower", extent=extent, interpolation="nearest", cmap="gray", vmin=0,vmax=1,alpha=sun_intensity*alpha, rasterized=True)
+        ax.imshow(shade, origin="lower", extent=extent, interpolation="bilinear" if smooth else "nearest",interpolation_stage='data',resample=True,cmap="gray", vmin=0,vmax=1,alpha=sun_intensity*alpha, rasterized=True)
     if contours and np.ptp(finite) > 0:
         sy, sx = max(1, int(np.ceil(len(grid.y) / 512))), max(1, int(np.ceil(len(grid.x) / 512)))
         levels=10
@@ -105,7 +107,7 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
     ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     bar = figure.colorbar(image, ax=ax, label=grid.unit, fraction=.045, pad=.04) if target_ax is None else None
-    style_figure(figure)
+    style_map_figure(figure)
     if auto_layout: figure.tight_layout()
     if fast:
         figure._map_cache = (grid, ax, image, bar)

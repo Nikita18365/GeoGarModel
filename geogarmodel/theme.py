@@ -54,3 +54,14 @@ def style_figure(figure):
         ax.title.set_color("#dbe7f6")
         for spine in ax.spines.values():
             spine.set_edgecolor("#304965")
+
+
+def style_map_figure(figure):
+    """White publication sheet for maps, independent of the application theme."""
+    figure.set_facecolor('white')
+    for ax in figure.axes:
+        ax.set_facecolor('white'); ax.tick_params(colors='#222222',labelsize=10)
+        ax.xaxis.label.set_color('#222222'); ax.yaxis.label.set_color('#222222')
+        ax.xaxis.get_offset_text().set_color('#222222'); ax.yaxis.get_offset_text().set_color('#222222')
+        ax.title.set_color('#111111')
+        for spine in ax.spines.values(): spine.set_edgecolor('#333333')
