@@ -1,9 +1,10 @@
 """VTK scene with cell thresholding, slices, volume and isosurfaces; lazy imports."""
 import numpy as np
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QDoubleSpinBox, QLabel, QSlider, QSpinBox, QPushButton, QDialog, QCheckBox, QScrollArea, QGroupBox, QFormLayout,QToolBar,QMessageBox,QToolBox
-from PyQt5.QtCore import Qt,QSize
+from PyQt5.QtCore import Qt,QSize,QSignalBlocker,QTimer
 from .palette_library import local_library,PaletteDialog,preview
 from .model_slices import property_values
+from .view_icons import view_icon
 
 
 def vtk_grid(result, component='amplitude'):
@@ -188,15 +189,24 @@ class ModelView(QWidget):
             self.clip_ranges.append(bounds)
         apply_clip=QPushButton('Применить отсечение'); apply_clip.clicked.connect(self.refresh_if_ready); clip_form.addRow(apply_clip)
         self.clip_enabled.toggled.connect(self.refresh_if_ready)
-        self.clip_normal=QComboBox(); self.clip_normal.addItems(['X','Y','Z']); self.clip_normal.currentIndexChanged.connect(self.refresh_if_ready); clip_form.addRow('Нормаль интерактивной плоскости',self.clip_normal)
+        self.clip_normal=QComboBox(); self.clip_normal.addItems(['X','Y','Z']); self.clip_normal.setCurrentIndex(2); self.clip_normal.currentIndexChanged.connect(self.refresh_if_ready); clip_form.addRow('Нормаль интерактивной плоскости',self.clip_normal)
         settings_rows.insertWidget(settings_rows.count()-1,clipping)
-        self.navigation=QToolBar(); self.navigation.setToolButtonStyle(Qt.ToolButtonTextOnly); layout.insertWidget(1,self.navigation)
-        for text,index in [('XYZ',0),('Сверху',1),('Спереди',2),('Справа',3),('Снизу',4),('Сзади',5),('Слева',6)]:
-            self.navigation.addAction(text).triggered.connect(lambda checked=False,index=index:self.set_camera(index))
-        self.navigation.addAction('Вписать').triggered.connect(self.fit_model)
-        for text,index in [('Срез X',0),('Срез Y',1),('Срез Z',2)]: self.navigation.addAction(text).triggered.connect(lambda checked=False,index=index:self.single_slice(index))
-        self.navigation.addAction('Карты глубин…').triggered.connect(self.open_slice_maps)
-        self.navigation.addAction('Палитры…').triggered.connect(self.choose_palette)
+        self.navigation=QToolBar(); self.navigation.setToolButtonStyle(Qt.ToolButtonIconOnly); self.navigation.setIconSize(QSize(24,24)); layout.insertWidget(1,self.navigation)
+        self.navigation.setStyleSheet('QToolButton { padding: 3px; min-width: 28px; min-height: 28px; }')
+        for text,key,index in [('Изометрия','iso',0),('Сверху','top',1),('Спереди','front',2),('Справа','right',3),('Снизу','bottom',4),('Сзади','back',5),('Слева','left',6)]:
+            self.navigation.addAction(view_icon(key),text).triggered.connect(lambda checked=False,index=index:self.set_camera(index))
+        self.navigation.addAction(view_icon('fit'),'Вписать модель').triggered.connect(self.fit_model)
+        self.navigation.addSeparator()
+        for key,index in [('x',0),('y',1),('z',2)]: self.navigation.addAction(view_icon('slice_'+key),'Срез '+key.upper()).triggered.connect(lambda checked=False,index=index:self.single_slice(index))
+        self.navigation.addAction(view_icon('maps'),'Карты глубин…').triggered.connect(self.open_slice_maps)
+        self.navigation.addAction(view_icon('palette'),'Палитры…').triggered.connect(self.choose_palette)
+        self.depth_panel=QWidget(); depth_row=QHBoxLayout(self.depth_panel); depth_row.setContentsMargins(0,0,0,0); layout.insertWidget(2,self.depth_panel); self.depth_panel.hide()
+        depth_row.addWidget(QLabel('Поверхность'))
+        self.depth_slider=QSlider(Qt.Horizontal); self.depth_slider.setRange(0,100); self.depth_slider.setToolTip('Слева — верх модели; вправо — глубже, Down.')
+        depth_row.addWidget(self.depth_slider,1); depth_row.addWidget(QLabel('Глубина'))
+        self.depth_value=QDoubleSpinBox(); self.depth_value.setRange(-1e12,1e12); self.depth_value.setDecimals(3); self.depth_value.setSuffix(' м'); self.depth_value.setKeyboardTracking(False)
+        depth_row.addWidget(self.depth_value)
+        self.depth_slider.sliderReleased.connect(self.depth_changed); self.depth_value.valueChanged.connect(lambda value:self.coordinate_changed(2,value))
         self._geometry_key=None; self._geometry=None; self._lod_actors=[]; self._active_actor=None; self._moving=False
         self._slice_dialogs=[]
         self._explicit_slices=set()
@@ -207,6 +217,12 @@ class ModelView(QWidget):
             group=settings_rows.takeAt(0).widget()
             title=group.title(); group.setTitle(''); sections_box.addItem(group,title)
         settings_rows.addWidget(sections_box)
+        self._resize_timer=QTimer(self); self._resize_timer.setSingleShot(True); self._resize_timer.setInterval(150); self._resize_timer.timeout.connect(self.refresh_if_ready)
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        compact=self.width()<700 or self.height()<500
+        if getattr(self,'plotter',None) is not None and compact!=getattr(self,'_compact_axes',None): self._resize_timer.start()
 
     def show_view_settings(self):
         self.view_settings.show(); self.view_settings.raise_(); self.view_settings.activateWindow()
@@ -246,12 +262,16 @@ class ModelView(QWidget):
 
     def coordinate_changed(self,index,value):
         if self.result is None: return
+        coordinate=self.slice_coordinates[index]; coordinate.blockSignals(True); coordinate.setValue(value); coordinate.blockSignals(False)
         axis=(self.result.mesh.east,self.result.mesh.north,self.result.mesh.depth)[index]
         slider=self.slices[index]; slider.blockSignals(True); slider.setValue(round((value-axis[0])/(axis[-1]-axis[0])*100)); slider.blockSignals(False)
         self._explicit_slices.add(index); self.refresh_if_ready()
 
     def slider_changed(self,index):
         self._explicit_slices.discard(index); self.refresh_if_ready()
+
+    def depth_changed(self):
+        self.slices[2].setValue(self.depth_slider.value()); self.slider_changed(2)
 
     def open_slice_maps(self):
         if self.result is None:
@@ -331,37 +351,46 @@ class ModelView(QWidget):
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowMaximizeButtonHint)
         layout=QVBoxLayout(dialog); view=ModelView(dialog); layout.addWidget(view)
         view.expand.hide()
-        for source,target in zip(self.axis_scales,view.axis_scales): target.setValue(source.value())
-        for source,target in ((self.kind,view.kind),(self.component,view.component),
-                              (self.axis_unit,view.axis_unit),(self.camera_view,view.camera_view),
-                              (self.color_range,view.color_range),(self.color_distribution,view.color_distribution)):
-            target.setCurrentIndex(source.currentIndex())
-        name=self.palette.currentText()
-        if view.palette.findText(name)<0: view.palette.addItem(preview(self.palette_library[name]['colors']),name)
-        view.palette.setCurrentText(name)
-        view.color_min.setValue(self.color_min.value()); view.color_max.setValue(self.color_max.value())
-        view.reverse_palette.setChecked(self.reverse_palette.isChecked())
-        view.threshold.setValue(self.threshold.value()); view.axis_font.setValue(self.axis_font.value())
-        for source,target in zip(self.slices,view.slices): target.setValue(source.value())
-        for source,target in ((self.opacity,view.opacity),(self.color_bins,view.color_bins),(self.moving_detail,view.moving_detail),(self.rest_detail,view.rest_detail)): target.setValue(source.value())
-        for source,target in ((self.discrete_colors,view.discrete_colors),(self.zone_values,view.zone_values),(self.edges,view.edges),(self.outline,view.outline),(self.smooth_colors,view.smooth_colors),(self.full_resolution,view.full_resolution),(self.high_quality_transparency,view.high_quality_transparency)):
-            target.setChecked(source.isChecked())
-        view.clip_normal.setCurrentIndex(self.clip_normal.currentIndex())
-        for source,target in zip(self.slice_enabled,view.slice_enabled): target.setChecked(source.isChecked())
         def cleanup():
+            if view.plotter is not None and not getattr(self,'_shutting_down',False): self.restore_state(view.capture_state())
             view.shutdown(); self._expanded_dialog=None; dialog.deleteLater()
         dialog.finished.connect(cleanup)
         try:
-            dialog.showMaximized(); view.render(self.result)
-            for source,target in zip(self.slices,view.slices): target.setValue(source.value())
-            for source,target in zip(self.slice_coordinates,view.slice_coordinates): target.blockSignals(True); target.setValue(source.value()); target.blockSignals(False)
-            view._explicit_slices=set(range(3))
-            for source_pair,target_pair in zip(self.clip_ranges,view.clip_ranges):
-                for source,target in zip(source_pair,target_pair): target.setValue(source.value())
-            view.clip_enabled.blockSignals(True); view.clip_enabled.setChecked(self.clip_enabled.isChecked()); view.clip_enabled.blockSignals(False)
-            view.refresh_if_ready()
+            dialog.showMaximized(); view.render(self.result); view.restore_state(self.capture_state())
         except Exception:
             dialog.reject(); raise
+
+    def state_controls(self):
+        names=('kind','component','axis_unit','camera_view','palette','reverse_palette','color_range','color_min','color_max',
+            'threshold','axis_font','opacity','color_distribution','discrete_colors','color_bins','zone_values','edges','outline',
+            'smooth_colors','full_resolution','high_quality_transparency','moving_detail','rest_detail','clip_enabled','clip_normal')
+        controls={name:getattr(self,name) for name in names}
+        for name,widgets in [('scale',self.axis_scales),('slider',self.slices),('coordinate',self.slice_coordinates),('enabled',self.slice_enabled),('clip',[w for pair in self.clip_ranges for w in pair])]:
+            controls.update({f'{name}_{i}':w for i,w in enumerate(widgets)})
+        return controls
+
+    def capture_state(self):
+        state={}
+        for name,w in self.state_controls().items():
+            state[name]=w.currentText() if isinstance(w,QComboBox) else w.isChecked() if isinstance(w,QCheckBox) else w.value()
+        if self.plotter is not None:
+            state['camera_position']=tuple(tuple(p) for p in self.plotter.camera_position); state['camera_scale']=self.plotter.camera.parallel_scale
+        return state
+
+    def restore_state(self,state):
+        controls=self.state_controls(); blockers=[QSignalBlocker(w) for w in controls.values()]
+        for name,w in controls.items():
+            if name not in state: continue
+            value=state[name]
+            if isinstance(w,QComboBox):
+                if w.findText(value)<0 and name=='palette': w.addItem(preview(self.palette_library[value]['colors']),value)
+                w.setCurrentText(value)
+            elif isinstance(w,QCheckBox): w.setChecked(value)
+            else: w.setValue(value)
+        del blockers
+        self._explicit_slices=set(range(3)); self.range_changed(); self.sync_depth_controls()
+        if self.plotter is not None and 'camera_position' in state:
+            self.plotter.camera_position=state['camera_position']; self.plotter.camera.parallel_scale=state['camera_scale']; self.plotter.render()
 
     def refresh_if_ready(self):
         if self.result is not None and self.plotter is not None:
@@ -385,9 +414,12 @@ class ModelView(QWidget):
             self.color_note.setText('Цветовой минимум должен быть меньше максимума. Исправьте значения и нажмите «Применить цвета».')
             return
         self.color_note.clear()
+        self.depth_panel.setVisible(self.kind.currentIndex()==3 or (self.kind.currentIndex()==4 and self.clip_normal.currentIndex()==2))
         camera=p.camera_position if p.renderer.actors else None
         camera_scale=p.camera.parallel_scale
         p.clear(); p.clear_plane_widgets()
+        widget_manager=getattr(p,'widgets',p)
+        widget_manager.plane_clipped_meshes.clear()
         p.set_background('white'); self._lod_actors=[]
         # Configure the current Qt OpenGL context. PyVista's convenience method
         # probes a separate temporary window, which can crash software drivers.
@@ -417,13 +449,15 @@ class ModelView(QWidget):
             self._explicit_slices.clear()
             self.clip_enabled.blockSignals(True); self.clip_enabled.setChecked(False); self.clip_enabled.blockSignals(False)
             for i,axis in enumerate((result.mesh.east,result.mesh.north,result.mesh.depth)):
-                self.slices[i].setValue(50)
-                w=self.slice_coordinates[i]; w.blockSignals(True); w.setRange(axis[0],axis[-1]); w.setValue((axis[0]+axis[-1])/2); w.blockSignals(False)
+                fraction=0 if i==2 else 50
+                self.slices[i].setValue(fraction)
+                w=self.slice_coordinates[i]; w.blockSignals(True); w.setRange(axis[0],axis[-1]); w.setValue(axis[0] if i==2 else (axis[0]+axis[-1])/2); w.blockSignals(False)
                 for control,value in zip(self.clip_ranges[i],(axis[0],axis[-1])): control.setValue(value)
             self._coordinate_ready=True
         for i,axis in enumerate((result.mesh.east,result.mesh.north,result.mesh.depth)):
             if i in self._explicit_slices: continue
             w=self.slice_coordinates[i]; w.blockSignals(True); w.setValue(axis[0]+(axis[-1]-axis[0])*self.slices[i].value()/100); w.blockSignals(False)
+        self.sync_depth_controls()
         if self.clip_enabled.isChecked():
             limits=[(a.value(),b.value()) for a,b in self.clip_ranges]
             if any(a>=b for a,b in limits): self.color_note.setText('Минимальные границы отсечения должны быть меньше максимальных.'); return
@@ -433,13 +467,15 @@ class ModelView(QWidget):
         self.info.setText(f'{result.mesh.active.sum():,} активных ячеек · {unit} · Оси: исходные East / North, Z = Up (вверх). Локальное начало геометрии: E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м. Вращение: ЛКМ; перемещение: средняя кнопка; масштаб: колесо.')
         self.component.setEnabled(result.model.ndim==2)
         values=grid['property']; amplitude=float(np.max(np.abs(values))); limit=max(amplitude,1e-15)
+        self._compact_axes=self.width()<700 or self.height()<500
+        font=min(self.axis_font.value(),11) if self._compact_axes else self.axis_font.value()
         cmap,norm,clim=self.colors_for(result)
         from matplotlib.colors import ListedColormap
         cmap=ListedColormap(cmap(norm(np.linspace(clim[0],clim[1],1024))))
         if self.color_range.currentIndex()!=2:
             self.color_min.setValue(clim[0]); self.color_max.setValue(clim[1])
         options=dict(scalars='property',cmap=cmap,clim=clim,scalar_bar_args={
-            'title':unit,'color':'#222222','title_font_size':self.axis_font.value(),'label_font_size':max(10,self.axis_font.value()-4),
+            'title':unit,'color':'#222222','title_font_size':font,'label_font_size':max(10,font-4),
             'n_labels':4,'fmt':'%.3g','position_x':.80,'position_y':.18,'width':.05,'height':.65,'vertical':True})
         kind=self.kind.currentIndex()
         if kind==0:
@@ -469,12 +505,14 @@ class ModelView(QWidget):
             parts=[grid.slice(normal=axis,origin=centers) for axis,enabled in zip(('x','y','z'),self.slice_enabled) if enabled.isChecked()]
             import pyvista as pv
             combined=pv.MultiBlock(parts).combine() if parts else None
-            if combined is not None and combined.n_cells:
-                if self.smooth_colors.isChecked(): combined=combined.cell_data_to_point_data(pass_cell_data=True)
-                p.add_mesh(combined,opacity=self.opacity.value(),**options)
+            if self.smooth_colors.isChecked(): self.render_section_textures(origin,scale,cmap,clim,options)
+            elif combined is not None and combined.n_cells: p.add_mesh(combined,opacity=self.opacity.value(),lighting=False,**options)
         else:
             if self.smooth_colors.isChecked(): grid=grid.cell_data_to_point_data(pass_cell_data=True)
-            p.add_mesh_clip_plane(grid,normal=self.clip_normal.currentText().lower(),opacity=self.opacity.value(),**options)
+            index=self.clip_normal.currentIndex(); normal=np.eye(3)[index]; normal[2]*=-1
+            center=np.array(grid.center); center[index]=(self.slice_coordinates[index].value()-origin[index])*scale[index] if index<2 else -self.slice_coordinates[2].value()*scale[2]
+            p.add_mesh_clip_plane(grid,normal=normal,origin=center,normal_rotation=False,opacity=self.opacity.value(),**options)
+            widget_manager.plane_widgets[-1].AddObserver('EndInteractionEvent',lambda widget,event:self.plane_moved(widget,index,origin,scale))
         if self.outline.isChecked(): p.add_mesh(grid.outline(),color='#333333')
         p.add_axes(xlabel='X / East',ylabel='Y / North',zlabel='Z / Up',color='#222222')
         divisor=1000 if self.axis_unit.currentText()=='км' else 1
@@ -482,10 +520,10 @@ class ModelView(QWidget):
         physical_bounds=np.array(grid.bounds)/np.repeat(scale,2)
         self.bounds_axes=p.show_bounds(bounds=grid.bounds,axes_ranges=(physical_bounds+np.repeat(origin,2))/divisor,
                     grid='back' if self.outline.isChecked() else False,all_edges=self.outline.isChecked(),location='outer',
-                    color='#222222',font_size=self.axis_font.value(),bold=True,fmt='%.3f' if divisor==1000 else '%.0f',
+                    color='#222222',font_size=font,bold=True,fmt='%.2f' if divisor==1000 else '%.0f',
                     use_2d=False,use_3d_text=False,
                     xtitle=f'East ({unit_label})',ytitle=f'North ({unit_label})',
-                    ztitle=f'Z ({unit_label})',n_xlabels=4,n_ylabels=4,n_zlabels=4)
+                    ztitle=f'Z ({unit_label})',n_xlabels=2 if self._compact_axes else 3,n_ylabels=2 if self._compact_axes else 3,n_zlabels=2 if self._compact_axes else 3)
         self.bounds_axes.GetProperty().SetLineWidth(1.5)
         if camera is None or new_model or self._reorient_pending: self.fit_model()
         else:
@@ -498,7 +536,53 @@ class ModelView(QWidget):
         self._reorient_pending=False
         p.render()
 
+    def sync_depth_controls(self):
+        self.depth_slider.blockSignals(True); self.depth_slider.setValue(self.slices[2].value()); self.depth_slider.blockSignals(False)
+        self.depth_value.blockSignals(True); self.depth_value.setRange(self.slice_coordinates[2].minimum(),self.slice_coordinates[2].maximum()); self.depth_value.setValue(self.slice_coordinates[2].value()); self.depth_value.blockSignals(False)
+
+    def plane_moved(self,widget,index,origin,scale):
+        value=widget.GetOrigin()[index]/scale[index]
+        value=value+origin[index] if index<2 else -value
+        control=self.slice_coordinates[index]; value=np.clip(value,control.minimum(),control.maximum())
+        control.blockSignals(True); control.setValue(value); control.blockSignals(False)
+        axis=(self.result.mesh.east,self.result.mesh.north,self.result.mesh.depth)[index]
+        self.slices[index].setValue(round((value-axis[0])/(axis[-1]-axis[0])*100)); self._explicit_slices.add(index); self.sync_depth_controls()
+
+    def render_section_textures(self,origin,scale,cmap,clim,options):
+        import pyvista as pv
+        from .section_rendering import sample_section
+        # Scalar interpolation precedes palette mapping; the GPU then moves a
+        # four-vertex textured plane rather than a dense triangulated section.
+        scalar_cmap,scalar_norm,_=self.colors_for(self.result)
+        actor=None
+        for axis,enabled in enumerate(self.slice_enabled):
+            if not enabled.isChecked(): continue
+            coordinate=self.slice_coordinates[axis].value()
+            image,extent=sample_section(self.result,axis,coordinate,component=self.component.currentText())
+            u0,u1,v0,v1=extent; free=[i for i in range(3) if i!=axis]
+            if self.clip_enabled.isChecked():
+                limits=[(a.value(),b.value()) for a,b in self.clip_ranges]
+                xx=np.linspace(u0,u1,image.shape[1],endpoint=False)+(u1-u0)/image.shape[1]/2
+                yy=np.linspace(v0,v1,image.shape[0],endpoint=False)+(v1-v0)/image.shape[0]/2
+                keep=(xx[None,:]>=limits[free[0]][0])&(xx[None,:]<=limits[free[0]][1])&(yy[:,None]>=limits[free[1]][0])&(yy[:,None]<=limits[free[1]][1])
+                image[~keep]=np.nan
+                if not limits[axis][0]<=coordinate<=limits[axis][1]: continue
+            if not np.isfinite(image).any(): continue
+            points=np.zeros((4,3)); points[:,axis]=coordinate
+            points[:,free[0]]=[u0,u1,u1,u0]; points[:,free[1]]=[v0,v0,v1,v1]
+            points[:,2]*=-1; points=(points-origin)*scale
+            plane=pv.PolyData(points,faces=[4,0,1,2,3]); plane.active_texture_coordinates=np.array([[0,0],[1,0],[1,1],[0,1]],dtype=float)
+            rgba=scalar_cmap(scalar_norm(np.ma.masked_invalid(image)),bytes=True); rgba[~np.isfinite(image),3]=0
+            texture=pv.Texture(np.ascontiguousarray(rgba[::-1])); texture.interpolate=True
+            actor=self.plotter.add_mesh(plane,texture=texture,opacity=self.opacity.value(),lighting=False,show_scalar_bar=False)
+        if actor is not None:
+            actor.mapper.lookup_table=pv.LookupTable(cmap=cmap,scalar_range=clim)
+            actor.mapper.scalar_range=clim
+            self.plotter.add_scalar_bar(mapper=actor.mapper,**options['scalar_bar_args'])
+
     def shutdown(self):
+        self._shutting_down=True
+        self._resize_timer.stop()
         for dialog in list(self._slice_dialogs): dialog.close()
         self.view_settings.close()
         if self._expanded_dialog is not None:

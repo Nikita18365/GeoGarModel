@@ -50,7 +50,7 @@ def test_slice_gallery_has_axes_units_and_common_colour_range(mode,unit,qt_appli
         for ax in gallery.figure.axes:
             if ax.get_title():
                 assert ax.get_xlabel()=='East, м' and ax.get_ylabel()=='North, м'
-                assert ax.collections[0].norm is norm
+                assert ax.images[0].norm is norm
             else: assert ax.get_ylabel()==unit
         gallery.change(1); assert '4–4' in gallery.page_label.text()
         assert property_unit(r)==unit
@@ -99,5 +99,5 @@ def test_lod_switching_cached_geometry_and_exact_slice_coordinates(qt_applicatio
         replacement=result(); view.result=replacement  # Gallery can select a new result before opening 3D.
         view.render(replacement)
         assert view.slice_coordinates[2].minimum()==0 and view.slice_coordinates[2].maximum()==600
-        assert view.slice_coordinates[2].value()==300
+        assert view.slice_coordinates[2].value()==0  # Always start at the top.
     finally: view.shutdown(); view.close()

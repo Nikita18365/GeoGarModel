@@ -2,7 +2,7 @@
 import numpy as np
 from PyQt5.QtCore import Qt,QTimer
 from PyQt5.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QFormLayout,QComboBox,
-    QLineEdit,QDoubleSpinBox,QSpinBox,QDialogButtonBox,QPushButton,QLabel,QMessageBox,QFileDialog,QProgressDialog,QApplication)
+    QLineEdit,QDoubleSpinBox,QSpinBox,QDialogButtonBox,QPushButton,QLabel,QMessageBox,QFileDialog,QProgressDialog,QApplication,QCheckBox)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg,NavigationToolbar2QT
 from matplotlib.collections import PolyCollection
@@ -10,6 +10,7 @@ from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from .model_slices import select_depths,horizontal_slice,property_unit
 from .theme import style_map_figure
+from .section_rendering import sample_section
 
 
 class SliceDepthDialog(QDialog):
@@ -44,12 +45,15 @@ class SliceDepthDialog(QDialog):
 class SliceGallery(QDialog):
     def __init__(self,result,depths,cmap,norm,component='amplitude',parent=None):
         super().__init__(parent); self.setWindowTitle('Карты горизонтальных срезов'); self.resize(1300,800)
+        self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowFlags(self.windowFlags()|Qt.WindowMaximizeButtonHint)
         self.result=result; self.depths=depths; self.cmap=cmap; self.norm=norm; self.component=component; self.page=0
         root=QVBoxLayout(self); toolbar=QHBoxLayout(); root.addLayout(toolbar)
         previous=QPushButton('← Назад'); following=QPushButton('Далее →'); self.page_label=QLabel()
         self.count=QSpinBox(); self.count.setRange(1,3); self.count.setValue(min(3,len(depths)))
+        self.smooth=QCheckBox('Плавная окраска'); self.smooth.setChecked(True); self.smooth.setToolTip('Сглаживание изображения без изменения исходной модели и без усреднения по глубине.')
         toolbar.addWidget(previous); toolbar.addWidget(following); toolbar.addWidget(self.page_label,1); toolbar.addWidget(QLabel('Карт на странице')); toolbar.addWidget(self.count)
+        toolbar.addWidget(self.smooth); self.smooth.toggled.connect(self.render_page)
         self.figure=Figure(facecolor='white'); self.canvas=FigureCanvasQTAgg(self.figure)
         self.canvas.mpl_connect('resize_event',lambda event:self.relayout())
         self.toolbar=NavigationToolbar2QT(self.canvas,self); root.addWidget(self.toolbar); root.addWidget(self.canvas,1)
@@ -72,7 +76,11 @@ class SliceGallery(QDialog):
         mesh=self.result.mesh; unit=property_unit(self.result)
         for i,depth in enumerate(selected):
             section=horizontal_slice(self.result,float(depth),self.component); ax=self.figure.add_subplot(1,len(selected),i+1)
-            if section.rectangles is None:
+            if self.smooth.isChecked():
+                values,extent=sample_section(self.result,2,float(depth),width=1000,height=1000,component=self.component)
+                image=ax.imshow(np.ma.masked_invalid(values),extent=extent,origin='lower',cmap=self.cmap,norm=self.norm,
+                    interpolation='bilinear',interpolation_stage='data',rasterized=True)
+            elif section.rectangles is None:
                 image=ax.pcolormesh(mesh.east,mesh.north,section.values,cmap=self.cmap,norm=self.norm,shading='flat',rasterized=True)
             else:
                 r=section.rectangles; polygons=np.stack([r[:,[0,1]],r[:,[2,1]],r[:,[2,3]],r[:,[0,3]]],axis=1)
@@ -102,6 +110,6 @@ class SliceGallery(QDialog):
                 for self.page in range(pages):
                     progress.setValue(self.page); QApplication.processEvents()
                     if progress.wasCanceled(): break
-                    self.render_page(); pdf.savefig(self.figure)
+                    self.render_page(); pdf.savefig(self.figure,dpi=300)
         except (OSError,ValueError) as error: QMessageBox.warning(self,'Экспорт срезов',str(error))
         finally: progress.close(); self.page=page; self.render_page()
