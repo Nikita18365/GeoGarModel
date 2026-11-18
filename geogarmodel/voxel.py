@@ -44,6 +44,45 @@ class VoxelModel:
         return InversionResult(self.mesh,self.values,np.empty((0,3)),np.empty(0),np.empty(0),[],dict(mode=self.mode,crs=self.crs,source_path=self.source_path,source_array=self.source_array,voxel_history=list(self.history)),'initial_model')
 
 
+def extend_density_model(model, east, north, padding, initial_density):
+    """Add full prisms around a regular XY model, preserving interior masks and bounds."""
+    from .layer_fft import uniform_step
+    import psutil
+
+    mesh = model.mesh
+    axes = (mesh.east, mesh.north)
+    steps = [uniform_step(edges) for edges in axes]
+    added = []
+    for edges, step, coordinates in zip(axes, steps, (east, north)):
+        lo, hi = coordinates.min(), coordinates.max()
+        margin = (hi - lo) * padding
+        before = max(0, int(np.ceil((edges[0] - (lo - margin)) / step - 1e-8)))
+        after = max(0, int(np.ceil(((hi + margin) - edges[-1]) / step - 1e-8)))
+        added.append((before, after))
+    if not any(left or right for left, right in added):
+        return model
+    nx, ny, nz = mesh.shape
+    shape = nx + sum(added[0]), ny + sum(added[1]), nz
+    per_cell = 240 if mesh.bounds is not None else 40
+    if shape[0]*shape[1]*shape[2]*per_cell > psutil.virtual_memory().available*.8:
+        raise ValueError('Недостаточно RAM для расширения начальной модели.')
+    axes = [np.r_[edges[0] - step*np.arange(before,0,-1), edges,
+                  edges[-1] + step*np.arange(1,after+1)]
+            for edges,step,(before,after) in zip(axes,steps,added)]
+    interior = tuple(slice(left, left + count) for (left, _), count in zip(added, mesh.shape))
+    active = np.ones(shape, dtype=bool)
+    active[interior] = mesh.active.reshape(mesh.shape)
+    values = np.full(shape, initial_density, dtype=float)
+    values[interior] = model.values.reshape(mesh.shape)
+    extended = Mesh(*axes, mesh.depth, active)
+    if mesh.bounds is not None:
+        bounds = extended.cells().reshape(shape + (6,))
+        bounds[interior] = mesh.bounds.reshape(mesh.shape + (6,))
+        extended = Mesh(*axes, mesh.depth, active, bounds)
+    history = model.history + [dict(operation='fft_padding', east=added[0], north=added[1])]
+    return VoxelModel(extended, values.ravel(), model.mode, model.crs, history)
+
+
 def _numbers(path):
     text = Path(path).read_text(encoding='utf-8-sig')
     for line in text.splitlines():

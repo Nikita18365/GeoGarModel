@@ -106,9 +106,9 @@ class InitialModelPanel(QGroupBox):
         self.assign(VoxelModel(r.mesh,r.model,r.settings['mode'],r.settings.get('crs',''),[dict(operation='previous inversion')]))
         self.preview()
 
-    def preview(self): self.tab.preview_initial(self.current())
+    def preview(self): self.tab.preview_initial(self.tab.prepared_model())
     def preview3d(self):
-        self.tab.scene.render(self.current().result()); self.tab.tabs.setCurrentIndex(0)
+        self.tab.scene.render(self.tab.prepared_model().result()); self.tab.tabs.setCurrentIndex(0)
 
     def operation(self):
         model=self.current()

@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from geogarmodel.inversion import FieldOperator, Mesh, host
-from geogarmodel.layer_fft import LayerFFT
+from geogarmodel.layer_fft import LayerFFT, model_axis, spectrum_budget
 
 
 @pytest.mark.parametrize('device',['cpu','gpu'])
@@ -43,9 +43,16 @@ def test_fft_workflow(qt_application_lifetime,tmp_path):
     window=MainWindow()
     tab=window.inversion
     try:
-        tab.mode.setCurrentIndex(tab.fft_index)
+        tab.method.setCurrentIndex(1)
         tab.demo()
-        assert tab.nx.isHidden() and tab.stride.isHidden()
+        assert tab.nx.isHidden() and tab.stride.isHidden() and not tab.memory_policy.isHidden()
+        tab.fft_grid.setCurrentIndex(1)
+        tab.nx.setValue(21)
+        tab.ny.setValue(11)
+        tab.nz.setValue(4)
+        tab.memory_policy.setCurrentIndex(2)
+        tab.cache.setValue(0)
+        assert not tab.nx.isHidden() and tab.cache.isEnabled()
         tab.table.loc[0,'height']=10
         with pytest.raises(ValueError,match='постоянной'): tab.run()
         tab.table.loc[0,'height']=0
@@ -55,13 +62,68 @@ def test_fft_workflow(qt_application_lifetime,tmp_path):
         QTimer.singleShot(30000,loop.quit)
         loop.exec_()
         assert tab.result.settings['resources']['method']=='layer_fft'
-        assert tab.result.mesh.shape==(15,15,6)
+        assert tab.result.mesh.shape==(21,11,4)
+        assert tab.result.settings['resources']['cached_layers']==0
         assert tab.result.history[-1]['rmse']<tab.result.history[0]['rmse']
         path=tmp_path/'fft.ggproject'
         window.save_project_to(path)
-        tab.mode.setCurrentIndex(0)
+        tab.method.setCurrentIndex(0)
         assert not tab.stride.isHidden()
         assert window.open_project_from(path)
         assert tab.is_fft() and tab.stride.isHidden()
+        assert tab.fft_grid.currentIndex()==1 and tab.nx.value()==21 and tab.cache.isEnabled()
         assert tab.result.settings['resources']['method']=='layer_fft'
     finally: window.close()
+
+
+@pytest.mark.parametrize('device',['cpu','gpu'])
+def test_fft_different_grid_steps_with_padding(device):
+    if device=='gpu' and not os.environ.get('GEOGARMODEL_GPU_TESTS'):
+        pytest.skip('optional CUDA test')
+    east = 18e6 + np.arange(11) * 500.
+    north = 7e6 + np.arange(9) * 400.
+    model_east, model_north = [origin + np.arange(count+1)*step for origin,step,count in
+                             (model_axis(east,24,.1),model_axis(north,7,.2))]
+    assert len(model_east)==25 and len(model_north)==8
+    assert np.diff(model_east).mean() < 500 < np.diff(model_north).mean()
+    assert model_east[0] < east[0]-500 and model_east[-1] > east[-1]+500
+    mesh = Mesh(model_east, model_north, [50, 250, 700])
+    x, y = np.meshgrid(east,north)
+    obs = np.column_stack((x.ravel(),y.ravel(),np.zeros(x.size)))
+    obs = obs[np.r_[2, 2, 4:91]]
+    rng = np.random.default_rng(41)
+    model, residual = rng.normal(size=mesh.size), rng.normal(size=len(obs))
+    direct = FieldOperator(mesh,obs)
+    fft = LayerFFT(mesh,obs,device=device)
+    field = host(fft.field(model))
+    grad = host(fft.data_gradient(fft.xp.asarray(residual),None))
+    np.testing.assert_allclose(field,direct.field(model),atol=1e-9)
+    np.testing.assert_allclose(grad,direct.data_gradient(residual,None),atol=1e-9)
+    np.testing.assert_allclose(field @ residual, model @ grad, atol=1e-10)
+
+
+def test_fft_padding_preserves_imported_partial_cells():
+    from geogarmodel.voxel import VoxelModel, extend_density_model
+
+    mesh = Mesh([0,1,2], [0,1,2], [1,2,3])
+    bounds = mesh.cells()
+    bounds[0,2] += .1
+    mesh = Mesh(mesh.east, mesh.north, mesh.depth, mesh.active, bounds)
+    mesh.active[1] = False
+    model = VoxelModel(mesh,np.full(mesh.size,.2))
+    padded = extend_density_model(model,np.array([.1,1.9]),np.array([.1,1.9]),.25,.05)
+    assert padded.mesh.shape == (4,4,2)
+    np.testing.assert_array_equal(padded.mesh.bounds.reshape(4,4,2,6)[1:3,1:3],bounds.reshape(2,2,2,6))
+    np.testing.assert_array_equal(padded.mesh.active.reshape(4,4,2)[1:3,1:3].ravel(),mesh.active)
+    assert padded.values[0] == .05
+    assert extend_density_model(padded,np.array([.1,1.9]),np.array([.1,1.9]),.25,.05) is padded
+
+
+def test_fft_cache_modes():
+    from geogarmodel.inversion_resources import MIB
+
+    assert spectrum_budget(100*MIB,10*MIB,MIB,100,'balanced',0)==(50,50*MIB)
+    assert spectrum_budget(100*MIB,10*MIB,MIB,100,'performance',0)==(70,70*MIB)
+    assert spectrum_budget(100*MIB,10*MIB,MIB,100,'manual',0)==(0,0)
+    with pytest.raises(ValueError,match='кэша FFT'):
+        spectrum_budget(100*MIB,10*MIB,MIB,100,'manual',90)

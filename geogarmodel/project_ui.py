@@ -11,7 +11,8 @@ ML_CONTROLS=('x_column','y_column','target','spatial','block','test_fraction','s
     'table_crs','north_first','model_choice','device_choice','gpu_id','optimize_check','trials','folds','timeout')
 INV_CONTROLS=('mode','east','north','height','value','error','crs','height_constant','sigma','stride','nx','ny','nz',
     'top','bottom','padding','cache','memory_policy','field','inc','dec','lower','upper','initial','iterations','damping',
-    'smooth','depth_index','target','step','offset','device','gpu','early_stop','early_tolerance','early_patience')
+    'smooth','depth_index','target','step','offset','device','gpu','early_stop','early_tolerance','early_patience',
+    'method','fft_grid','extend_fft')
 
 
 def controls_state(owner,names):
@@ -175,13 +176,18 @@ class ProjectWorkspace:
                 if self.training is not None: self.table_info.setText(f'Из проекта: {len(self.training):,} обучающих строк; исходные данные встроены в файл.')
                 t=self.inversion
                 if 'observations' in data['tables']: t.assign_table(data['tables']['observations'])
-                t.mode.setCurrentText(state['inv_controls']['mode']); t.mode_changed(); apply_controls(t,state['inv_controls'])
+                inversion_controls = dict(state['inv_controls'])
+                if inversion_controls['mode']=='Послойная 2D FFT · плотностное моделирование':
+                    inversion_controls.update(mode=t.mode.itemText(0), method='Послойная 2D FFT', padding=0.)
+                t.mode.setCurrentText(inversion_controls['mode'])
+                t.mode_changed()
+                apply_controls(t,inversion_controls)
                 t.cache.setEnabled(t.memory_policy.currentData()=='manual'); t.early_tolerance.setEnabled(t.early_stop.isChecked()); t.early_patience.setEnabled(t.early_stop.isChecked())
                 if 'initial' in data['voxels']:
                     t.initial_panel.assign(data['voxels']['initial'],check_crs=False)
                     for key,model in data['voxels'].items(): model.source_path=state['initial_sources'][key]['path']; model.source_array=state['initial_sources'][key]['array']
                 t.initial_panel.undo_model=data['voxels'].get('undo'); t.initial_panel.source.setCurrentIndex(state['initial_source'])
-                apply_controls(t,state['inv_controls'])
+                apply_controls(t,inversion_controls)
                 t.update_fft_inputs()
                 if state['inversion_result'] is not None:
                     result=data['models'][state['inversion_result']]; t.finished_result(result,offer_export=False)

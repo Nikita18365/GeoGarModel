@@ -15,11 +15,12 @@ from threading import Event
 from .inversion import Mesh,FieldOperator,invert,InversionResult
 from .inversion_view import vtk_grid
 from .model_workspace import ModelWorkspace
-from .layer_fft import LayerFFT, HEIGHT_ERROR, observation_edges
+from .layer_fft import LayerFFT, HEIGHT_ERROR, model_axis
 from .models import read_table
 from .coordinates import gsk2011_zones,validate_crs
 from .compute import ComputationCancelled
 from .initial_model_ui import InitialModelPanel
+from .voxel import extend_density_model
 from .theme import style_figure
 from .inversion_workflow_ui import arrange_workflow
 from .inversion_export import field_table, export_zmap, export_ubc
@@ -49,8 +50,10 @@ class InversionTab(QWidget):
         self.mode=QComboBox()
         for label,key in [('Плотностное моделирование · Δρ, g/cm³','gravity'),('Моделирование магнитной восприимчивости · χ, SI','induced'),('Моделирование векторной намагниченности · J, A/m','vector')]: self.mode.addItem(label,key)
         panel.addWidget(self.mode)
-        self.fft_index=self.mode.count()
-        self.mode.addItem('Послойная 2D FFT · плотностное моделирование','gravity')
+        self.method=QComboBox()
+        self.method.addItem('Прямой расчёт по призмам','prisms')
+        self.method.addItem('Послойная 2D FFT','layer_fft')
+        self.method.setAccessibleName('Метод расчёта плотностной модели')
         self.hint=QLabel(); self.hint.setWordWrap(True); panel.addWidget(self.hint)
         self.load_button=self.button('Наблюдения XLSX / CSV…',self.load_table,panel)
         self.button('Наблюдённое поле ZMAP…',self.load_field,panel)
@@ -72,7 +75,9 @@ class InversionTab(QWidget):
         form.addRow('Использовать каждую N-ю строку',self.stride)
         self.initial_panel=InitialModelPanel(self); panel.addWidget(self.initial_panel)
         mesh_group=QGroupBox('03 · Новая сетка / сетка переноса'); f=QFormLayout(mesh_group)
-        self.nx,self.ny,self.nz=[self.integer(2,200,v) for v in (12,12,8)]
+        self.nx,self.ny,self.nz=[self.integer(2,10000,v) for v in (12,12,8)]
+        self.fft_grid=QComboBox()
+        self.fft_grid.addItems(['По шагу карты','Задать Nx и Ny'])
         self.top=self.number(-1e6,1e6,100)
         self.bottom=self.number(-1e6,1e6,3000)
         self.padding=self.number(0,10,.2)
@@ -81,9 +86,17 @@ class InversionTab(QWidget):
         self.memory_policy=QComboBox()
         for label,key in [('Авто · сбалансированный','balanced'),('Авто · производительность','performance'),('Вручную','manual')]:
             self.memory_policy.addItem(label,key)
-        self.memory_policy.currentIndexChanged.connect(lambda: self.cache.setEnabled(self.memory_policy.currentData()=='manual'))
         self.cache.setToolTip('Предел кэша в MiB: GPU — видеопамять, CPU — оперативная память. 0 отключает кэш. Бюджет проверяется при запуске.')
-        for name,w in [('Nx',self.nx),('Ny',self.ny),('Nz',self.nz),('Верх: глубина Down, м',self.top),('Низ: глубина Down, м',self.bottom),('Запас площади, доля',self.padding)]: f.addRow(name,w)
+        for name,w in [('Горизонтальная сетка',self.fft_grid),('Nx',self.nx),('Ny',self.ny),('Nz',self.nz),('Верх: глубина Down, м',self.top),('Низ: глубина Down, м',self.bottom),('Запас с каждой стороны, доля',self.padding)]: f.addRow(name,w)
+        self.padding.setToolTip('0,20 добавляет минимум 20% от ширины карты с каждой стороны на новой FFT-сетке.')
+        self.extend_fft=QCheckBox('Расширить загруженную модель')
+        self.extend_fft.setToolTip('Дополняет модель активными ячейками до указанного запаса от края карты. '
+                                  'Плотность добавленных ячеек берётся из поля «Начальное значение».')
+        f.addRow(self.extend_fft)
+        self.fft_transfer_hint=QLabel('Чтобы изменить Nx, Ny или Nz загруженной модели, '
+                                      'выберите перенос на новую сетку в редакторе вокселя.')
+        self.fft_transfer_hint.setWordWrap(True)
+        f.addRow(self.fft_transfer_hint)
         panel.addWidget(mesh_group)
         forms=[form,f]
         settings=QGroupBox('04 · Свойства и ограничения'); f=QFormLayout(settings)
@@ -120,7 +133,9 @@ class InversionTab(QWidget):
         self.early_tolerance.setToolTip('Если относительное уменьшение RMS/σ меньше порога несколько итераций подряд, возвращается лучшая завершённая модель.')
         compute=QGroupBox('07 · Вычисления'); cf=QFormLayout(compute)
         cf.addRow('Устройство',self.device); cf.addRow('GPU ID',self.gpu)
-        cf.addRow('Режим памяти',self.memory_policy); cf.addRow('Кэш вручную, MiB',self.cache)
+        cf.addRow('Режим памяти',self.memory_policy); cf.addRow('Лимит кэша, МиБ',self.cache)
+        self._cache_label=cf.labelForField(self.cache)
+        self.memory_policy.currentIndexChanged.connect(self.update_memory_controls)
         self.memory_info=QLabel('Свободная RAM/VRAM, бюджет кэша и размер пакетов определяются при запуске.'); self.memory_info.setWordWrap(True)
         cf.addRow(self.memory_info); panel.addWidget(compute)
         self.dec.setToolTip('Склонение относительно севера проекционной сетки. Для IGRF учтите сближение меридианов.')
@@ -131,9 +146,8 @@ class InversionTab(QWidget):
         details(panel,self.hint,'О выбранном режиме')
         form_details(sf,[self.depth_index,self.damping,self.smooth,self.step,self.offset],'Регуляризация и подбор шага')
         form_details(sf,[self.early_tolerance,self.early_patience],'Параметры ранней остановки')
-        memory_details=form_details(cf,[self.gpu,self.memory_policy,self.cache,self.memory_info],'Устройство и память: подробнее')
         self._solver_group=solver
-        self._fft_hidden=[memory_details,self.stride,form.labelForField(self.stride)]
+        self._fft_hidden=[self.stride,form.labelForField(self.stride)]
         for index in range(sf.count()):
             widget=sf.itemAt(index).widget()
             if widget is not None and widget not in (self.iterations,sf.labelForField(self.iterations)):
@@ -141,15 +155,18 @@ class InversionTab(QWidget):
         mesh_form=mesh_group.layout()
         self._fft_new_grid=mesh_group
         self._initial_label=settings.layout().labelForField(self.initial)
-        for widget in (self.nx,self.ny,self.padding):
-            self._fft_hidden.extend((widget,mesh_form.labelForField(widget)))
+        self._grid_rows={widget:mesh_form.labelForField(widget)
+                         for widget in (self.fft_grid,self.nx,self.ny,self.nz,self.top,self.bottom,self.padding)}
         self._height_label=form.labelForField(self.height_constant)
         self._sigma_label=form.labelForField(self.sigma)
         self.height.currentIndexChanged.connect(self.update_fft_inputs)
         self.error.currentIndexChanged.connect(self.update_fft_inputs)
         self.initial_panel.source.currentIndexChanged.connect(self.update_fft_inputs)
+        self.fft_grid.currentIndexChanged.connect(self.update_fft_inputs)
+        self.extend_fft.toggled.connect(self.update_fft_inputs)
         self.height.activated.connect(lambda _:self.workbench.guard(self.check_fft_height))
         self.workflow=arrange_workflow(panel,self.initial_panel,mesh_group,settings,self.magnetic_group,solver,compute)
+        panel.insertWidget(1,self.method)
         prepare_forms(left)
         for button in left.findChildren(QPushButton): quiet_button(button)
         for label in left.findChildren(QLabel): label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -195,7 +212,9 @@ class InversionTab(QWidget):
             export_menu.addAction(title,lambda checked=False,fn=callback:self.workbench.guard(fn))
         export_button.setMenu(export_menu); actions.addWidget(export_button)
         root.addWidget(ParameterSplitter(controls,right))
-        self.mode.currentIndexChanged.connect(self.mode_changed); self.mode_changed()
+        self.mode.currentIndexChanged.connect(self.mode_changed)
+        self.method.currentIndexChanged.connect(self.update_fft_inputs)
+        self.mode_changed()
         self.history=[]
 
     def button(self,text,fn,layout):
@@ -239,16 +258,35 @@ class InversionTab(QWidget):
         self.update_fft_inputs()
 
     def is_fft(self):
-        return self.mode.currentIndex()==self.fft_index
+        return self.mode.currentData()=='gravity' and self.method.currentData()=='layer_fft'
+
+    def update_memory_controls(self):
+        manual=self.memory_policy.currentData()=='manual'
+        self.cache.setEnabled(manual)
+        self.cache.setVisible(manual)
+        self._cache_label.setVisible(manual)
 
     def update_fft_inputs(self,*args):
         fft=self.is_fft()
+        self.update_memory_controls()
+        self.method.setVisible(self.mode.currentData()=='gravity')
         self._solver_group.setTitle('Предел итераций' if fft else '06 · Решатель и регуляризация')
         for widget in self._fft_hidden: widget.setVisible(not fft)
         new_grid=not fft or self.initial_panel.source.currentIndex()==0
-        self._fft_new_grid.setVisible(new_grid)
-        self.initial.setVisible(new_grid)
-        self._initial_label.setVisible(new_grid)
+        self._fft_new_grid.setTitle('03 · Сетка и запас по краям' if fft else '03 · Новая сетка / сетка переноса')
+        manual=not fft or self.fft_grid.currentIndex()==1
+        for widget, label in self._grid_rows.items():
+            visible=True
+            if widget is self.fft_grid: visible=fft
+            elif widget in (self.nx,self.ny): visible=manual
+            widget.setVisible(visible)
+            label.setVisible(visible)
+        self.extend_fft.setVisible(fft and not new_grid)
+        self.fft_transfer_hint.setVisible(fft and not new_grid)
+        show_initial=new_grid or self.extend_fft.isChecked()
+        self.initial.setVisible(show_initial)
+        self._initial_label.setVisible(show_initial)
+        self._initial_label.setText('Начальная плотность запаса' if fft and not new_grid else 'Начальное значение')
         self._height_label.setText('Единая высота Up, м' if fft else 'Высота константа')
         for combo,field,label in ((self.height,self.height_constant,self._height_label),
                                   (self.error,self.sigma,self._sigma_label)):
@@ -256,7 +294,11 @@ class InversionTab(QWidget):
             field.setVisible(visible)
             label.setVisible(visible)
         if fft:
-            self.hint.setText('Послойная FFT: единая высота Up для всей карты. Шаг новой сетки по East и North определяется из наблюдений.')
+            self.hint.setText('Послойная FFT рассчитана на регулярную карту с единой высотой Up. '
+                              'Для новой модели можно выбрать шаг карты или задать Nx и Ny.')
+        elif self.mode.currentData()=='gravity':
+            self.hint.setText('Контраст плотности Δρ в g/cm³ по аномалиям силы тяжести. '
+                              'Поправки, редукция Буге и региональный фон готовятся до импорта.')
 
     def check_fft_height(self):
         if self.is_fft() and self.table is not None and self.height.currentIndex()>0:
@@ -323,7 +365,11 @@ class InversionTab(QWidget):
             cols=[pd.to_numeric(self.table[c.currentText()],errors='raise').to_numpy(float) for c in (self.east,self.north,self.value)]
             stride=max(1,len(cols[0])//20000); p=ax.scatter(cols[0][::stride]-origin[0],cols[1][::stride]-origin[1],c=cols[2][::stride],s=3,cmap='coolwarm'); self.figure.colorbar(p,ax=ax,label='mGal' if model.mode=='gravity' else 'nT'); ax.set(xlabel='East − E₀ (m)',ylabel='North − N₀ (m)',title='Наблюдённое поле')
         else: ax.text(.1,.5,'Поле ещё не загружено',transform=ax.transAxes)
-        self.figure.suptitle(f'{mesh.active.sum():,} активных призм · E₀={origin[0]:g}, N₀={origin[1]:g} м · точная обрезка в 3D',color='#dbe7f6',fontsize=10)
+        nx, ny, nz = mesh.shape
+        title = f'{nx} × {ny} × {nz} · {mesh.active.sum():,} активных призм · E₀={origin[0]:g}, N₀={origin[1]:g} м'
+        if self.is_fft():
+            title += f'\nШаг модели X {(mesh.east[-1]-mesh.east[0])/nx:,.2f} м · Y {(mesh.north[-1]-mesh.north[0])/ny:,.2f} м'
+        self.figure.suptitle(title,color='#dbe7f6',fontsize=10)
         self.figure.tight_layout(); style_figure(self.figure); self.canvas.draw_idle(); self.tabs.setCurrentIndex(1)
 
     def new_mesh(self):
@@ -332,11 +378,12 @@ class InversionTab(QWidget):
         if self.bottom.value()<=self.top.value(): raise ValueError('Низ должен быть глубже верха.')
         if self.is_fft():
             import psutil
-            specs=[observation_edges(v) for v in (east,north)]
+            counts=(self.nx.value(),self.ny.value()) if self.fft_grid.currentIndex()==1 else (None,None)
+            specs=[model_axis(values,n,self.padding.value()) for values,n in zip((east,north),counts)]
             size=specs[0][2]*specs[1][2]*self.nz.value()
-            if size*24>psutil.virtual_memory().available*.8:
+            if size*40>psutil.virtual_memory().available*.8:
                 raise ValueError('FFT-сетка слишком велика для доступной RAM. Проверьте шаг координат.')
-            axes=[origin+(np.arange(count+1)-.5)*step for origin,step,count in specs]
+            axes=[origin+np.arange(count+1)*step for origin,step,count in specs]
             return Mesh(*axes,np.linspace(self.top.value(),self.bottom.value(),self.nz.value()+1))
         axes=[]
         for values,n in ((east,self.nx.value()),(north,self.ny.value())):
@@ -345,6 +392,16 @@ class InversionTab(QWidget):
             margin=span*self.padding.value()+span/(2*max(n-1,1))
             axes.append(np.linspace(values.min()-margin,values.max()+margin,n+1))
         return Mesh(*axes,np.linspace(self.top.value(),self.bottom.value(),self.nz.value()+1))
+
+    def prepared_model(self):
+        model = self.initial_panel.current()
+        if self.is_fft() and self.initial_panel.source.currentIndex()==1 and self.extend_fft.isChecked():
+            if self.table is None:
+                raise ValueError('Загрузите наблюдения, чтобы определить границы расширения.')
+            east, north = [pd.to_numeric(self.table[c.currentText()], errors='raise').to_numpy(float)
+                           for c in (self.east, self.north)]
+            model = extend_density_model(model,east,north,self.padding.value(),self.initial.value())
+        return model
 
     def demo(self):
         mode=self.mode.currentData()
@@ -382,15 +439,15 @@ class InversionTab(QWidget):
         sigma=column(self.error) if self.error.currentIndex()>0 else self.sigma.value()
         observations=np.column_stack((east,north,-height))
         if not np.isfinite(observations).all() or not np.isfinite(data).all(): raise ValueError('Таблица содержит пропуски/Inf; подготовьте наблюдения.')
-        initial_model=self.initial_panel.current(); mesh=initial_model.mesh
+        initial_model=self.prepared_model(); mesh=initial_model.mesh
         mode=self.mode.currentData()
         if np.any(initial_model.values[mesh.active]<self.lower.value()) or np.any(initial_model.values[mesh.active]>self.upper.value()):
             raise ValueError('Начальные свойства выходят за минимум/максимум. Исправьте границы или явно ограничьте свойства через операции.')
         settings=dict(sigma=sigma,iterations=self.iterations.value(),lower=self.lower.value(),upper=self.upper.value(),initial=initial_model.values)
-        operator_args=dict(device=self.device.currentData(),gpu_id=0)
+        operator_args=dict(device=self.device.currentData(),gpu_id=self.gpu.value(),
+                           cache_mb=self.cache.value(),memory_policy=self.memory_policy.currentData())
         if not fft:
-            operator_args.update(gpu_id=self.gpu.value(),field_strength=self.field.value(),inclination=self.inc.value(),
-                                 declination=self.dec.value(),cache_mb=self.cache.value(),memory_policy=self.memory_policy.currentData())
+            operator_args.update(field_strength=self.field.value(),inclination=self.inc.value(),declination=self.dec.value())
             settings.update(damping=self.damping.value(),smoothness=self.smooth.value(),
                             depth_index=self.depth_index.value(),step_scale=self.step.value(),target_rms=self.target.value(),
                             fit_offset=self.offset.isChecked(),early_stop=self.early_stop.isChecked(),
@@ -412,7 +469,8 @@ class InversionTab(QWidget):
         self.phase_label.setText('Подготовка устройства и оператора…'); self.phase_progress.setRange(0,0)
         self.clock_timer.start(); self.update_clock()
         self.progress.setRange(0,settings['iterations']); self.progress.setValue(0)
-        self.status.setText(f'{len(data):,} наблюдений × {mesh.active.sum():,} активных ячеек · {operator_args["device"].upper()} · определение бюджета памяти…')
+        method = 'Послойная 2D FFT · ' if fft else ''
+        self.status.setText(f'{method}{len(data):,} наблюдений × {mesh.active.sum():,} активных ячеек · {operator_args["device"].upper()} · определение бюджета памяти…')
         self.worker=InversionWorker(compute,self)
         self._notify_inversion=True
         self.lock_inputs()
@@ -440,7 +498,11 @@ class InversionTab(QWidget):
             return
         if row.get('event')=='resources':
             if row.get('method')=='layer_fft':
-                text=f'Послойная 2D FFT · слоёв с полными ячейками {row["layers"]} · частичных призм {row["partial_cells"]}'
+                text=(f'Послойная 2D FFT · рабочая сетка {row["fft_shape"][0]:,} × {row["fft_shape"][1]:,} · '
+                      f'слоёв {row["layers"]} · частичных призм {row["partial_cells"]:,}')
+                memory=(f'Свободно при старте {row["free_mib"]:,} МиБ · кэш спектров ≤ {row["cache_mib"]:,.1f} МиБ '
+                        f'({row["cached_layers"]} слоёв).')
+                self.memory_info.setText(memory); self.log.appendPlainText(memory)
                 self.status.setText(text); self.log.appendPlainText(text)
                 return
             text=(f'Свободно при старте: {row["free_mib"]:,} MiB; кэш ≤{row["cache_mib"]:,} MiB; '
