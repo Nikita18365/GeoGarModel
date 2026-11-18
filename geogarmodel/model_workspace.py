@@ -1,10 +1,10 @@
 """Independent MDI model windows with a shared, path-addressed model catalogue."""
 from dataclasses import dataclass
 from pathlib import Path
-from PyQt5.QtCore import Qt,QEvent,QSize,pyqtSignal
+from PyQt5.QtCore import Qt,QSize,QEvent,pyqtSignal
 from PyQt5.QtGui import QBrush,QColor,QPalette
 from PyQt5.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QSplitter,QMdiArea,QMdiSubWindow,
-    QListWidget,QListWidgetItem,QComboBox,QLabel,QLineEdit,QToolBar,QMenu,QInputDialog,QMessageBox)
+    QListWidget,QListWidgetItem,QComboBox,QLabel,QLineEdit,QToolBar,QMenu,QInputDialog,QMessageBox,QAction,QApplication)
 from .inversion_view import ModelView
 from .view_icons import view_icon
 
@@ -27,6 +27,14 @@ class ModelDocument(QMdiSubWindow):
         palette=self.palette(); palette.setColor(QPalette.Highlight,QColor('#165c7a')); palette.setColor(QPalette.HighlightedText,QColor('#f1f7ff')); self.setPalette(palette)
         self.view=ModelView(); self.setWidget(self.view); self.resize(900,650)
         self.entries=[]; self.states={}; self.selected=None
+        self.systemMenu().addSeparator()
+        self.systemMenu().addAction('Переименовать окно…',self.rename_window)
+
+    def rename_window(self):
+        title,ok=QInputDialog.getText(self,'Переименовать 3D-окно','Название окна',text=self.windowTitle())
+        if ok and title.strip() and title.strip()!=self.windowTitle():
+            self.setWindowTitle(title.strip())
+            self.changed.emit()
 
     def add_entry(self,entry):
         if entry not in self.entries: self.entries.append(entry)
@@ -77,6 +85,10 @@ class ModelWorkspace(QWidget):
         if import_callback: self.load_action.triggered.connect(lambda:import_callback())
         bar.addSeparator()
         self.window_selector=QComboBox(); self.window_selector.setMinimumContentsLength(12); self.window_selector.setToolTip('Активное окно. Выберите свёрнутое окно, чтобы открыть его.')
+        self.window_selector.setContextMenuPolicy(Qt.ActionsContextMenu)
+        self.rename_action=QAction('Переименовать окно…',self.window_selector)
+        self.rename_action.triggered.connect(self.rename_active_window)
+        self.window_selector.addAction(self.rename_action)
         bar.addWidget(self.window_selector); self.window_selector.activated.connect(self.restore_window)
         bar.addAction(view_icon('tile'),'Расположить окна рядом').triggered.connect(lambda:self.mdi.tileSubWindows())
         bar.addAction(view_icon('cascade'),'Расположить окна каскадом').triggered.connect(lambda:self.mdi.cascadeSubWindows())
@@ -99,7 +111,7 @@ class ModelWorkspace(QWidget):
         self._documents=[]; self.refresh()
 
     def active_document(self):
-        active=self.mdi.activeSubWindow()
+        active=self.mdi.currentSubWindow()
         return active if isinstance(active,ModelDocument) else None
 
     @property
@@ -132,7 +144,6 @@ class ModelWorkspace(QWidget):
     def new_window(self,entry=None):
         document=ModelDocument(f'3D-окно {self._next_window}'); document.number=self._next_window; self._next_window+=1
         self._documents.append(document); self.mdi.addSubWindow(document)
-        document.installEventFilter(self); document.view.installEventFilter(self)
         document.changed.connect(self.refresh)
         document.changed.connect(self.changed)
         for w in document.view.state_controls().values():
@@ -151,24 +162,48 @@ class ModelWorkspace(QWidget):
         if not getattr(self,'_closing',False): self.refresh(); self.changed.emit()
 
     def render(self,result,path=None,name=None,source_key=None):
-        entry=self.register(result,path,name,source_key); document=self.active_document() or self.new_window()
+        entry=self.register(result,path,name,source_key)
+        document=self.active_document() or self.new_window()
+        self.display_entry(document,entry)
+        if document.isMinimized(): document.showNormal()
+        return document
+
+    def display_entry(self,document,entry):
         self._pending_result=None
         if document.selected is entry: document.view.render(entry.result)
         else: document.add_entry(entry)
-        if document.isMinimized(): document.showNormal()
-        self.refresh(); return document
+        self.refresh()
+
+    def finish_import(self,result,target):
+        entry=self.register(result)
+        if target not in self._documents:
+            self.changed.emit()
+            return False
+        self.display_entry(target,entry)
+        return True
 
     def add_from_catalogue(self):
         key=self.catalogue.currentData()
         if key not in self.registry: return
         document=self.active_document() or self.new_window(); document.add_entry(self.registry[key]); self.refresh()
 
-    def eventFilter(self,obj,event):
-        if event.type()==QEvent.Enter:
-            for document in self._documents:
-                if obj is document or obj is document.view:
-                    self.mdi.setActiveSubWindow(document); break
-        return super().eventFilter(obj,event)
+    def showEvent(self,event):
+        super().showEvent(event)
+        QApplication.instance().installEventFilter(self)
+
+    def hideEvent(self,event):
+        QApplication.instance().removeEventFilter(self)
+        super().hideEvent(event)
+
+    def eventFilter(self,widget,event):
+        # A VTK canvas or tool button may consume the press before it reaches its MDI frame.
+        if event.type()==QEvent.MouseButtonPress and isinstance(widget,QWidget) and self.mdi.isAncestorOf(widget):
+            parent=widget
+            while parent is not self.mdi and not isinstance(parent,ModelDocument):
+                parent=parent.parentWidget()
+            if isinstance(parent,ModelDocument) and parent is not self.active_document():
+                self.mdi.setActiveSubWindow(parent)
+        return super().eventFilter(widget,event)
 
     def snapshot(self):
         windows=[]; active=self.active_document()
@@ -209,6 +244,10 @@ class ModelWorkspace(QWidget):
 
     def active_changed(self,*args): self.refresh()
 
+    def rename_active_window(self):
+        document=self.active_document()
+        if document is not None: document.rename_window()
+
     def refresh_catalogue(self):
         key=self.catalogue.currentData(); self.catalogue.clear()
         for entry in self.registry.values():
@@ -222,6 +261,7 @@ class ModelWorkspace(QWidget):
     def refresh(self):
         if getattr(self,'_closing',False): return
         active=self.active_document(); self.window_selector.blockSignals(True); self.window_selector.clear()
+        self.rename_action.setEnabled(active is not None)
         for document in self._documents:
             self.window_selector.addItem(document.windowTitle(),document.number)
             if document is active: self.window_selector.setCurrentIndex(self.window_selector.count()-1)

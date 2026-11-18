@@ -2,7 +2,59 @@
 from PyQt5.QtCore import Qt,QSize
 from PyQt5.QtGui import QPainter
 from PyQt5.QtWidgets import (QWidget,QVBoxLayout,QPushButton,QScrollArea,QFormLayout,
-    QSizePolicy,QLabel,QGroupBox)
+    QSizePolicy,QLabel,QGroupBox,QSplitter,QSplitterHandle,QToolButton,QHBoxLayout)
+
+
+class ParameterHandle(QSplitterHandle):
+    """The divider remains reachable even when either pane is fully collapsed."""
+    def __init__(self,orientation,splitter):
+        super().__init__(orientation,splitter)
+        self.setToolTip('Перетащите границу, чтобы изменить ширину панели')
+        row=QHBoxLayout(self)
+        row.setContentsMargins(1,0,1,0)
+        self.toggle=QToolButton(self)
+        self.toggle.setFixedSize(20,38)
+        self.toggle.setCursor(Qt.PointingHandCursor)
+        self.toggle.setFocusPolicy(Qt.StrongFocus)
+        self.toggle.setStyleSheet('QToolButton { padding: 0; }')
+        row.addWidget(self.toggle,0,Qt.AlignCenter)
+        self.toggle.clicked.connect(splitter.toggle_parameters)
+
+    def update_button(self,opened):
+        self.toggle.setArrowType(Qt.LeftArrow if opened else Qt.RightArrow)
+        title='Скрыть панель параметров' if opened else 'Открыть панель параметров на 35 % ширины'
+        self.toggle.setToolTip(title)
+        self.toggle.setAccessibleName(title)
+
+
+class ParameterSplitter(QSplitter):
+    def __init__(self,parameters,results):
+        super().__init__(Qt.Horizontal)
+        self.setObjectName('parameterSplitter')
+        self.setHandleWidth(22)
+        for pane in (parameters,results):
+            policy=pane.sizePolicy()
+            policy.setHorizontalPolicy(QSizePolicy.Ignored)
+            pane.setSizePolicy(policy)
+            pane.setMinimumWidth(1)
+            self.addWidget(pane)
+        self.setStretchFactor(0,1)
+        self.setStretchFactor(1,1)
+        # Defer expensive map/VTK redraws until the divider is released.
+        self.setOpaqueResize(False)
+        self.setSizes([3500,6500])
+        self.handle(1).update_button(True)
+        self.splitterMoved.connect(self.update_button)
+
+    def createHandle(self):
+        return ParameterHandle(self.orientation(),self)
+
+    def toggle_parameters(self):
+        self.setSizes([0,10000] if self.sizes()[0] else [3500,6500])
+        self.update_button()
+
+    def update_button(self):
+        self.handle(1).update_button(self.sizes()[0]>0)
 
 
 class Disclosure(QWidget):

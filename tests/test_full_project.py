@@ -40,6 +40,7 @@ def test_complete_project_restores_data_optuna_predictions_and_model_windows(qt_
         entry=t.scene.register(result,path=str(path)); other=t.scene.register(initial.result(),name='Начальная')
         # Catalogue/window metadata is independent of the optional OpenGL renderer.
         document=t.scene.new_window(); document.entries=[entry,other]; document.selected=entry; document.view.result=result
+        document.setWindowTitle('Глубинная модель')
         document.view.slice_coordinates[2].setValue(250); document.view.palette.setCurrentText('plasma')
         document.showMinimized(); window.tabs.setCurrentIndex(2)
         project=tmp_path/'portable.ggproject'; window.save_project_to(project)
@@ -58,6 +59,7 @@ def test_complete_project_restores_data_optuna_predictions_and_model_windows(qt_
         assert restored.inversion.nz.value()==35 and restored.inversion.early_stop.isChecked()
         assert len(restored.inversion.scene.registry)==2
         doc=restored.inversion.scene._documents[0]; assert len(doc.entries)==2 and doc.isMinimized()
+        assert doc.windowTitle()=='Глубинная модель'
         assert doc.view.palette.currentText()=='plasma'
         assert doc.selected.path==str(path.resolve())
         assert next(e for e in restored.inversion.scene.registry.values() if e.name.startswith('Начальная')).result.settings['voxel_history']==initial.history

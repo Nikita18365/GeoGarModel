@@ -47,7 +47,7 @@ class ProjectWorkspace:
         self._project_dirty=False
 
     def mark_project_dirty(self,*args):
-        if not getattr(self,'_project_loading',True) and (self.layers.count() or self.training is not None or self.prediction is not None or self.inversion.table is not None or self.inversion.initial_panel.model is not None or self.inversion.scene.registry or self.map_project_name!='Без названия'): self._project_dirty=True
+        if not getattr(self,'_project_loading',True) and (self.layers.count() or self.training is not None or self.prediction is not None or self.inversion.table is not None or self.inversion.initial_panel.model is not None or self.inversion.scene.registry or self.inversion.scene.window_selector.count() or self.map_project_name!='Без названия'): self._project_dirty=True
 
     def update_project_label(self):
         MapWorkspace.update_project_label(self)

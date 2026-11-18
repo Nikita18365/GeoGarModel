@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
-from PyQt5.QtCore import QEvent
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QEvent,Qt
+from PyQt5.QtTest import QTest
+from PyQt5.QtWidgets import QApplication,QInputDialog
 from geogarmodel.inversion import Mesh,InversionResult
 from geogarmodel.section_rendering import sample_section
 
@@ -31,7 +32,7 @@ def test_smooth_sections_nonuniform_edges_depth_and_partial_masks():
     np.testing.assert_array_equal(r.model,original)
 
 
-def test_window_membership_paths_state_and_hover(qt_application_lifetime,monkeypatch,tmp_path):
+def test_window_membership_paths_state_and_click(qt_application_lifetime,monkeypatch,tmp_path):
     from geogarmodel.model_workspace import ModelWorkspace,ModelView
     # Window/catalogue behaviour must also work when optional VTK is not installed.
     monkeypatch.setattr(ModelView,'render',lambda self,result,**kwargs:setattr(self,'result',result))
@@ -48,13 +49,51 @@ def test_window_membership_paths_state_and_hover(qt_application_lifetime,monkeyp
         second=workspace.new_window(entry); assert len(second.entries)==1 and len(first.entries)==2
         assert workspace.source_path.text()==str(path.resolve())
         assert workspace.catalogue.count()==2
-        QApplication.sendEvent(first.view,QEvent(QEvent.Enter)); assert workspace.active_document() is first
+        QApplication.sendEvent(first.view,QEvent(QEvent.Enter)); assert workspace.active_document() is second
+        QTest.mouseClick(first.view,Qt.LeftButton); assert workspace.active_document() is first
         assert workspace.models.count()==2
         second.showMinimized(); workspace.refresh()
         index=next(i for i in range(workspace.window_selector.count()) if workspace.window_selector.itemData(i)==second.number)
         workspace.restore_window(index); assert not second.isMinimized() and workspace.active_document() is second
         second.remove_entry(entry); assert first.entries[0] is entry and len(workspace.registry)==2
+        incoming=model()
+        assert workspace.finish_import(incoming,first)
+        assert first.selected.result is incoming and not second.entries and workspace.active_document() is second
+        monkeypatch.setattr(QInputDialog,'getText',lambda *a,**k:(' Фундамент ',True))
+        second.systemMenu().actions()[-1].trigger()
+        assert second.windowTitle()==workspace.window_selector.currentText()=='Фундамент'
+        assert workspace.snapshot()[-1]['title']=='Фундамент'
+        first.close()
+        delayed=model()
+        assert not workspace.finish_import(delayed,first)
+        assert workspace.register(delayed).result is delayed and not second.entries
     finally: workspace.shutdown(); workspace.close(); QApplication.processEvents()
+
+
+def test_import_keeps_original_destination_during_background_read(qt_application_lifetime,monkeypatch):
+    from types import SimpleNamespace
+    from geogarmodel.app import MainWindow
+    from geogarmodel.model_workspace import ModelView
+    monkeypatch.setattr(ModelView,'render',lambda self,result:setattr(self,'result',result))
+    window=MainWindow()
+    window.tabs.setCurrentIndex(2)
+    window.show()
+    QApplication.processEvents()
+    tab=window.inversion
+    pending=[]
+    incoming=model()
+    monkeypatch.setattr(QInputDialog,'getItem',lambda parent,title,label,items,*args:(items[0],True))
+    monkeypatch.setattr(tab.initial_panel,'ask_load',lambda mode:lambda:SimpleNamespace(result=lambda:incoming))
+    monkeypatch.setattr(tab,'model_task',lambda read,done:pending.append((read,done)))
+    try:
+        tab.scene.load_action.trigger()
+        target=tab.scene.active_document()
+        other=tab.scene.new_window()
+        read,done=pending.pop()
+        done(read())
+        assert target.selected.result is incoming
+        assert tab.scene.active_document() is other and not other.entries
+    finally: window.close(); QApplication.processEvents()
 
 
 def test_depth_clipping_is_downward_and_expanded_state_matches(qt_application_lifetime):

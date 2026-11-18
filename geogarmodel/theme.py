@@ -40,6 +40,8 @@ QStatusBar { background: #101c2f; color: #93a9c4; }
 QMenuBar, QMenu { background: #101c2f; color: #dbe7f6; }
 QMenu::item:selected { background: #23405d; }
 QSplitter::handle { background: #1a2d45; width: 5px; }
+QSplitter#parameterSplitter::handle:horizontal { width: 22px; background: #20344d; border-left: 1px solid #65829f; }
+QSplitter#parameterSplitter::handle:horizontal:hover { border-left-color: #38bdf8; }
 QToolTip { background: #203b53; color: white; border: 1px solid #38bdf8; padding: 5px; }
 """
 

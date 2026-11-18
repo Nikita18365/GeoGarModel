@@ -8,7 +8,7 @@ import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QFormLayout, QPushButton, QComboBox, QLineEdit, QCheckBox, QLabel,
-    QFileDialog, QMessageBox, QListWidget, QSplitter, QPlainTextEdit, QDoubleSpinBox,
+    QFileDialog, QMessageBox, QListWidget, QPlainTextEdit, QDoubleSpinBox,
     QSpinBox, QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem,
     QScrollArea, QGroupBox, QProgressBar, QGridLayout, QSizePolicy, QBoxLayout,QInputDialog)
 from matplotlib.figure import Figure
@@ -24,7 +24,7 @@ from .compute import GPU_MODELS, ComputationCancelled
 from .optimization import default_space
 from .parameter_files import validate_parameters, read_parameters, best_snapshot
 from .window_theme import apply_window_theme
-from .ui_layout import Disclosure,details,form_details,workflow_sections,quiet_button,prepare_forms
+from .ui_layout import Disclosure,ParameterSplitter,details,form_details,workflow_sections,quiet_button,prepare_forms
 from .maps_ui import MapWorkspace,LayerList
 from .map_navigation import MapToolbar
 from .project_ui import ProjectWorkspace
@@ -219,13 +219,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(controls)
-        scroll.setMinimumWidth(340)
-        scroll.setMaximumWidth(440)
-        splitter = QSplitter()
-        splitter.addWidget(scroll)
-        splitter.addWidget(plot)
-        splitter.setStretchFactor(1, 1); splitter.setSizes([380,1000])
-        layout.addWidget(splitter)
+        layout.addWidget(ParameterSplitter(scroll,plot))
         self.tabs.addTab(tab, "01  ·  Карты и трансформанты")
         self.redraw(); self.map_dirty=False
 
@@ -372,15 +366,11 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(controls)
-        scroll.setMinimumWidth(390)
-        scroll.setMaximumWidth(560)
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(scroll, 1)
         left_layout.addWidget(footer)
-        left.setMinimumWidth(390)
-        left.setMaximumWidth(560)
         right = QWidget()
         right_layout = QVBoxLayout(right)
         self.dashboard = TrainingDashboard()
@@ -400,12 +390,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         details(right_layout,self.log,'Журнал расчёта')
         prepare_forms(controls)
         for button in controls.findChildren(QPushButton): quiet_button(button)
-        splitter = QSplitter()
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setSizes([450, 1000])
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter)
+        layout.addWidget(ParameterSplitter(left,right))
         self.model_choice.currentTextChanged.connect(self.update_device_controls)
         self.device_choice.currentIndexChanged.connect(self.update_device_controls)
         self.update_device_controls()

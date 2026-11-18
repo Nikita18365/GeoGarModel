@@ -7,7 +7,7 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from time import perf_counter
 from PyQt5.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QGroupBox,
-    QComboBox,QDoubleSpinBox,QSpinBox,QPushButton,QLabel,QScrollArea,QSplitter,
+    QComboBox,QDoubleSpinBox,QSpinBox,QPushButton,QLabel,QScrollArea,
     QTabWidget,QFileDialog,QProgressBar,QPlainTextEdit,QCheckBox,QAbstractSpinBox,QLineEdit,QAbstractButton,QDialog)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg,NavigationToolbar2QT
@@ -23,7 +23,7 @@ from .theme import style_figure
 from .inversion_workflow_ui import arrange_workflow
 from .inversion_export import field_table, export_zmap, export_ubc
 from .inversion_progress import duration
-from .ui_layout import Disclosure,SummaryLabel,details,form_details,quiet_button,prepare_forms
+from .ui_layout import Disclosure,ParameterSplitter,SummaryLabel,details,form_details,quiet_button,prepare_forms
 
 
 class InversionWorker(QThread):
@@ -40,7 +40,7 @@ class InversionTab(QWidget):
     def __init__(self,workbench):
         super().__init__(workbench)
         self.workbench=workbench; self.worker=None; self.table=None; self.result=None
-        root=QHBoxLayout(self); splitter=QSplitter(); root.addWidget(splitter)
+        root=QHBoxLayout(self)
         left=QWidget(); panel=QVBoxLayout(left)
         self.parameter_panel=left
         left.setObjectName('inversionParameters')
@@ -141,7 +141,6 @@ class InversionTab(QWidget):
         self.stop=self.button('Остановить',self.cancel,cl); self.stop.setEnabled(False)
         self.progress=QProgressBar(); cl.addWidget(self.progress)
         self.progress.setFormat('%v / %m итераций (%p%)')
-        controls.setMinimumWidth(400); controls.setMaximumWidth(540); splitter.addWidget(controls)
         right=QWidget(); rl=QVBoxLayout(right)
         self.status=SummaryLabel('Загрузите поле, задайте модель и запустите расчёт.'); rl.addWidget(self.status)
         self.phase_label=QLabel('Этап расчёта появится после запуска'); self.phase_label.setWordWrap(True); rl.addWidget(self.phase_label)
@@ -175,7 +174,7 @@ class InversionTab(QWidget):
                                ('Поля · CSV / ZMAP',self.save_fields),('Модель · VTK',self.save_vtk)]:
             export_menu.addAction(title,lambda checked=False,fn=callback:self.workbench.guard(fn))
         export_button.setMenu(export_menu); actions.addWidget(export_button)
-        splitter.addWidget(right); splitter.setSizes([440,1000]); splitter.setStretchFactor(1,1)
+        root.addWidget(ParameterSplitter(controls,right))
         self.mode.currentIndexChanged.connect(self.mode_changed); self.mode_changed()
         self.history=[]
 
@@ -523,11 +522,20 @@ class InversionTab(QWidget):
     def open_3d(self): self.scene.render(self.require_result()); self.tabs.setCurrentIndex(0)
     def import_display_model(self):
         from PyQt5.QtWidgets import QInputDialog
+        if self.worker or self.workbench.worker: raise ValueError('Дождитесь текущего расчёта.')
+        target=self.scene.active_document()
         labels={'Плотностная модель · г/см³':'gravity','Магнитная восприимчивость · SI':'induced','Векторная намагниченность · А/м':'vector'}
         label,ok=QInputDialog.getItem(self,'Свойство 3D-модели','Для VTK, UBC и таблиц выберите свойство. NPZ хранит тип модели внутри файла.',list(labels),0,False)
         if not ok: return
         loader=self.initial_panel.ask_load(labels[label])
-        if loader is not None: self.model_task(loader,lambda model:self.scene.render(model.result()))
+        if loader is not None:
+            if target is None: target=self.scene.new_window()
+
+            def imported(model):
+                displayed=self.scene.finish_import(model.result(),target)
+                self.status.setText('3D-модель загружена.' if displayed else
+                    'Окно загрузки закрыто. Модель доступна в списке «Все загруженные модели».')
+            self.model_task(loader,imported)
     def open_slice_maps(self):
         self.scene.result=self.require_result(); self.scene.open_slice_maps()
     def load_result(self):
