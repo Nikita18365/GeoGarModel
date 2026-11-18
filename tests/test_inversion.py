@@ -195,6 +195,22 @@ def test_block_progress_counts_active_blocks_and_preserves_solution(tmp_path):
 
 
 @pytest.mark.skipif(os.environ.get('GEOGARMODEL_GPU_TESTS')!='1',reason='Opt-in CUDA hardware test')
+@pytest.mark.parametrize('magnetic',[False,True])
+def test_cuda_prism_block_matches_numpy_at_faces_and_corners(magnetic):
+    from geogarmodel.inversion import prism_kernel
+    from geogarmodel.prism_cuda import prism_block
+
+    origin = np.array([18_000_000., 7_000_000., 0.])
+    cells = np.array([[0, 0, 100, 30, 80, 470], [30, 0, 216, 60, 80, 470]])
+    cells = cells + np.tile(origin, 2)
+    points = origin + [[0, 0, 100], [30, 40, 100], [15, 40, 99.999],
+                       [30, 0, 0], [9000, 4000, -20]]
+    expected = prism_kernel(points, cells, magnetic)
+    actual = prism_block(points, cells, magnetic).get()
+    np.testing.assert_allclose(actual, expected, atol=1e-8, rtol=1e-8)
+
+
+@pytest.mark.skipif(os.environ.get('GEOGARMODEL_GPU_TESTS')!='1',reason='Opt-in CUDA hardware test')
 @pytest.mark.parametrize('mode',['gravity','induced','vector'])
 def test_gpu_cpu_equivalence(mode):
     from geogarmodel.inversion import host

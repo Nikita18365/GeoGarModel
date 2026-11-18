@@ -184,7 +184,11 @@ class FieldOperator(MisfitOperator):
                 key = o,c
                 a = self.cache.get(key)
                 if a is None:
-                    a = prism_kernel(self.observations[os], self.cells[cs], self.mode != 'gravity', self.xp)
+                    if self.xp is np:
+                        a = prism_kernel(self.observations[os],self.cells[cs],self.mode!='gravity')
+                    else:
+                        from .prism_cuda import prism_block
+                        a = prism_block(self.observations[os],self.cells[cs],self.mode!='gravity')
                     if self.cache_bytes+a.nbytes <= self.cache_limit:
                         self.cache[key] = a
                         self.cache_bytes += a.nbytes
