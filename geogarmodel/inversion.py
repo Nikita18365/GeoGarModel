@@ -118,7 +118,25 @@ def prism_kernel(observations, cells, magnetic=False, xp=np):
     return out * (100. if magnetic else 6.67430e-3)
 
 
-class FieldOperator:
+class MisfitOperator:
+    """Keep the field and adjoint input for an accepted line-search evaluation."""
+
+    def misfit(self, model, data, sigma, fit_offset=False):
+        xp = self.xp
+        predicted, unit = self.field_and_direction(model)
+        self.last_offset = float(xp.sum((data-predicted)/sigma**2) /
+                                 xp.sum(xp.broadcast_to(1/sigma**2,data.shape))) if fit_offset else 0.
+        predicted = predicted+self.last_offset
+        residual = predicted-data
+        weighted = residual/(sigma*sigma*len(data))
+        return .5*xp.mean((residual/sigma)**2), predicted, weighted, unit
+
+    def value_gradient(self, model, data, sigma, fit_offset=False):
+        value, predicted, weighted, unit = self.misfit(model,data,sigma,fit_offset)
+        return value, self.data_gradient(weighted,unit), predicted
+
+
+class FieldOperator(MisfitOperator):
     def __init__(self, mesh, observations, mode='gravity', *, device='cpu', gpu_id=0,
                  field_strength=50000., inclination=60., declination=0., cache_mb=128,
                  cancel_event=None, memory_policy='manual'):
@@ -194,21 +212,19 @@ class FieldOperator:
             return field
         return self.xp.linalg.norm(field+self.field_strength*self.f, axis=1)-self.field_strength
 
-    def value_gradient(self, model, data, sigma, fit_offset=False):
+    def field_and_direction(self, model):
         xp = self.xp
         field = self.field(model)
         if self.mode == 'gravity':
-            predicted, unit = field, None
-        else:
-            total = field+self.field_strength*self.f
-            norm = xp.linalg.norm(total, axis=1)
-            if bool(xp.any(norm < 1e-8)):
-                raise ValueError('Суммарное магнитное поле близко к нулю; измените ограничения.')
-            predicted, unit = norm-self.field_strength, total/norm[:,None]
-        self.last_offset = float(xp.sum((data-predicted)/sigma**2)/xp.sum(1/sigma**2)) if fit_offset else 0.
-        predicted = predicted+self.last_offset
-        residual = predicted-data
-        weighted = residual/(sigma*sigma*len(data))
+            return field, None
+        total = field+self.field_strength*self.f
+        norm = xp.linalg.norm(total, axis=1)
+        if bool(xp.any(norm < 1e-8)):
+            raise ValueError('Суммарное магнитное поле близко к нулю; измените ограничения.')
+        return norm-self.field_strength, total/norm[:,None]
+
+    def data_gradient(self, weighted, unit):
+        xp = self.xp
         gradient = xp.zeros(self.parameter_shape)
         for os,cs,a in self.blocks('gradient'):
             if self.mode == 'gravity':
@@ -219,17 +235,18 @@ class FieldOperator:
                               a[...,3].T@v[:,0]+a[...,1].T@v[:,1]+a[...,5].T@v[:,2],
                               a[...,4].T@v[:,0]+a[...,5].T@v[:,1]+a[...,2].T@v[:,2]),axis=1)
                 gradient[cs] += g if self.mode == 'vector' else self.h*(g@self.f)
-        return .5*xp.mean((residual/sigma)**2), gradient, predicted
+        return gradient
 
 
-def regularization(model, mesh, damping, smoothness, xp=np):
+def regularization(model, mesh, damping, smoothness, xp=np, *, need_value=True, need_gradient=True):
     """Mean square smallness and first differences scaled by cell aspect ratio."""
     active = xp.asarray(mesh.active).reshape((mesh.size,)+(() if model.ndim==1 else (1,)))
     count = int(mesh.active.sum())*(1 if model.ndim==1 else 3)
-    grad = damping*model*active/max(count,1)
-    value = .5*damping*xp.sum(model*model*active)/max(count,1)
+    grad = damping*model*active/max(count,1) if need_gradient else None
+    value = .5*damping*xp.sum(model*model*active)/max(count,1) if need_value else None
     shape = mesh.shape+(() if model.ndim == 1 else (3,))
-    cube, g = model.reshape(shape), grad.reshape(shape)
+    cube = model.reshape(shape)
+    g = grad.reshape(shape) if need_gradient else None
     axes = (mesh.east, mesh.north, mesh.depth)
     widths = [np.min(np.diff(a)) for a in axes]
     mask = xp.asarray(mesh.active.reshape(mesh.shape))
@@ -244,9 +261,11 @@ def regularization(model, mesh, damping, smoothness, xp=np):
         dims = [1]*len(shape); dims[axis] = len(distances)
         valid = valid if model.ndim==1 else valid[...,None]
         coefficient = smoothness*(min(widths)/xp.asarray(distances).reshape(dims))**2*valid/max(int(xp.sum(valid))*(1 if model.ndim==1 else 3),1)
-        value += .5*xp.sum(coefficient*d*d)
-        g[tuple(lo)] -= coefficient*d
-        g[tuple(hi)] += coefficient*d
+        if need_value:
+            value += .5*xp.sum(coefficient*d*d)
+        if need_gradient:
+            g[tuple(lo)] -= coefficient*d
+            g[tuple(hi)] += coefficient*d
     return value, grad
 
 
@@ -319,17 +338,17 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
     history,status = [],'iteration_limit'
     step = 1.
     def objective(v):
-        val,grad,pred = operator.value_gradient(v,data,sigma,fit_offset)
+        val,pred,weighted,unit = operator.misfit(v,data,sigma,fit_offset)
         timer.begin_stage('regularization',0)
-        rv,rg = regularization(v,mesh,damping,smoothness,xp)
-        return val+rv,grad+rg,pred,val,rv
+        rv,_ = regularization(v,mesh,damping,smoothness,xp,need_gradient=False)
+        return val+rv,pred,val,rv,weighted,unit
     check_cancel(cancel_event)
     previous_monitor=operator.monitor
     operator.monitor=timer if work_progress else None
     best = None
     stale = 0
     try:
-        value,gradient,pred,dv,rv = objective(m)
+        value,pred,dv,rv,weighted,unit = objective(m)
         offset = operator.last_offset
         for iteration in range(iterations+1):
             row = dict(iteration=iteration,objective=float(value),data_objective=float(dv),
@@ -356,6 +375,11 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
             if iteration==iterations:
                 break
             timer.begin_iteration(iteration+1)
+            gradient = operator.data_gradient(weighted,unit)
+            timer.begin_stage('regularization',0)
+            _,rg = regularization(m,mesh,damping,smoothness,xp,need_value=False)
+            gradient += rg
+            del rg
             direction_ = -weights*gradient
             if iteration==0:
                 step = step_scale*(upper-lower)*.05/max(float(xp.max(xp.abs(direction_))),1e-30)
@@ -371,7 +395,7 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
                 trial=objective(candidate)
                 if float(trial[0]) <= float(value+1e-4*xp.sum(gradient*delta)):
                     m=candidate
-                    value,gradient,pred,dv,rv=trial
+                    value,pred,dv,rv,weighted,unit=trial
                     offset=operator.last_offset
                     accepted=True; step*=1.5
                     break

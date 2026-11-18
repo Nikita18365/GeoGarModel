@@ -114,20 +114,35 @@ def test_cancel_returns_consistent_best_completed_model(mode,tmp_path):
 
 def test_cancel_during_trial_discards_partial_work(monkeypatch):
     event=Event(); op=FieldOperator(mesh(),observations(),cancel_event=event)
-    original=op.value_gradient
+    original=op.misfit
     calls=0
     def interrupted(*args):
         nonlocal calls
         calls+=1
         if calls==2: event.set()
         return original(*args)
-    monkeypatch.setattr(op,'value_gradient',interrupted)
+    monkeypatch.setattr(op,'misfit',interrupted)
     result=invert(op,np.ones(49),target_rms=0,cancel_event=event)
     assert result.status=='cancelled'
     assert result.settings['selected_iteration']==0
     assert len(result.history)==1
     np.testing.assert_array_equal(result.model,0)
     np.testing.assert_array_equal(result.predicted,0)
+
+
+def test_line_search_only_differentiates_models_used_for_a_step(monkeypatch):
+    from collections import Counter
+    op=FieldOperator(mesh(),observations())
+    counts=Counter()
+    blocks=op.blocks
+    def counted(stage):
+        counts[stage]+=1
+        yield from blocks(stage)
+    monkeypatch.setattr(op,'blocks',counted)
+    result=invert(op,np.full(49,.001),iterations=3,step_scale=2,target_rms=0)
+    trials=sum(row['trial_evaluations'] for row in result.history)
+    assert trials>3 and result.history[-1]['iteration']==3
+    assert counts=={'field':1+trials,'gradient':3}
 
 
 def test_cancel_returns_earlier_best_when_regularization_increases_misfit():

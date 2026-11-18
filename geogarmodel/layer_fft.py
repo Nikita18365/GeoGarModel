@@ -3,7 +3,7 @@ import numpy as np
 from scipy.fft import next_fast_len
 
 from .compute import check_cancel
-from .inversion import backend, prism_kernel
+from .inversion import MisfitOperator, backend, prism_kernel
 from .inversion_resources import available_memory
 
 
@@ -27,7 +27,7 @@ def observation_edges(values):
     return axis[0], step, int(indices[-1])+1
 
 
-class LayerFFT:
+class LayerFFT(MisfitOperator):
     mode = 'gravity'
     field_strength = 0.
     f = np.zeros(3)
@@ -157,11 +157,8 @@ class LayerFFT:
 
     predict = field
 
-    def value_gradient(self, model, data, sigma, fit_offset=False):
-        xp = self.xp
-        predicted = self.field(model)
-        self.last_offset = float(xp.sum((data-predicted)/sigma**2)/xp.sum(xp.broadcast_to(1/sigma**2,data.shape))) if fit_offset else 0.
-        predicted += self.last_offset
-        residual = (predicted-data)/sigma
-        gradient = self.apply(residual/(len(data)*sigma),True)
-        return .5*xp.mean(residual**2),gradient,predicted
+    def field_and_direction(self, model):
+        return self.field(model), None
+
+    def data_gradient(self, weighted, unit):
+        return self.apply(weighted,True)
