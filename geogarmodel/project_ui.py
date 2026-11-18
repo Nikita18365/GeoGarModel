@@ -182,6 +182,7 @@ class ProjectWorkspace:
                     for key,model in data['voxels'].items(): model.source_path=state['initial_sources'][key]['path']; model.source_array=state['initial_sources'][key]['array']
                 t.initial_panel.undo_model=data['voxels'].get('undo'); t.initial_panel.source.setCurrentIndex(state['initial_source'])
                 apply_controls(t,state['inv_controls'])
+                t.update_fft_inputs()
                 if state['inversion_result'] is not None:
                     result=data['models'][state['inversion_result']]; t.finished_result(result,offer_export=False)
                     t.curve.setData([r['iteration'] for r in result.history],[r['rmse'] for r in result.history])

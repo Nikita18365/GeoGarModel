@@ -305,7 +305,11 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
     m = xp.clip(m,lower,upper)
     active = xp.asarray(mesh.active)
     m[~active] = 0
-    z = mesh.centers()[:,2]-np.max(operator.observations[:,2])
+    if mesh.bounds is None:
+        z = np.tile((mesh.depth[1:]+mesh.depth[:-1])/2, mesh.size//mesh.shape[2])
+    else:
+        z = (mesh.bounds[:,2]+mesh.bounds[:,5])/2
+    z -= np.max(operator.observations[:,2])
     zmin=z[mesh.active].min()
     weights = xp.asarray((np.maximum(z,zmin)/zmin)**depth_index)
     weights[~active]=0
