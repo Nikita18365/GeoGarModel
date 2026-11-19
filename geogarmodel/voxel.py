@@ -200,6 +200,10 @@ def read_geosoft(path,mode='gravity',crs=''):
 
 def load_voxel(path,mode='gravity',crs='',**kwargs):
     ext=Path(path).suffix.lower()
+    if ext=='.ggmodel':
+        from .model_archive import ModelArchive
+        r=ModelArchive(path).load()
+        return VoxelModel(r.mesh,r.model,r.settings['mode'],r.settings.get('crs',''),[dict(operation='previous result')])
     if ext=='.npz':
         with np.load(path,allow_pickle=False) as s:
             if 'voxel_metadata' in s:

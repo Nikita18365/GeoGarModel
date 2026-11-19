@@ -315,8 +315,9 @@ class InversionResult:
     settings: dict
     status: str
 
-    def save(self, path):
-        np.savez_compressed(path, east=self.mesh.east, north=self.mesh.north, depth=self.mesh.depth,
+    def save(self, path, compressed=True):
+        writer=np.savez_compressed if compressed else np.savez
+        writer(path, east=self.mesh.east, north=self.mesh.north, depth=self.mesh.depth,
                             active=self.mesh.active, bounds=np.empty(0) if self.mesh.bounds is None else self.mesh.bounds,
                             model=self.model, observations=self.observations, observed=self.observed,
                             predicted=self.predicted, metadata=json.dumps(dict(settings=self.settings,

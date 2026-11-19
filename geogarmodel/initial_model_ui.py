@@ -57,7 +57,7 @@ class InitialModelPanel(QGroupBox):
         self.tab.status.setText('Начальная модель готова. Проверьте единицы, диапазон свойств и границы ограничения.')
 
     def ask_load(self,mode,title='Начальная модель'):
-        path,_=QFileDialog.getOpenFileName(self,title,'','Voxel (*.geosoft_voxel *.msh *.mesh *.npz *.vtr *.vtk *.vti *.csv *.xlsx *.txt);;Все файлы (*)')
+        path,_=QFileDialog.getOpenFileName(self,title,'','Voxel (*.geosoft_voxel *.msh *.mesh *.npz *.ggmodel *.vtr *.vtk *.vti *.csv *.xlsx *.txt);;Все файлы (*)')
         if not path: return None
         options={}; ext=Path(path).suffix.lower()
         if ext in ('.msh','.mesh'):
@@ -73,7 +73,7 @@ class InitialModelPanel(QGroupBox):
             array,ok=QInputDialog.getItem(self,'Свойство VTK','Выберите cell-массив (Z = Up; вектор East/North/Down):',names,0,False)
             if not ok: return None
             options['array']=array
-        elif ext not in ('.npz','.geosoft_voxel'):
+        elif ext not in ('.npz','.ggmodel','.geosoft_voxel'):
             vertical,ok=QInputDialog.getItem(self,'Вертикальная координата','Столбец Down (глубина) или Up (высота):',['Down','Up'],0,False)
             if not ok: return None
             options['vertical']=vertical
