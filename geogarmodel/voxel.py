@@ -27,8 +27,10 @@ class VoxelModel:
         if self.values.shape != shape:
             raise ValueError(f'Ожидались свойства {shape}, получено {self.values.shape}.')
         if not self.mesh.active.any(): raise ValueError('Нет активных ячеек в модели.')
-        if not np.isfinite(self.values[self.mesh.active]).all():
-            raise ValueError('Активные ячейки содержат NaN/Inf.')
+        for start in range(0,self.mesh.size,131072):
+            block=slice(start,start+131072)
+            if not np.isfinite(self.values[block][self.mesh.active[block]]).all():
+                raise ValueError('Активные ячейки содержат NaN/Inf.')
         self.values[~self.mesh.active] = 0
 
     def copy(self):
@@ -84,13 +86,12 @@ def extend_density_model(model, east, north, padding, initial_density):
 
 
 def _numbers(path):
-    text = Path(path).read_text(encoding='utf-8-sig')
-    for line in text.splitlines():
-        for token in line.split('!')[0].split('#')[0].split():
-            if '*' in token:
-                n,v = token.split('*'); yield from [float(v)]*int(n)
-            else:
-                yield float(token.replace('D','E').replace('d','e'))
+    from itertools import repeat
+    with Path(path).open(encoding='utf-8-sig') as stream:
+        for line in stream:
+            for token in line.partition('!')[0].partition('#')[0].split():
+                count,value = token.split('*') if '*' in token else (1,token)
+                yield from repeat(float(value.replace('D','E').replace('d','e')),int(count))
 
 
 def read_ubc(mesh_path,model_path,mode='gravity',dummy=None,crs=''):
@@ -103,14 +104,14 @@ def read_ubc(mesh_path,model_path,mode='gravity',dummy=None,crs=''):
     nx,ny,nz = counts; widths = np.split(a[6:],[nx,nx+ny])
     if any(np.any(w<=0) for w in widths): raise ValueError('Размеры UBC ячеек должны быть >0.')
     mesh = Mesh(a[3]+np.r_[0,np.cumsum(widths[0])],a[4]+np.r_[0,np.cumsum(widths[1])],-a[5]+np.r_[0,np.cumsum(widths[2])])
-    v = np.asarray(list(_numbers(model_path)))
+    v = np.fromiter(_numbers(model_path),dtype=float)
     components = 3 if mode=='vector' else 1
     if v.size!=mesh.size*components: raise ValueError('UBC model: число свойств не соответствует mesh.')
     cube = v.reshape((ny,nx,nz)+(() if components==1 else (3,))).swapaxes(0,1)
     v = cube.reshape((mesh.size,)+(() if components==1 else (3,)))
     valid = np.isfinite(v) & ((v != dummy) if dummy is not None else True)
     mesh.active = valid if components==1 else valid.all(axis=1)
-    return VoxelModel(mesh,np.where(np.isfinite(v),v,0),mode,crs,[dict(operation='UBC import',source=Path(model_path).name,dummy=dummy)])
+    return VoxelModel(mesh,v,mode,crs,[dict(operation='UBC import',source=Path(model_path).name,dummy=dummy)])
 
 
 def read_centers(path,mode='gravity',vertical='Down',crs=''):

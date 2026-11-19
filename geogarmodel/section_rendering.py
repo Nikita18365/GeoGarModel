@@ -1,7 +1,7 @@
 """Bounded, mask-aware section sampling in property space for display only."""
 import numpy as np
 from scipy.ndimage import map_coordinates
-from .model_slices import property_values
+
 
 
 def sample_section(result,axis,coordinate,width=768,height=768,smooth=True,component='amplitude'):
@@ -15,8 +15,12 @@ def sample_section(result,axis,coordinate,width=768,height=768,smooth=True,compo
         raise ValueError('Координата сечения вне модели.')
     free=[i for i in range(3) if i!=axis]; u,v=[axes[i] for i in free]
     index=min(np.searchsorted(axes[axis],coordinate,side='right')-1,mesh.shape[axis]-1)
-    cube=property_values(result,component).reshape(mesh.shape)
-    layer=np.take(cube,index,axis=axis).T
+    key=[slice(None)]*3
+    key[axis]=index
+    plane=result.model.reshape(mesh.shape+result.model.shape[1:])[tuple(key)]
+    if result.model.ndim==2:
+        plane=np.linalg.norm(plane,axis=-1) if component=='amplitude' else plane[...,{'East':0,'North':1,'Down':2}[component]]
+    layer=plane.T
     valid=np.take(mesh.active.reshape(mesh.shape),index,axis=axis).T.copy()
     cells=None
     if mesh.bounds is not None:

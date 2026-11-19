@@ -32,6 +32,22 @@ def vtk_grid(result, component='amplitude'):
     return grid
 
 
+def display_geometry(result, component):
+    """Build a bounded display representation while keeping exact data for exports and sections."""
+    if result.mesh.size <= 250000:
+        return vtk_grid(result,component)
+    from dataclasses import replace
+    from .result_preview import preview_volume
+    from .inversion import Mesh
+    source=result
+    if result.model.ndim==2 and component!='amplitude':
+        source=replace(result,model=result.model[:,{'East':0,'North':1,'Down':2}[component]])
+    axes,values=preview_volume(source,limit=40)
+    mask=np.isfinite(values.ravel())
+    overview=replace(result,mesh=Mesh(*axes,mask),model=np.nan_to_num(values.ravel()))
+    return vtk_grid(overview)
+
+
 class ModelView(QWidget):
     state_changed=pyqtSignal()
     def __init__(self,parent=None):
@@ -444,9 +460,11 @@ class ModelView(QWidget):
         # Transform display geometry only, so slices and clip widgets share its coordinates.
         # Axes below retain the unscaled physical coordinate ranges.
         scale=np.array([widget.value() for widget in self.axis_scales])
-        geometry_key=(id(result),self.component.currentText(),tuple(scale))
+        overview=result.mesh.size>250000 and not self.full_resolution.isChecked()
+        geometry_key=(id(result),self.component.currentText(),tuple(scale),overview)
         if not reuse_geometry or geometry_key!=self._geometry_key:
-            grid=vtk_grid(result,self.component.currentText()); grid.translate(-origin,inplace=True)
+            builder=display_geometry if overview else vtk_grid
+            grid=builder(result,self.component.currentText()); grid.translate(-origin,inplace=True)
             if grid.__class__.__name__=='UnstructuredGrid': grid=grid.clean(produce_merge_map=False)
             self._physical_bounds=np.array(grid.bounds); grid.scale(scale,inplace=True)
             self._geometry=grid; self._geometry_key=geometry_key; self._lod_cache_key=None
@@ -475,11 +493,13 @@ class ModelView(QWidget):
             grid=grid.clip_box(bounds,invert=False)
             if grid.n_cells==0: self.color_note.setText('В выбранной области нет активных ячеек.'); p.render(); return
         self.info.setText(f'{result.mesh.active.sum():,} активных ячеек · {unit} · Оси: исходные East / North, Z = Up (вверх). Локальное начало геометрии: E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м. Вращение: ЛКМ; перемещение: средняя кнопка; масштаб: колесо.')
+        if overview:
+            self.info.setText(self.info.text()+' · Обзор до 40 × 40 × 40. Карты срезов и экспорт используют исходную сетку.')
         self.component.setEnabled(result.model.ndim==2)
         values=grid['property']; amplitude=float(np.max(np.abs(values))); limit=max(amplitude,1e-15)
         self._compact_axes=self.width()<700 or self.height()<650
         font=min(self.axis_font.value(),11) if self._compact_axes else self.axis_font.value()
-        cmap,norm,clim=self.colors_for(result)
+        cmap,norm,clim=self.colors_for(result,self._geometry['property'] if result.mesh.size>250000 else None)
         from matplotlib.colors import ListedColormap
         cmap=ListedColormap(cmap(norm(np.linspace(clim[0],clim[1],1024))))
         if self.color_range.currentIndex()!=2:
@@ -564,7 +584,7 @@ class ModelView(QWidget):
         from .section_rendering import sample_section
         # Scalar interpolation precedes palette mapping; the GPU then moves a
         # four-vertex textured plane rather than a dense triangulated section.
-        scalar_cmap,scalar_norm,_=self.colors_for(self.result)
+        scalar_cmap,scalar_norm,_=self.colors_for(self.result,self._geometry['property'])
         actor=None
         for axis,enabled in enumerate(self.slice_enabled):
             if not enabled.isChecked(): continue

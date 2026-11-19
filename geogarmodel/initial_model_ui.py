@@ -34,13 +34,13 @@ class InitialModelPanel(QGroupBox):
         buttons=QDialogButtonBox(); buttons.addButton('Готово',QDialogButtonBox.AcceptRole); buttons.accepted.connect(dialog.accept); layout.addWidget(buttons)
         dialog.exec_()
 
-    def current(self):
+    def current(self,copy=True):
         if self.source.currentIndex()==1:
             if self.model is None: raise ValueError('Сначала загрузите модель или выберите константу.')
             if self.model.mode!=self.tab.mode.currentData(): raise ValueError('Тип начальной модели отличается от выбранной физики. Загрузите нужное свойство.')
             crs=self.tab.crs.currentText().split('|')[0].strip()
             if self.model.crs and self.model.crs!=crs: raise ValueError('CRS модели и наблюдений различаются; автоматического перепроецирования нет.')
-            return self.model.copy()
+            return self.model.copy() if copy else self.model
         mesh=self.tab.new_mesh()
         return VoxelModel(mesh,np.full((mesh.size,3) if self.tab.mode.currentData()=='vector' else (mesh.size,),self.tab.initial.value()),self.tab.mode.currentData(),self.tab.crs.currentText().split('|')[0].strip())
 
@@ -69,7 +69,8 @@ class InitialModelPanel(QGroupBox):
             options['dummy']=float(dummy) if dummy.strip() else None
         elif ext in ('.vtk','.vtr','.vti'):
             import pyvista as pv
-            names=list(pv.read(path).cell_data.keys())
+            reader=pv.get_reader(path)
+            names=list(reader.cell_array_names) if hasattr(reader,'cell_array_names') else list(reader.read().cell_data.keys())
             array,ok=QInputDialog.getItem(self,'Свойство VTK','Выберите cell-массив (Z = Up; вектор East/North/Down):',names,0,False)
             if not ok: return None
             options['array']=array
@@ -115,9 +116,9 @@ class InitialModelPanel(QGroupBox):
         self.assign(VoxelModel(r.mesh,r.model,r.settings['mode'],r.settings.get('crs',''),[dict(operation='previous inversion')]))
         self.preview()
 
-    def preview(self): self.tab.preview_initial(self.tab.prepared_model())
+    def preview(self): self.tab.preview_initial(self.tab.prepared_model(copy=False))
     def preview3d(self):
-        self.tab.scene.render(self.tab.prepared_model().result()); self.tab.tabs.setCurrentIndex(0)
+        self.tab.scene.render(self.tab.prepared_model(copy=False).result()); self.tab.tabs.setCurrentIndex(0)
 
     def operation(self):
         model=self.current()

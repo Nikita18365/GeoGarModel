@@ -440,13 +440,21 @@ class InversionTab(QWidget):
 
     def preview_initial(self,model):
         self.figure.clear(); mesh=model.mesh
-        values=np.linalg.norm(model.values,axis=1) if model.mode=='vector' else model.values.copy()
-        values=values.copy(); values[~mesh.active]=np.nan; cube=values.reshape(mesh.shape)
-        ix,iy,iz=[n//2 for n in mesh.shape]
+        cube=model.values.reshape(mesh.shape+model.values.shape[1:])
+        active=mesh.active.reshape(mesh.shape)
+        def section(key):
+            plane=cube[key]
+            if model.mode=='vector': plane=np.linalg.norm(plane,axis=-1)
+            return np.where(active[key],plane,np.nan).T
+        edges=[np.linspace(0,n,min(n,512)+1,dtype=int) for n in mesh.shape]
+        x,y=np.ix_(edges[0][:-1],edges[1][:-1])
+        _,z=np.ix_(edges[0][:-1],edges[2][:-1])
+        horizontal=section((x,y,mesh.shape[2]//2))
+        vertical=section((x,mesh.shape[1]//2,z))
         unit='g/cm³' if model.mode=='gravity' else ('SI' if model.mode=='induced' else 'A/m')
         origin=mesh.east[0],mesh.north[0]
-        ax=self.figure.add_subplot(131); p=ax.pcolormesh(mesh.east-origin[0],mesh.north-origin[1],cube[:,:,iz].T,shading='flat'); self.figure.colorbar(p,ax=ax,label=unit); ax.set(xlabel='East − E₀ (m)',ylabel='North − N₀ (m)',title='Начальная модель · горизонталь')
-        ax=self.figure.add_subplot(132); p=ax.pcolormesh(mesh.east-origin[0],mesh.depth,cube[:,iy,:].T,shading='flat'); self.figure.colorbar(p,ax=ax,label=unit); ax.invert_yaxis(); ax.set(xlabel='East − E₀ (m)',ylabel='Down (m)',title='Начальная модель · срез')
+        ax=self.figure.add_subplot(131); p=ax.pcolormesh(mesh.east[edges[0]]-origin[0],mesh.north[edges[1]]-origin[1],horizontal,shading='flat'); self.figure.colorbar(p,ax=ax,label=unit); ax.set(xlabel='East − E₀ (m)',ylabel='North − N₀ (m)',title='Начальная модель · горизонталь')
+        ax=self.figure.add_subplot(132); p=ax.pcolormesh(mesh.east[edges[0]]-origin[0],mesh.depth[edges[2]],vertical,shading='flat'); self.figure.colorbar(p,ax=ax,label=unit); ax.invert_yaxis(); ax.set(xlabel='East − E₀ (m)',ylabel='Down (m)',title='Начальная модель · срез')
         ax=self.figure.add_subplot(133)
         if self.table is not None:
             cols=[pd.to_numeric(self.table[c.currentText()],errors='raise').to_numpy(float) for c in (self.east,self.north,self.value)]
@@ -480,8 +488,8 @@ class InversionTab(QWidget):
             axes.append(np.linspace(values.min()-margin,values.max()+margin,n+1))
         return Mesh(*axes,np.linspace(self.top.value(),self.bottom.value(),self.nz.value()+1))
 
-    def prepared_model(self):
-        model = self.initial_panel.current()
+    def prepared_model(self,copy=True):
+        model = self.initial_panel.current(copy=copy)
         if self.is_fft() and self.initial_panel.source.currentIndex()==1 and self.extend_fft.isChecked():
             if self.table is None:
                 raise ValueError('Загрузите наблюдения, чтобы определить границы расширения.')
