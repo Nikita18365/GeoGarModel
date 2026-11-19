@@ -5,6 +5,27 @@ from geogarmodel.voxel import VoxelModel
 from geogarmodel.voxel_surface import exterior
 
 
+
+@pytest.mark.parametrize('axis',[0,1,2])
+def test_interactive_section_excludes_deeper_roofs_and_terraces(axis):
+    pytest.importorskip('pyvista')
+    from geogarmodel.voxel_surface import section_faces
+    mesh=Mesh(*[np.arange(5.) for _ in range(3)])
+    columns=np.moveaxis(mesh.active.reshape(mesh.shape),axis,-1)
+    columns[:2,:,:2]=False
+    model=VoxelModel(mesh,np.full(mesh.size,0.15)).result()
+    walls=exterior(model,'amplitude',0,prism_shell=True,section_axis=axis)
+    points=walls.points[walls.regular_faces]*[1,1,-1]
+    for dim in range(3):
+        flat=np.ptp(points[:,:,dim],axis=1)==0
+        positions=np.unique(points[flat,0,dim])
+        np.testing.assert_array_equal(positions,[4.] if dim==axis else [0.,4.])
+    for depth,expected in [(0.5,8),(2.5,16)]:
+        section=section_faces(model,'amplitude',axis,depth,np.array([[0.,4.]]*3))
+        assert section.n_cells==expected
+        np.testing.assert_array_equal(section['property'],np.full(expected,0.15))
+
+
 def test_full_surface_uses_every_cell_property_and_threshold():
     pytest.importorskip('pyvista')
     mesh=Mesh(np.arange(6.),np.arange(5.),np.arange(4.))

@@ -168,7 +168,7 @@ def section_faces(result, component, axis, coordinate, limits, cutoff=0.):
     return grid.clean(tolerance=0)
 
 
-def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_shell=False,cut_axis=2,first_layer=0,limits=None):
+def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_shell=False,cut_axis=2,first_layer=0,limits=None,section_axis=None):
     import pyvista as pv
     mesh=result.mesh
     values=result.model
@@ -211,6 +211,11 @@ def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_sh
                 s=slice(start,start+131072)
                 b=mesh.bounds[s]
                 active[s]&=((b[:,3:]>limits[:,0]) & (b[:,:3]<limits[:,1])).all(axis=1)
+    if section_axis is not None:
+        # In a cut view only the section supplies the front face. Keep the
+        # lateral outline (including through-holes), not relief inside it.
+        lateral=[i for i in range(3) if i!=section_axis]
+        footprint=np.pad(active.reshape(shape).any(axis=section_axis),1)
     strides=(shape[1]*shape[2],shape[2],1)
     axes=(mesh.east,mesh.north,-mesh.depth)
     nodes=tuple(len(a) for a in axes)
@@ -223,6 +228,8 @@ def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_sh
         ijk=np.unravel_index(ids,shape)
         for axis in range(3):
             for side in (0,1):
+                if axis==section_axis and side==0:
+                    continue
                 neighbour=ids+strides[axis]*(2*side-1)
                 inside=(ijk[axis]<shape[axis]-1) if side else (ijk[axis]>0)
                 exposed=~inside
@@ -237,6 +244,11 @@ def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_sh
                     for j in ((axis+1)%3,(axis+2)%3):
                         covered&=(b[:,j]<=a[:,j])&(b[:,j+3]>=a[:,j+3])
                     exposed[paired]=~covered
+                if section_axis is not None and axis!=section_axis and exposed.any():
+                    candidates=np.flatnonzero(exposed)
+                    xy=[ijk[i][candidates]+1 for i in lateral]
+                    xy[lateral.index(axis)]+=2*side-1
+                    exposed[candidates]=~footprint[tuple(xy)]
                 if not exposed.any(): continue
                 offsets=np.zeros((4,3),int)
                 offsets[:,axis]=side
