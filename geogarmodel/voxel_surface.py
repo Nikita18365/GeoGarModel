@@ -35,7 +35,30 @@ def terrain_nodes(active,shape,depth):
     return first,last,np.divide(total,count,out=total,where=count>0),floor,depth[top[occupied].max()]
 
 
-def exterior(result,component,percent,smooth_top=False,relief_gain=1.):
+def upper_prism_limits(active, shape, percentage):
+    """Exclusive depth index of each column's last detailed active cell."""
+    if not np.isfinite(percentage) or not 0 <= percentage <= 100:
+        raise ValueError('Доля верхних призм должна быть от 0 до 100 %.')
+    columns = active.reshape(-1, shape[2])
+    limits = np.zeros(len(columns), dtype=np.intp)
+    if percentage == 0:
+        return limits
+    if percentage == 100:
+        limits.fill(shape[2])
+        return limits
+    # Bound temporary rank arrays even for very large grids.
+    batch = max(1, 131072 // shape[2])
+    for start in range(0, len(columns), batch):
+        block = columns[start:start + batch]
+        count = block.sum(axis=1)
+        wanted = np.ceil(count * percentage / 100).astype(np.intp)
+        ranks = np.cumsum(block, axis=1, dtype=np.intp)
+        last = np.argmax(ranks >= wanted[:, None], axis=1)
+        limits[start:start + len(block)] = np.where(count, last + 1, 0)
+    return limits
+
+
+def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_shell=False,cut_axis=2,first_layer=0):
     import pyvista as pv
     mesh=result.mesh
     values=result.model
@@ -58,10 +81,17 @@ def exterior(result,component,percent,smooth_top=False,relief_gain=1.):
             s=slice(begin,begin+131072)
             active[s]&=np.abs(values[s])>=limit
     shape=mesh.shape
+    if prism_shell and first_layer:
+        if not percent:
+            active=active.copy()
+        removed=[slice(None)]*3
+        removed[cut_axis]=slice(0,first_layer)
+        active.reshape(shape)[tuple(removed)]=False
     strides=(shape[1]*shape[2],shape[2],1)
     axes=(mesh.east,mesh.north,-mesh.depth)
     nodes=tuple(len(a) for a in axes)
-    terrain=terrain_nodes(active,shape,mesh.depth) if smooth_top and mesh.bounds is None else None
+    terrain=terrain_nodes(active,shape,mesh.depth) if smooth_top and not prism_shell and mesh.bounds is None else None
+    source_cells=[]
     indices=[]; properties=[]; vertices=[]
     triangles=[]; triangle_values=[]
     for start in range(0,mesh.size,131072):
@@ -115,6 +145,10 @@ def exterior(result,component,percent,smooth_top=False,relief_gain=1.):
                     points[:,:,2]*=-1
                     vertices.append(points.reshape(-1,3))
                 properties.append(values[cells])
+                if prism_shell:
+                    source_cells.append(cells.astype(np.int32 if mesh.size <= np.iinfo(np.int32).max else np.int64, copy=False))
+    if not properties:
+        return pv.PolyData()
     if vertices:
         points=np.concatenate(vertices)
         faces=np.arange(len(points)).reshape(-1,4)
@@ -153,5 +187,7 @@ def exterior(result,component,percent,smooth_top=False,relief_gain=1.):
         grid=pv.PolyData(points,np.concatenate((quads,tri_cells)))
     else:
         grid=pv.PolyData.from_regular_faces(points,faces)
+    if prism_shell:
+        grid.cell_data['voxel_id']=np.concatenate(source_cells)
     grid.cell_data['property']=np.concatenate(properties+triangle_values)
     return grid
