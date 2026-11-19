@@ -460,11 +460,19 @@ class ModelView(QWidget):
         # Transform display geometry only, so slices and clip widgets share its coordinates.
         # Axes below retain the unscaled physical coordinate ranges.
         scale=np.array([widget.value() for widget in self.axis_scales])
-        overview=result.mesh.size>250000 and not self.full_resolution.isChecked()
-        geometry_key=(id(result),self.component.currentText(),tuple(scale),overview)
+        shell=(result.mesh.size>250000 and self.kind.currentIndex()==0
+               and self.opacity.value()==1 and not self.clip_enabled.isChecked())
+        overview=result.mesh.size>250000 and not shell and not self.full_resolution.isChecked()
+        geometry_key=(id(result),self.component.currentText(),tuple(scale),overview,shell,
+                      self.threshold.value() if shell else None)
         if not reuse_geometry or geometry_key!=self._geometry_key:
-            builder=display_geometry if overview else vtk_grid
-            grid=builder(result,self.component.currentText()); grid.translate(-origin,inplace=True)
+            if shell:
+                from .voxel_surface import exterior
+                grid=exterior(result,self.component.currentText(),self.threshold.value())
+            else:
+                builder=display_geometry if overview else vtk_grid
+                grid=builder(result,self.component.currentText())
+            grid.translate(-origin,inplace=True)
             if grid.__class__.__name__=='UnstructuredGrid': grid=grid.clean(produce_merge_map=False)
             self._physical_bounds=np.array(grid.bounds); grid.scale(scale,inplace=True)
             self._geometry=grid; self._geometry_key=geometry_key; self._lod_cache_key=None
@@ -493,7 +501,9 @@ class ModelView(QWidget):
             grid=grid.clip_box(bounds,invert=False)
             if grid.n_cells==0: self.color_note.setText('В выбранной области нет активных ячеек.'); p.render(); return
         self.info.setText(f'{result.mesh.active.sum():,} активных ячеек · {unit} · Оси: исходные East / North, Z = Up (вверх). Локальное начало геометрии: E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м. Вращение: ЛКМ; перемещение: средняя кнопка; масштаб: колесо.')
-        if overview:
+        if shell:
+            self.info.setText(self.info.text()+' · Полное разрешение · наружные грани исходных ячеек.')
+        elif overview:
             self.info.setText(self.info.text()+' · Обзор до 40 × 40 × 40. Карты срезов и экспорт используют исходную сетку.')
         self.component.setEnabled(result.model.ndim==2)
         values=grid['property']; amplitude=float(np.max(np.abs(values))); limit=max(amplitude,1e-15)
@@ -509,13 +519,13 @@ class ModelView(QWidget):
             'n_labels':4,'fmt':'%.3g','position_x':.80,'position_y':.18,'width':.05,'height':.65,'vertical':True})
         kind=self.kind.currentIndex()
         if kind==0:
-            chosen=grid.extract_cells(np.flatnonzero(np.abs(values)>=amplitude*self.threshold.value()/100))
+            chosen=grid if shell else grid.extract_cells(np.flatnonzero(np.abs(values)>=amplitude*self.threshold.value()/100))
             if chosen.n_cells:
                 if self.smooth_colors.isChecked(): chosen=chosen.cell_data_to_point_data(pass_cell_data=True)
                 actor=p.add_mesh(chosen,show_edges=self.edges.isChecked(),edge_color='#333333',opacity=self.opacity.value(),interpolate_before_map=True,**options)
                 lod_options={k:v for k,v in options.items() if k!='scalar_bar_args'}
                 key=(self._geometry_key,self.threshold.value(),self.clip_enabled.isChecked(),tuple(w.value() for pair in self.clip_ranges for w in pair))
-                self.prepare_lod(chosen,actor,lod_options,key)
+                if not shell: self.prepare_lod(chosen,actor,lod_options,key)
         elif kind==1:
             if grid.__class__.__name__=='UnstructuredGrid':
                 p.add_mesh(grid,opacity=self.opacity.value(),**options)
