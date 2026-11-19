@@ -101,3 +101,37 @@ def test_lod_switching_cached_geometry_and_exact_slice_coordinates(qt_applicatio
         assert view.slice_coordinates[2].minimum()==0 and view.slice_coordinates[2].maximum()==600
         assert view.slice_coordinates[2].value()==0  # Always start at the top.
     finally: view.shutdown(); view.close()
+
+
+def test_prism_view_percentage_and_cut_round_trip(qt_application_lifetime):
+    pytest.importorskip('pyvistaqt')
+    from geogarmodel.inversion_view import ModelView
+    view=ModelView()
+    try:
+        r=result()
+        view.kind.setCurrentText('Верхние призмы и оболочка')
+        view.render(r)
+        assert view.prism_percent.value()==2
+        assert not view.prism_panel.isHidden()
+        geometry=view.display_grid
+        actors=view.plotter.renderer.actors
+        assert actors['upper-prisms'].prop.show_edges
+        assert not actors['lower-shell'].prop.show_edges
+        for percent in (0,100,12.5):
+            view.prism_percent.setValue(percent)
+            assert view.display_grid is geometry
+            actors=view.plotter.renderer.actors
+            assert ('upper-prisms' in actors)==(percent>0)
+            assert ('lower-shell' in actors)==(percent<100)
+        view.prism_layer.setValue(2)
+        assert view.display_grid.bounds[-1]==-100
+        saved=view.capture_state()
+        view.prism_axis.setCurrentText('X')
+        assert view.prism_layer.value()==1
+        view.prism_percent.setValue(0)
+        view.restore_state(saved)
+        assert view.prism_percent.value()==12.5
+        assert view.prism_axis.currentText()=='Z' and view.prism_layer.value()==2
+    finally:
+        view.shutdown()
+        view.close()

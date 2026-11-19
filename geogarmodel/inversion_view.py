@@ -56,7 +56,7 @@ class ModelView(QWidget):
         self.info=QLabel('Для интерактивного 3D нажмите «Открыть / обновить 3D». Требуется geogarmodel[volume].')
         self.info.setWordWrap(True); layout.addWidget(self.info)
         self.controls=QHBoxLayout(); layout.addLayout(self.controls)
-        self.kind=QComboBox(); self.kind.addItems(['Воксели','Объём','Изоповерхности','Срезы XYZ','Интерактивное отсечение'])
+        self.kind=QComboBox(); self.kind.addItems(['Воксели','Объём','Изоповерхности','Срезы XYZ','Интерактивное отсечение','Верхние призмы и оболочка'])
         self.component=QComboBox(); self.component.addItems(['amplitude','East','North','Down'])
         self.threshold=QDoubleSpinBox(); self.threshold.setRange(0,99); self.threshold.setValue(0); self.threshold.setSuffix('% от max |m|')
         for w in (self.kind,self.component,self.threshold): self.controls.addWidget(w)
@@ -234,6 +234,35 @@ class ModelView(QWidget):
         depth_row.addWidget(self.depth_value)
         self.depth_slider.sliderReleased.connect(self.depth_changed); self.depth_value.valueChanged.connect(lambda value:self.coordinate_changed(2,value))
         self._geometry_key=None; self._geometry=None; self._lod_actors=[]; self._active_actor=None; self._moving=False
+        self.prism_panel=QWidget()
+        prism_row=QHBoxLayout(self.prism_panel)
+        prism_row.setContentsMargins(0,0,0,0)
+        self.prism_percent=QDoubleSpinBox()
+        self.prism_percent.setRange(0,100)
+        self.prism_percent.setDecimals(2)
+        self.prism_percent.setSuffix(' %')
+        self.prism_percent.setValue(2)
+        self.prism_percent.setKeyboardTracking(False)
+        self.prism_percent.setToolTip('Доля активных ячеек от местной кровли каждого столбца. Округление вверх.')
+        prism_row.addWidget(QLabel('Верхние призмы'))
+        prism_row.addWidget(self.prism_percent)
+        self.prism_axis=QComboBox()
+        self.prism_axis.addItems(['X','Y','Z'])
+        self.prism_axis.setCurrentText('Z')
+        prism_row.addWidget(QLabel('Срез'))
+        prism_row.addWidget(self.prism_axis)
+        self.prism_layer=QSpinBox()
+        self.prism_layer.setRange(1,2147483647)
+        self.prism_layer.setKeyboardTracking(False)
+        self.prism_layer.setToolTip('1 — весь куб. Увеличьте номер, чтобы открыть следующий слой по выбранной оси. По Z отсчёт идёт от поверхности вниз.')
+        prism_row.addWidget(QLabel('Слой от'))
+        prism_row.addWidget(self.prism_layer)
+        prism_row.addStretch()
+        self.prism_percent.valueChanged.connect(self.refresh_if_ready)
+        self.prism_axis.currentIndexChanged.connect(self.change_prism_axis)
+        self.prism_layer.valueChanged.connect(self.refresh_if_ready)
+        layout.insertWidget(2,self.prism_panel)
+        self.prism_panel.hide()
         self._slice_dialogs=[]
         self._explicit_slices=set()
         for i,slider in enumerate(self.slices):
@@ -249,6 +278,11 @@ class ModelView(QWidget):
         super().resizeEvent(event)
         compact=self.width()<700 or self.height()<650
         if getattr(self,'plotter',None) is not None and compact!=getattr(self,'_compact_axes',None): self._resize_timer.start()
+
+    def change_prism_axis(self):
+        with QSignalBlocker(self.prism_layer):
+            self.prism_layer.setValue(1)
+        self.refresh_if_ready()
 
     def show_view_settings(self):
         self.view_settings.show(); self.view_settings.raise_(); self.view_settings.activateWindow()
@@ -390,7 +424,7 @@ class ModelView(QWidget):
     def state_controls(self):
         names=('kind','component','axis_unit','camera_view','palette','reverse_palette','color_range','color_min','color_max',
             'threshold','axis_font','opacity','color_distribution','discrete_colors','color_bins','zone_values','edges','outline',
-            'smooth_colors','terrain_top','relief_gain','full_resolution','high_quality_transparency','moving_detail','rest_detail','clip_enabled','clip_normal')
+            'smooth_colors','terrain_top','relief_gain','prism_percent','prism_axis','prism_layer','full_resolution','high_quality_transparency','moving_detail','rest_detail','clip_enabled','clip_normal')
         controls={name:getattr(self,name) for name in names}
         for name,widgets in [('scale',self.axis_scales),('slider',self.slices),('coordinate',self.slice_coordinates),('enabled',self.slice_enabled),('clip',[w for pair in self.clip_ranges for w in pair])]:
             controls.update({f'{name}_{i}':w for i,w in enumerate(widgets)})
@@ -419,7 +453,10 @@ class ModelView(QWidget):
                 if w.findText(value)<0 and name=='palette': w.addItem(preview(self.palette_library[value]['colors']),value)
                 w.setCurrentText(value)
             elif isinstance(w,QCheckBox): w.setChecked(value)
-            else: w.setValue(value)
+            else:
+                if name=='prism_layer':
+                    w.setMaximum(2147483647)
+                w.setValue(value)
         del blockers
         self._explicit_slices=set(range(3))
         if not refresh: return
@@ -450,6 +487,13 @@ class ModelView(QWidget):
             return
         self.color_note.clear()
         self.depth_panel.setVisible(self.kind.currentIndex()==3 or (self.kind.currentIndex()==4 and self.clip_normal.currentIndex()==2))
+        hybrid=self.kind.currentIndex()==5
+        self.prism_panel.setVisible(hybrid)
+        self.opacity.setEnabled(not hybrid)
+        self.clip_enabled.setEnabled(not hybrid)
+        cut_axis=self.prism_axis.currentIndex()
+        with QSignalBlocker(self.prism_layer):
+            self.prism_layer.setMaximum(result.mesh.shape[cut_axis])
         camera=p.camera_position if p.renderer.actors else None
         camera_scale=p.camera.parallel_scale
         p.clear(); p.clear_plane_widgets()
@@ -476,13 +520,22 @@ class ModelView(QWidget):
         gain=self.relief_gain.value() if terrain else 1.
         shell=(self.kind.currentIndex()==0 and self.opacity.value()==1 and not self.clip_enabled.isChecked()
                and (result.mesh.size>250000 or (terrain and not result.mesh.active.all())))
+        shell=shell or hybrid
         overview=result.mesh.size>250000 and not shell and not self.full_resolution.isChecked()
         geometry_key=(id(result),self.component.currentText(),tuple(scale),overview,shell,terrain,gain,
-                      self.threshold.value() if shell else None)
+                      self.threshold.value() if shell else None,
+                      (cut_axis,self.prism_layer.value()) if hybrid else None)
         if not reuse_geometry or geometry_key!=self._geometry_key:
             if shell:
                 from .voxel_surface import exterior
-                grid=exterior(result,self.component.currentText(),self.threshold.value(),smooth_top=terrain,relief_gain=gain)
+                grid=exterior(result,self.component.currentText(),self.threshold.value(),smooth_top=terrain,relief_gain=gain,
+                              prism_shell=hybrid,cut_axis=cut_axis,first_layer=self.prism_layer.value()-1)
+                if not grid.n_cells:
+                    self.display_grid=None
+                    self.color_note.setText('В выбранной области нет видимых ячеек.')
+                    p.add_text('Нет видимых ячеек',color='black',font_size=12)
+                    p.render()
+                    return
             else:
                 builder=display_geometry if overview else vtk_grid
                 grid=builder(result,self.component.currentText())
@@ -508,7 +561,7 @@ class ModelView(QWidget):
             if i in self._explicit_slices: continue
             w=self.slice_coordinates[i]; w.blockSignals(True); w.setValue(axis[0]+(axis[-1]-axis[0])*self.slices[i].value()/100); w.blockSignals(False)
         self.sync_depth_controls()
-        if self.clip_enabled.isChecked():
+        if not hybrid and self.clip_enabled.isChecked():
             limits=[(a.value(),b.value()) for a,b in self.clip_ranges]
             if any(a>=b for a,b in limits): self.color_note.setText('Минимальные границы отсечения должны быть меньше максимальных.'); return
             bounds=[(limits[0][0]-origin[0])*scale[0],(limits[0][1]-origin[0])*scale[0],(limits[1][0]-origin[1])*scale[1],(limits[1][1]-origin[1])*scale[1],-limits[2][1]*scale[2],-limits[2][0]*scale[2]]
@@ -537,7 +590,9 @@ class ModelView(QWidget):
             'title':unit,'color':'#222222','title_font_size':font,'label_font_size':max(10,font-4),
             'n_labels':4,'fmt':'%.3g','position_x':.80,'position_y':.18,'width':.05,'height':.65,'vertical':True})
         kind=self.kind.currentIndex()
-        if kind==0:
+        if hybrid:
+            self.render_prism_shell(grid, options)
+        elif kind==0:
             chosen=grid if shell else grid.extract_cells(np.flatnonzero(np.abs(values)>=amplitude*self.threshold.value()/100))
             if chosen.n_cells:
                 if self.smooth_colors.isChecked(): chosen=chosen.cell_data_to_point_data(pass_cell_data=True)
@@ -594,6 +649,27 @@ class ModelView(QWidget):
         self._fit_pending=False
         self._reorient_pending=False
         p.render()
+
+    def render_prism_shell(self, grid, options):
+        import pyvista as pv
+        from .voxel_surface import upper_prism_limits
+        mesh=self.result.mesh
+        limits=upper_prism_limits(mesh.active, mesh.shape, self.prism_percent.value())
+        columns,depths=np.divmod(grid.cell_data['voxel_id'], mesh.shape[2])
+        detailed=depths < limits[columns]
+        # Both pieces share the same coordinates. Hidden faces are generated
+        # only when a layer cut exposes them.
+        for upper,mask in ((False,~detailed),(True,detailed)):
+            if not mask.any():
+                continue
+            part=pv.PolyData.from_regular_faces(grid.points,grid.regular_faces[mask])
+            part.cell_data['property']=grid.cell_data['property'][mask]
+            if not upper and self.smooth_colors.isChecked():
+                part=part.cell_data_to_point_data()
+            self.plotter.add_mesh(part,show_edges=upper or self.edges.isChecked(),edge_color='#404040',
+                                  edge_opacity=0.28 if upper else 1.0,
+                                  name='upper-prisms' if upper else 'lower-shell',
+                                  show_scalar_bar=not upper or detailed.all(),**options)
 
     def sync_depth_controls(self):
         self.depth_slider.blockSignals(True); self.depth_slider.setValue(self.slices[2].value()); self.depth_slider.blockSignals(False)
