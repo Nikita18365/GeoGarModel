@@ -242,12 +242,26 @@ class FieldOperator(MisfitOperator):
         return gradient
 
 
-def regularization(model, mesh, damping, smoothness, xp=np, *, need_value=True, need_gradient=True):
-    """Mean square smallness and first differences scaled by cell aspect ratio."""
+def regularization(model, mesh, damping, smoothness, xp=np, *, need_value=True, need_gradient=True,
+                   reference=None, penalty_weights=1., vertical_factor=1., norm='l2',
+                   epsilon=.01, boundary_jump=None):
+    """Penalize departures from a reference and directional neighbor differences."""
     active = xp.asarray(mesh.active).reshape((mesh.size,)+(() if model.ndim==1 else (1,)))
     count = int(mesh.active.sum())*(1 if model.ndim==1 else 3)
-    grad = damping*model*active/max(count,1) if need_gradient else None
-    value = .5*damping*xp.sum(model*model*active)/max(count,1) if need_value else None
+    diff = model if reference is None else model-reference
+    deviation = xp.hypot(diff,epsilon) if norm=='compact' else None
+    grad = damping*diff*active/max(count,1) if need_gradient else None
+    if need_gradient:
+        if deviation is not None: grad *= epsilon/deviation
+        grad *= penalty_weights
+    value = None
+    if need_value:
+        term = .5*diff*diff if deviation is None else epsilon*diff*(diff/(deviation+epsilon))
+        term *= active
+        term *= penalty_weights
+        value = damping*xp.sum(term)/max(count,1)
+        del term
+    del diff,deviation
     shape = mesh.shape+(() if model.ndim == 1 else (3,))
     cube = model.reshape(shape)
     g = grad.reshape(shape) if need_gradient else None
@@ -255,7 +269,7 @@ def regularization(model, mesh, damping, smoothness, xp=np, *, need_value=True, 
     widths = [np.min(np.diff(a)) for a in axes]
     mask = xp.asarray(mesh.active.reshape(mesh.shape))
     for axis in range(3):
-        if shape[axis] < 2:
+        if shape[axis] < 2 or smoothness==0 or (axis==2 and vertical_factor==0):
             continue
         d = xp.diff(cube, axis=axis)
         lo,hi = [slice(None)]*len(shape),[slice(None)]*len(shape)
@@ -265,9 +279,17 @@ def regularization(model, mesh, damping, smoothness, xp=np, *, need_value=True, 
         dims = [1]*len(shape); dims[axis] = len(distances)
         valid = valid if model.ndim==1 else valid[...,None]
         coefficient = smoothness*(min(widths)/xp.asarray(distances).reshape(dims))**2*valid/max(int(xp.sum(valid))*(1 if model.ndim==1 else 3),1)
+        if axis==2: coefficient *= vertical_factor
+        if boundary_jump is not None:
+            coefficient *= xp.abs(xp.diff(reference.reshape(mesh.shape),axis=axis)) < boundary_jump
+        magnitude = xp.hypot(d,epsilon) if norm=='tv' else None
         if need_value:
-            value += .5*xp.sum(coefficient*d*d)
+            term = .5*d*d if magnitude is None else epsilon*d*(d/(magnitude+epsilon))
+            term *= coefficient
+            value += xp.sum(term)
+            del term
         if need_gradient:
+            if magnitude is not None: d *= epsilon/magnitude
             g[tuple(lo)] -= coefficient*d
             g[tuple(hi)] += coefficient*d
     return value, grad
@@ -307,7 +329,9 @@ class InversionResult:
 def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
            initial=None, damping=.01, smoothness=.1, depth_index=1., step_scale=1.,
            target_rms=1., fit_offset=False, progress=None, cancel_event=None,
-           early_stop=False, early_tolerance=.001, early_patience=5, work_progress=None):
+           early_stop=False, early_tolerance=.001, early_patience=5, work_progress=None,
+           reference=None, weighting='uniform', weight_power=1., vertical_factor=1.,
+           norm='l2', epsilon=.01, boundary_jump=None, fixed_mask=None):
     """Projected preconditioned gradient with Armijo backtracking, exact ΔT."""
     xp,mesh = operator.xp,operator.mesh
     timer=WorkProgress(work_progress,xp)
@@ -337,6 +361,38 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
     weights = xp.asarray((np.maximum(z,zmin)/zmin)**depth_index)
     weights[~active]=0
     weights /= weights.max()
+    if weighting not in ('uniform','depth','sensitivity') or norm not in ('l2','compact','tv'):
+        raise ValueError('Неизвестный тип весов или регуляризации.')
+    if not np.isfinite([weight_power,vertical_factor,epsilon]).all() or not 0<=weight_power<=4 or vertical_factor<0 or epsilon<=0:
+        raise ValueError('Проверьте показатель веса [0,4], гладкость Z ≥0 и масштаб сглаживания >0.')
+    if reference is not None:
+        reference = xp.asarray(reference,dtype=float)
+        if reference.shape!=m.shape or not bool(xp.isfinite(reference).all()):
+            raise ValueError('Нужна конечная опорная модель на расчётной сетке.')
+    fixed_count=0
+    if fixed_mask is not None:
+        fixed_mask=xp.asarray(fixed_mask,dtype=bool)
+        if reference is None or fixed_mask.shape!=active.shape or bool(xp.any(fixed_mask & ~active)):
+            raise ValueError('Проверьте маску фиксации опорной модели.')
+        fixed_count=int(fixed_mask.sum())
+        fixed_values=reference[fixed_mask]
+        if bool(xp.any((fixed_values<lower)|(fixed_values>upper))):
+            raise ValueError('Фиксированная плотность вне допустимых границ.')
+        m[fixed_mask]=fixed_values
+    if boundary_jump is not None and (m.ndim!=1 or reference is None or not np.isfinite(boundary_jump) or boundary_jump<=0):
+        raise ValueError('Для структурных границ нужны опорная плотность и положительный порог скачка.')
+    penalty_weights = 1.
+    if weighting=='depth':
+        penalty_weights = xp.asarray((zmin/np.maximum(z,zmin))**weight_power)
+    elif weighting=='sensitivity':
+        if not hasattr(operator,'sensitivity_norm'):
+            raise ValueError('Веса по чувствительности доступны для послойного FFT-оператора.')
+        sensitivity = operator.sensitivity_norm(sigma,fit_offset)
+        penalty_weights = xp.maximum(sensitivity/xp.maximum(sensitivity.max(),1e-30),1e-12)**weight_power
+        del sensitivity
+    if m.ndim==2 and weighting!='uniform': penalty_weights = penalty_weights[:,None]
+    reg_options = dict(reference=reference,penalty_weights=penalty_weights,vertical_factor=vertical_factor,
+                       norm=norm,epsilon=epsilon,boundary_jump=boundary_jump)
     if m.ndim==2:
         weights = weights[:,None]
     history,status = [],'iteration_limit'
@@ -344,7 +400,7 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
     def objective(v):
         val,pred,weighted,unit = operator.misfit(v,data,sigma,fit_offset)
         timer.begin_stage('regularization',0)
-        rv,_ = regularization(v,mesh,damping,smoothness,xp,need_gradient=False)
+        rv,_ = regularization(v,mesh,damping,smoothness,xp,need_gradient=False,**reg_options)
         return val+rv,pred,val,rv,weighted,unit
     check_cancel(cancel_event)
     previous_monitor=operator.monitor
@@ -381,8 +437,9 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
             timer.begin_iteration(iteration+1)
             gradient = operator.data_gradient(weighted,unit)
             timer.begin_stage('regularization',0)
-            _,rg = regularization(m,mesh,damping,smoothness,xp,need_value=False)
+            _,rg = regularization(m,mesh,damping,smoothness,xp,need_value=False,**reg_options)
             gradient += rg
+            if fixed_mask is not None: gradient[fixed_mask]=0
             del rg
             direction_ = -weights*gradient
             if iteration==0:
@@ -429,6 +486,9 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
                   early_stop=bool(early_stop),early_tolerance=early_tolerance,early_patience=early_patience,
                   selected_iteration=selected_iteration,best_criterion='minimum normalized RMS among completed iterates',
                   resources=operator.resources,
+                  weighting=weighting,weight_power=weight_power,vertical_factor=vertical_factor,
+                  norm=norm,epsilon=epsilon,boundary_jump=boundary_jump,has_reference=reference is not None,
+                  fixed_cells=fixed_count,
                   elapsed_seconds=elapsed_seconds,initial_evaluation_seconds=history[0]['iteration_seconds'],
                   sigma=host(sigma).tolist())
     return InversionResult(mesh,host(m),operator.observations.copy(),host(data),host(pred),history,settings,status)

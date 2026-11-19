@@ -237,6 +237,34 @@ class LayerFFT(MisfitOperator):
     def field(self, model):
         return self.apply(self.xp.asarray(model).reshape(-1),False)
 
+    def sensitivity_norm(self, sigma, fit_offset=False):
+        """Column norms of the uncertainty-weighted operator, including repeat observations."""
+        xp = self.xp
+        weights = 1 / xp.broadcast_to(xp.asarray(sigma), (len(self.observations),))**2
+        plane = xp.zeros(self.fft_shape)
+        xp.add.at(plane, tuple(self.xy_indices), weights)
+        sampled = xp.fft.rfft2(plane)
+        out = xp.zeros(self.mesh.shape)
+        for k in self.layers:
+            check_cancel(self.cancel_event)
+            impulse = xp.fft.irfft2(self.spectrum(k), s=self.fft_shape, axes=(0,1))
+            squared = xp.fft.rfft2(impulse*impulse)
+            correlation = xp.fft.irfft2(sampled*squared.conj(), s=self.fft_shape, axes=(0,1))
+            out[:,:,k] = correlation[self.model_slice]*self.full[:,:,k]
+        result = out.ravel()
+        for start in range(0,len(self.partial),512):
+            indices = self.partial[start:start+512]
+            cells = self.partial_bounds[start:start+512]
+            for row in range(0,len(weights),128):
+                check_cancel(self.cancel_event)
+                rows = slice(row,row+128)
+                block = self.prism(self.device_obs[rows],cells,False)
+                result[indices] += (block*block).T @ weights[rows]
+        if fit_offset:
+            weighted_sum = self.apply(weights,transpose=True)
+            result -= weighted_sum**2 / weights.sum()
+        return xp.sqrt(xp.maximum(result,0))
+
     predict = field
 
     def field_and_direction(self, model):
