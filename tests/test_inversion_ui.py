@@ -7,6 +7,63 @@ from PyQt5.QtCore import QEventLoop,QTimer
 from geogarmodel.app import MainWindow
 
 
+@pytest.mark.parametrize('outcome',['result','failed','cancelled'])
+def test_worker_releases_device_before_publishing(monkeypatch,outcome):
+    from geogarmodel import compute
+    from geogarmodel.inversion_ui import InversionWorker
+    events=[]
+    def solve(progress,cancel):
+        if outcome=='failed': raise MemoryError('GPU memory')
+        if outcome=='cancelled': raise compute.ComputationCancelled()
+        return 42
+    worker=InversionWorker(solve,None,gpu_id=2)
+    def release(device):
+        assert worker.function is None
+        events.append(device)
+    monkeypatch.setattr(compute,'release_inversion_memory',release)
+    worker.result.connect(lambda _:events.append('result'))
+    worker.failed.connect(lambda _:events.append('failed'))
+    worker.run()
+    assert events==[2,'result' if outcome=='result' else 'failed']
+
+
+def test_previous_overview_exports_its_own_model_and_field(monkeypatch,tmp_path):
+    from PyQt5.QtWidgets import QFileDialog
+    from geogarmodel.inversion import InversionResult
+    import pandas as pd
+    window=MainWindow()
+    tab=window.inversion
+    try:
+        tab.method.setCurrentIndex(1)
+        tab.demo()
+        tab.target.setValue(0)
+        for iterations in (1,2):
+            tab.iterations.setValue(iterations)
+            loop=QEventLoop()
+            timer=QTimer()
+            timer.setSingleShot(True); timer.timeout.connect(loop.quit)
+            tab.run(); tab.worker.finished.connect(loop.quit)
+            timer.start(30000); loop.exec_()
+            assert tab.worker is None
+        first,second=tab.result_windows.values()
+        assert first.isVisible() and second.result is tab.result
+        assert not np.array_equal(first.result.predicted,second.result.predicted)
+        first.tabs.setCurrentIndex(1)
+        actions=next(button.menu().actions() for button in first.findChildren(QPushButton)
+                     if button.text()=='Сохранить…')
+        for action,path in [(actions[0],tmp_path/'first.npz'),(actions[-1],tmp_path/'first.csv')]:
+            monkeypatch.setattr(QFileDialog,'getSaveFileName',lambda *args:(str(path),''))
+            action.trigger()
+        saved=InversionResult.load(tmp_path/'first.npz')
+        np.testing.assert_array_equal(saved.model,first.result.model)
+        np.testing.assert_array_equal(saved.predicted,first.result.predicted)
+        frame=pd.read_csv(tmp_path/'first.csv')
+        np.testing.assert_allclose(frame['predicted'],first.result.predicted)
+        first.close()
+        assert list(tab.result_windows.values())==[second]
+    finally: window.close()
+
+
 @pytest.fixture(scope='module',autouse=True)
 def app_session():
     app=QApplication.instance() or QApplication([])

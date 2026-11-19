@@ -83,6 +83,7 @@ class ProjectWorkspace:
             for w in (t.east,t.north,t.height,t.value,t.error): w.clear()
             apply_controls(t,self._inv_defaults); t.mode_changed(); t.initial_panel.source.setCurrentIndex(0)
             t.initial_panel.info.setText('Без файла: новая сетка заполняется полем «Начальное значение».')
+            t.close_result_windows()
             t.scene.reset()
             t.figure.clear(); t.canvas.draw_idle(); t.curve.setData([],[]); t.timing_curve.setData([],[]); t.log.clear()
             t.status.setText('Загрузите поле, задайте модель и запустите расчёт.'); t.progress.setValue(0)

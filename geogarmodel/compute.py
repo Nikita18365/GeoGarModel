@@ -34,6 +34,20 @@ class ComputationCancelled(Exception):
     """Cooperative cancellation, never forcibly terminates native training."""
 
 
+def release_inversion_memory(gpu_id):
+    """Run on the worker thread: cuFFT plans are per device and per thread."""
+    import cupy as cp
+    with cp.cuda.Device(gpu_id):
+        try:
+            cp.cuda.get_current_stream().synchronize()
+        finally:
+            try:
+                cp.fft.config.get_plan_cache().clear()
+            finally:
+                cp.get_default_memory_pool().free_all_blocks()
+                cp.get_default_pinned_memory_pool().free_all_blocks()
+
+
 def check_cancel(event):
     if event is not None and event.is_set():
         raise ComputationCancelled("Расчёт отменён пользователем.")

@@ -837,6 +837,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         else:
             if not self.confirm_map_close():
                 event.ignore(); return
+            self.inversion.close_result_windows()
             self.inversion.scene.shutdown()
             event.accept()
 

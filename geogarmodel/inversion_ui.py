@@ -30,18 +30,31 @@ from .ui_layout import Disclosure,ParameterSplitter,SummaryLabel,details,form_de
 
 class InversionWorker(QThread):
     progress=pyqtSignal(object); result=pyqtSignal(object); failed=pyqtSignal(str)
-    def __init__(self,function,parent):
-        super().__init__(parent); self.function=function; self.cancel=Event()
+    warning=pyqtSignal(str)
+    def __init__(self,function,parent,gpu_id=None):
+        super().__init__(parent); self.function=function; self.cancel=Event(); self.gpu_id=gpu_id
     def run(self):
-        try: self.result.emit(self.function(self.progress.emit,self.cancel))
-        except ComputationCancelled: self.failed.emit('Расчёт остановлен до завершения оценки начальной модели. Готовой модели и поля пока нет.')
-        except Exception as exc: self.failed.emit(str(exc))
+        error=None
+        try: result=self.function(self.progress.emit,self.cancel)
+        except ComputationCancelled: error='Расчёт остановлен до завершения оценки начальной модели. Готовой модели и поля пока нет.'
+        except Exception as exc: error=str(exc)
+        # Release captured inputs and exception frames before returning cached blocks.
+        self.function=None
+        if self.gpu_id is not None:
+            try:
+                from .compute import release_inversion_memory
+                release_inversion_memory(self.gpu_id)
+            except Exception as exc:
+                self.warning.emit(f'Освобождение памяти GPU {self.gpu_id}: {exc}')
+        if error is None: self.result.emit(result)
+        else: self.failed.emit(error)
 
 
 class InversionTab(QWidget):
     def __init__(self,workbench):
         super().__init__(workbench)
         self.workbench=workbench; self.worker=None; self.table=None; self.result=None
+        self.result_windows={}; self.result_number=0
         root=QHBoxLayout(self)
         left=QWidget(); panel=QVBoxLayout(left)
         self.parameter_panel=left
@@ -238,6 +251,7 @@ class InversionTab(QWidget):
         self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumHeight(100); self.log.setMaximumBlockCount(1000); rl.addWidget(self.log)
         details(rl,self.log,'Журнал расчёта')
         actions=QHBoxLayout(); rl.addLayout(actions)
+        self.button('Обзор результата',lambda:self.open_result_window(self.require_result()),actions)
         self.button('Открыть / обновить 3D',self.open_3d,actions)
         self.button('Карты срезов…',self.open_slice_maps,actions)
         from PyQt5.QtWidgets import QMenu
@@ -548,7 +562,7 @@ class InversionTab(QWidget):
             result.settings.update(initial_model_history=initial_model.history,observation_stride=observation_stride)
             if fft: result.settings['reference_source']=reference_label
             return result
-        self.result=None; self.history=[]; self.curve.setData([],[]); self.log.clear()
+        self.history=[]; self.curve.setData([],[]); self.log.clear()
         self.timing_curve.setData([],[])
         self._run_started=perf_counter(); self._iteration_started=self._run_started
         self._iteration_number=0; self._iteration_limit=settings['iterations']
@@ -557,7 +571,8 @@ class InversionTab(QWidget):
         self.progress.setRange(0,settings['iterations']); self.progress.setValue(0)
         method = 'Послойная 2D FFT · ' if fft else ''
         self.status.setText(f'{method}{len(data):,} наблюдений × {mesh.active.sum():,} активных ячеек · {operator_args["device"].upper()} · определение бюджета памяти…')
-        self.worker=InversionWorker(compute,self)
+        self.worker=InversionWorker(compute,self,operator_args['gpu_id'] if operator_args['device']=='gpu' else None)
+        self.worker.warning.connect(self.log.appendPlainText)
         self._notify_inversion=True
         self.lock_inputs()
         self.worker.progress.connect(self.update_progress); self.worker.result.connect(self.finished_result)
@@ -677,7 +692,8 @@ class InversionTab(QWidget):
         selected=result.settings.get('selected_iteration',result.history[-1]['iteration'])
         row=next(r for r in result.history if r['iteration']==selected)
         reason={'cancelled':'Остановлено пользователем','early_stop':'Ранняя остановка'}.get(result.status,result.status)
-        if self._notify_inversion:
+        live_run=self._notify_inversion
+        if live_run:
             self._notify_inversion=False
             from .telegram_notifications import result_message
             event=result.status if result.status in ('cancelled','early_stop') else 'finished'
@@ -687,14 +703,26 @@ class InversionTab(QWidget):
         if result.status=='cancelled' and offer_export:
             self.stopped_export_dialog()
         self.workbench.guard(self.draw_results)
-        if result.status in ('cancelled','early_stop'):
-            from importlib.util import find_spec
-            if find_spec('pyvistaqt') is not None:
-                self.workbench.guard(lambda:self.scene.render(result))
-            else:
-                self.scene.result=result
-                self.log.appendPlainText('3D-сцена требует пакет volume. Модель и двумерные срезы доступны.')
+        self.scene.result=result
+        if live_run: self.workbench.guard(lambda:self.open_result_window(result))
         self.progress.setValue(result.history[-1]['iteration'])
+
+    def open_result_window(self,result):
+        from .inversion_result_ui import ResultWindow
+        for opened in self.result_windows.values():
+            if opened.result is result:
+                opened.showNormal(); opened.raise_(); opened.activateWindow()
+                return
+        self.result_number+=1
+        number=self.result_number
+        window=ResultWindow(self,result,number)
+        self.result_windows[number]=window
+        window.finished.connect(lambda _:self.result_windows.pop(number,None))
+        window.show()
+
+    def close_result_windows(self):
+        for window in list(self.result_windows.values()):
+            window.close()
 
     def stopped_export_dialog(self):
         dialog=QDialog(self); dialog.setWindowTitle('Инверсия остановлена — сохранить результат')
@@ -714,21 +742,35 @@ class InversionTab(QWidget):
     def draw_results(self):
         r=self.require_result(); self.figure.clear()
         shape=r.mesh.shape
-        values=np.linalg.norm(r.model,axis=1) if r.model.ndim==2 else r.model.copy()
-        values=values.copy(); values[~r.mesh.active]=np.nan
+        cube=r.model.reshape(shape+r.model.shape[1:])
+        active=r.mesh.active.reshape(shape)
+        def scalar(values):
+            return np.linalg.norm(values,axis=-1) if r.model.ndim==2 else values
+        stride=max(1,(r.mesh.size+99999)//100000)
+        sample=scalar(r.model[::stride][r.mesh.active[::stride]])
+        if not sample.size and r.mesh.active.any():
+            sample=scalar(r.model[[r.mesh.active.argmax()]])
         property_unit='g/cm³' if r.settings['mode']=='gravity' else ('SI' if r.settings['mode']=='induced' else 'A/m')
         field_unit='mGal' if r.settings['mode']=='gravity' else 'nT'
-        cube=values.reshape(shape)
-        for n,(image,title,x,y) in enumerate([
-            (cube[:,:,shape[2]//2].T,'Горизонтальный срез',r.mesh.east,r.mesh.north),
-            (cube[:,shape[1]//2,:].T,'Разрез East–Depth',r.mesh.east,r.mesh.depth)]):
-            ax=self.figure.add_subplot(2,3,n+1); im=ax.pcolormesh(x,y,image,shading='flat',cmap='viridis' if np.nanmin(values)>=0 else 'coolwarm'); ax.set_title(title); self.figure.colorbar(im,ax=ax,label=property_unit)
+        axes=(r.mesh.east,r.mesh.north,r.mesh.depth)
+        edges=[np.linspace(0,n,min(500,n)+1,dtype=int) for n in shape]
+        for n,(other,title) in enumerate([(1,'Горизонтальный срез'),(2,'Разрез East–Depth')]):
+            i,j=np.ix_(edges[0][:-1],edges[other][:-1])
+            key=(i,j,shape[2]//2) if other==1 else (i,shape[1]//2,j)
+            image=np.where(active[key],scalar(cube[key]),np.nan)
+            ax=self.figure.add_subplot(2,3,n+1)
+            im=ax.pcolormesh(axes[0][edges[0]],axes[other][edges[other]],image.T,shading='flat',
+                             cmap='coolwarm' if (sample<0).any() else 'viridis')
+            ax.set_title(title); self.figure.colorbar(im,ax=ax,label=property_unit)
             if n==1: ax.invert_yaxis()
-        ax=self.figure.add_subplot(2,3,3); ax.hist(values[np.isfinite(values)],bins=30,color='#2dd4bf'); ax.set_title('Распределение свойства / |J|')
-        obs=r.observations
-        for n,(v,title) in enumerate([(r.observed,'Наблюдения'),(r.predicted,'Расчёт'),(r.predicted-r.observed,'Расчёт − наблюдения')]):
+        ax=self.figure.add_subplot(2,3,3); ax.hist(sample,bins=30,color='#2dd4bf')
+        ax.set_title('Распределение · выборка' if stride>1 else 'Распределение свойства / |J|')
+        step=max(1,(len(r.predicted)+99999)//100000)
+        obs=r.observations[::step]
+        observed,predicted=r.observed[::step],r.predicted[::step]
+        for n,(v,title) in enumerate([(observed,'Наблюдения'),(predicted,'Расчёт'),(predicted-observed,'Расчёт − наблюдения')]):
             ax=self.figure.add_subplot(2,3,n+4)
-            lim=np.max(np.abs(v)) if n==2 else max(np.max(np.abs(r.observed)),np.max(np.abs(r.predicted)))
+            lim=np.max(np.abs(v)) if n==2 else max(np.max(np.abs(observed)),np.max(np.abs(predicted)))
             im=ax.scatter(obs[:,0]-obs[:,0].min(),obs[:,1]-obs[:,1].min(),c=v,s=12,cmap='coolwarm',vmin=-lim,vmax=lim)
             ax.set_title(title); self.figure.colorbar(im,ax=ax,label=field_unit)
         style_figure(self.figure); self.figure.tight_layout(); self.canvas.draw_idle(); self.tabs.setCurrentIndex(1)
@@ -762,20 +804,24 @@ class InversionTab(QWidget):
             self.history=list(result.history)
             self.curve.setData([r['iteration'] for r in self.history],[r['rmse'] for r in self.history])
             self.finished_result(result,offer_export=False)
-    def save(self):
-        result=self.require_result(); path,_=QFileDialog.getSaveFileName(self,'3D-модель и отчёт','inversion.npz','NPZ (*.npz)')
+    def save(self,result=None):
+        if result is None: result=self.require_result()
+        path,_=QFileDialog.getSaveFileName(self,'3D-модель и отчёт','inversion.npz','NPZ (*.npz)')
         if path: result.save(path if path.lower().endswith('.npz') else path+'.npz')
-    def save_fields(self):
-        r=self.require_result(); path,kind=QFileDialog.getSaveFileName(self,'Поля и невязки','inversion-fields.csv','CSV (*.csv);;Рассчитанное поле ZMAP (*.zmap)')
+    def save_fields(self,r=None):
+        if r is None: r=self.require_result()
+        path,kind=QFileDialog.getSaveFileName(self,'Поля и невязки','inversion-fields.csv','CSV (*.csv);;Рассчитанное поле ZMAP (*.zmap)')
         if path:
             if Path(path).suffix.lower()=='.zmap' or ('ZMAP' in kind and not Path(path).suffix):
                 export_zmap(r,path if path.lower().endswith('.zmap') else path+'.zmap')
             else:
                 field_table(r).to_csv(path if path.lower().endswith('.csv') else path+'.csv',index=False,encoding='utf-8-sig')
-    def save_ubc(self):
-        r=self.require_result(); path,_=QFileDialog.getSaveFileName(self,'UBC: mesh, свойства и описание','inversion.msh','UBC mesh (*.msh)')
+    def save_ubc(self,r=None):
+        if r is None: r=self.require_result()
+        path,_=QFileDialog.getSaveFileName(self,'UBC: mesh, свойства и описание','inversion.msh','UBC mesh (*.msh)')
         if path: export_ubc(r,path)
-    def save_vtk(self):
-        r=self.require_result(); grid=vtk_grid(r); ext='.vtu' if grid.__class__.__name__=='UnstructuredGrid' else '.vtr'
+    def save_vtk(self,r=None):
+        if r is None: r=self.require_result()
+        ext='.vtu' if r.mesh.bounds is not None or not r.mesh.active.all() else '.vtr'
         path,_=QFileDialog.getSaveFileName(self,'VTK-модель','inversion'+ext,'VTK (*'+ext+')')
-        if path: grid.save(path if path.lower().endswith(ext) else path+ext)
+        if path: vtk_grid(r).save(path if path.lower().endswith(ext) else path+ext)
