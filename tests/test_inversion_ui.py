@@ -176,8 +176,9 @@ def test_display_scale_keeps_physical_axes_and_model():
         np.testing.assert_allclose(vtk_grid(result).points,original)
         result.model[:]=0
         view.kind.setCurrentIndex(0); view.render(result)
-        assert any(getattr(getattr(actor,'mapper',None),'dataset',None) is not None
-                   and actor.mapper.dataset.n_cells==mesh.size for actor in view.plotter.renderer.actors.values())
+        assert view.display_grid.n_cells==6*3*3
+        for name in ('upper-prisms','lower-shell'):
+            np.testing.assert_array_equal(view.plotter.renderer.actors[name].mapper.dataset['property'],0)
         view.expanded_view()
         assert view._expanded_dialog.isVisible()
         view._expanded_dialog.accept()

@@ -115,7 +115,8 @@ def test_prism_view_percentage_and_cut_round_trip(qt_application_lifetime):
         assert not view.prism_panel.isHidden()
         geometry=view.display_grid
         actors=view.plotter.renderer.actors
-        assert actors['upper-prisms'].prop.show_edges
+        assert not actors['upper-prisms'].prop.show_edges
+        assert 'property' in actors['upper-prisms'].mapper.dataset.point_data
         assert not actors['lower-shell'].prop.show_edges
         for percent in (0,100,12.5):
             view.prism_percent.setValue(percent)

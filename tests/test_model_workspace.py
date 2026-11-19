@@ -106,8 +106,13 @@ def test_depth_clipping_is_downward_and_expanded_state_matches(qt_application_li
         assert view.clip_normal.currentText()=='Z'
         assert view.plotter.plane_widgets[-1].GetNormal()[2]<0
         view.depth_value.setValue(45)
-        clipped=view.plotter.plane_clipped_meshes[-1]
-        assert clipped.bounds[5]<=-45+1e-6 and clipped.bounds[4]==pytest.approx(-100)
+        cap=view.plotter.renderer.actors['cut-lower-shell'].mapper.dataset
+        np.testing.assert_allclose(cap.points[:,2],-45)
+        density=r.model.reshape(r.mesh.shape)[:,:,1]
+        np.testing.assert_allclose([cap['property'].min(),cap['property'].max()],[density.min(),density.max()])
+        plane=view.plotter.renderer.actors['lower-shell'].mapper.GetClippingPlanes().GetItem(0)
+        assert plane.EvaluateFunction(0,0,-100)>0>plane.EvaluateFunction(0,0,-44)
+        assert view.plotter.plane_widgets[-1].GetPlaneProperty().GetOpacity()==0
         widget=view.plotter.plane_widgets[-1]; center=list(widget.GetOrigin()); center[2]=-70; widget.SetOrigin(center); widget.InvokeEvent('EndInteractionEvent')
         assert view.depth_value.value()==70
         view.palette.setCurrentText('plasma'); assert view.plotter.plane_widgets[-1].GetOrigin()[2]==pytest.approx(-70)
@@ -116,6 +121,8 @@ def test_depth_clipping_is_downward_and_expanded_state_matches(qt_application_li
         expanded.depth_value.setValue(85); view._expanded_dialog.accept()
         assert view.depth_value.value()==85
         view.single_slice(2)
-        textured=[a for a in view.plotter.renderer.actors.values() if getattr(a,'texture',None) is not None]
-        assert len(textured)==1 and textured[0].mapper.dataset.n_points==4
+        section=view.plotter.renderer.actors['section-2-lower-shell'].mapper.dataset
+        np.testing.assert_allclose(section.points[:,2],-85)
+        assert section.n_cells==r.mesh.shape[0]*r.mesh.shape[1]
+        assert not view.plotter.renderer.actors['section-2-lower-shell'].prop.show_edges
     finally: view.shutdown(); view.close()

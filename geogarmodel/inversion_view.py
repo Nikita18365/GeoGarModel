@@ -56,7 +56,7 @@ class ModelView(QWidget):
         self.info=QLabel('Для интерактивного 3D нажмите «Открыть / обновить 3D». Требуется geogarmodel[volume].')
         self.info.setWordWrap(True); layout.addWidget(self.info)
         self.controls=QHBoxLayout(); layout.addLayout(self.controls)
-        self.kind=QComboBox(); self.kind.addItems(['Воксели','Объём','Изоповерхности','Срезы XYZ','Интерактивное отсечение','Верхние призмы и оболочка'])
+        self.kind=QComboBox(); self.kind.addItems(['Воксели','Объём','Изоповерхности','Срезы XYZ','Интерактивное отсечение','Верхние призмы и оболочка','Сглаженная кровля'])
         self.component=QComboBox(); self.component.addItems(['amplitude','East','North','Down'])
         self.threshold=QDoubleSpinBox(); self.threshold.setRange(0,99); self.threshold.setValue(0); self.threshold.setSuffix('% от max |m|')
         for w in (self.kind,self.component,self.threshold): self.controls.addWidget(w)
@@ -178,7 +178,7 @@ class ModelView(QWidget):
         color_form.addRow(self.smooth_colors)
         self.terrain_top=QCheckBox('Плавная верхняя поверхность')
         self.terrain_top.setChecked(True)
-        self.terrain_top.setToolTip('Вид «Воксели», непрозрачность 1. Соединяет высоты верхних активных ячеек по XY только при отображении.')
+        self.terrain_top.setToolTip('Вид «Сглаженная кровля». Соединяет высоты верхних активных ячеек по XY только при отображении.')
         color_form.addRow(self.terrain_top)
         self.relief_gain=QDoubleSpinBox()
         self.relief_gain.setRange(1,50); self.relief_gain.setValue(1); self.relief_gain.setSuffix(' ×')
@@ -249,13 +249,15 @@ class ModelView(QWidget):
         self.prism_axis=QComboBox()
         self.prism_axis.addItems(['X','Y','Z'])
         self.prism_axis.setCurrentText('Z')
-        prism_row.addWidget(QLabel('Срез'))
+        self.prism_axis_label=QLabel('Срез')
+        prism_row.addWidget(self.prism_axis_label)
         prism_row.addWidget(self.prism_axis)
         self.prism_layer=QSpinBox()
         self.prism_layer.setRange(1,2147483647)
         self.prism_layer.setKeyboardTracking(False)
         self.prism_layer.setToolTip('1 — весь куб. Увеличьте номер, чтобы открыть следующий слой по выбранной оси. По Z отсчёт идёт от поверхности вниз.')
-        prism_row.addWidget(QLabel('Слой от'))
+        self.prism_layer_label=QLabel('Слой от')
+        prism_row.addWidget(self.prism_layer_label)
         prism_row.addWidget(self.prism_layer)
         prism_row.addStretch()
         self.prism_percent.valueChanged.connect(self.refresh_if_ready)
@@ -487,10 +489,14 @@ class ModelView(QWidget):
             return
         self.color_note.clear()
         self.depth_panel.setVisible(self.kind.currentIndex()==3 or (self.kind.currentIndex()==4 and self.clip_normal.currentIndex()==2))
-        hybrid=self.kind.currentIndex()==5
-        self.prism_panel.setVisible(hybrid)
-        self.opacity.setEnabled(not hybrid)
-        self.clip_enabled.setEnabled(not hybrid)
+        kind=self.kind.currentIndex()
+        layered=kind==5
+        native=kind in (0,3,4,5)
+        self.prism_panel.setVisible(native)
+        for control in (self.prism_axis_label,self.prism_axis,self.prism_layer_label,self.prism_layer):
+            control.setVisible(layered)
+        self.opacity.setEnabled(not layered)
+        self.clip_enabled.setEnabled(not layered)
         cut_axis=self.prism_axis.currentIndex()
         with QSignalBlocker(self.prism_layer):
             self.prism_layer.setMaximum(result.mesh.shape[cut_axis])
@@ -513,41 +519,6 @@ class ModelView(QWidget):
         # Transform display geometry only, so slices and clip widgets share its coordinates.
         # Axes below retain the unscaled physical coordinate ranges.
         scale=np.array([widget.value() for widget in self.axis_scales])
-        self.terrain_top.setEnabled(result.mesh.bounds is None and self.kind.currentIndex()==0 and
-                                   self.opacity.value()==1 and not self.clip_enabled.isChecked())
-        terrain=self.terrain_top.isEnabled() and self.terrain_top.isChecked()
-        self.relief_gain.setEnabled(terrain)
-        gain=self.relief_gain.value() if terrain else 1.
-        shell=(self.kind.currentIndex()==0 and self.opacity.value()==1 and not self.clip_enabled.isChecked()
-               and (result.mesh.size>250000 or (terrain and not result.mesh.active.all())))
-        shell=shell or hybrid
-        overview=result.mesh.size>250000 and not shell and not self.full_resolution.isChecked()
-        geometry_key=(id(result),self.component.currentText(),tuple(scale),overview,shell,terrain,gain,
-                      self.threshold.value() if shell else None,
-                      (cut_axis,self.prism_layer.value()) if hybrid else None)
-        if not reuse_geometry or geometry_key!=self._geometry_key:
-            if shell:
-                from .voxel_surface import exterior
-                grid=exterior(result,self.component.currentText(),self.threshold.value(),smooth_top=terrain,relief_gain=gain,
-                              prism_shell=hybrid,cut_axis=cut_axis,first_layer=self.prism_layer.value()-1)
-                if not grid.n_cells:
-                    self.display_grid=None
-                    self.color_note.setText('В выбранной области нет видимых ячеек.')
-                    p.add_text('Нет видимых ячеек',color='black',font_size=12)
-                    p.render()
-                    return
-            else:
-                builder=display_geometry if overview else vtk_grid
-                grid=builder(result,self.component.currentText())
-            grid.translate(-origin,inplace=True)
-            if grid.__class__.__name__=='UnstructuredGrid': grid=grid.clean(produce_merge_map=False)
-            self._physical_bounds=np.array(grid.bounds); grid.scale(scale,inplace=True)
-            self._geometry=grid; self._geometry_key=geometry_key; self._lod_cache_key=None
-        grid=self._geometry; physical_bounds=self._physical_bounds
-        self.display_grid=grid
-        self._display_scale=scale.copy()
-        mode=result.settings['mode']
-        unit='g/cm³' if mode=='gravity' else ('SI' if mode=='induced' else 'A/m')
         if new_model or not getattr(self,'_coordinate_ready',False):
             self._explicit_slices.clear()
             self.clip_enabled.blockSignals(True); self.clip_enabled.setChecked(False); self.clip_enabled.blockSignals(False)
@@ -561,9 +532,60 @@ class ModelView(QWidget):
             if i in self._explicit_slices: continue
             w=self.slice_coordinates[i]; w.blockSignals(True); w.setValue(axis[0]+(axis[-1]-axis[0])*self.slices[i].value()/100); w.blockSignals(False)
         self.sync_depth_controls()
-        if not hybrid and self.clip_enabled.isChecked():
-            limits=[(a.value(),b.value()) for a,b in self.clip_ranges]
-            if any(a>=b for a,b in limits): self.color_note.setText('Минимальные границы отсечения должны быть меньше максимальных.'); return
+        from .voxel_surface import exterior
+        import pyvista as pv
+        axes=(result.mesh.east,result.mesh.north,result.mesh.depth)
+        limits=np.array([(axis[0],axis[-1]) for axis in axes])
+        boxed=self.clip_enabled.isChecked() and not layered
+        if boxed:
+            limits=np.array([(max(a.value(),axis[0]),min(b.value(),axis[-1]))
+                             for (a,b),axis in zip(self.clip_ranges,axes)])
+            if np.any(limits[:,0]>=limits[:,1]):
+                self.color_note.setText('В выбранной области нет объёма.')
+                p.render()
+                return
+        self.terrain_top.setEnabled(kind==6 and result.mesh.bounds is None)
+        terrain=self.terrain_top.isEnabled() and self.terrain_top.isChecked()
+        self.relief_gain.setEnabled(terrain)
+        gain=self.relief_gain.value() if terrain else 1.
+        shell=kind in (0,4,5,6)
+        overview=kind in (1,2) and result.mesh.size>250000 and not self.full_resolution.isChecked()
+        geometry_key=(id(result),self.component.currentText(),tuple(scale),overview,shell,native,terrain,gain,
+                      self.threshold.value() if shell else None,tuple(limits.ravel()) if boxed else None,
+                      (cut_axis,self.prism_layer.value()) if layered else None)
+        component=self.component.currentText()
+        if not reuse_geometry or new_model or getattr(self,'_property_key',None)!=(id(result),component):
+            self._property_sample=self.property_sample(result,component)
+            self._property_key=(id(result),component)
+            self._band_key=None
+        if not reuse_geometry or geometry_key!=self._geometry_key:
+            self._parts_style=None
+            self._shell_parts=[]
+            self._lod_cache={}
+            if shell:
+                grid=exterior(result,component,self.threshold.value(),smooth_top=terrain,relief_gain=gain,
+                              prism_shell=native,cut_axis=cut_axis,first_layer=self.prism_layer.value()-1 if layered else 0,
+                              limits=limits if boxed else None)
+                if not grid.n_cells:
+                    self.display_grid=None
+                    self.color_note.setText('В выбранной области нет видимых ячеек.')
+                    p.render()
+                    return
+            elif kind==3:
+                grid=pv.Box(bounds=(*limits[0],*limits[1],-limits[2,1],-limits[2,0]))
+            else:
+                builder=display_geometry if overview else vtk_grid
+                grid=builder(result,component)
+            grid.translate(-origin,inplace=True)
+            if grid.__class__.__name__=='UnstructuredGrid': grid=grid.clean(produce_merge_map=False)
+            grid.scale(scale,inplace=True)
+            self._geometry=grid; self._geometry_key=geometry_key; self._lod_cache_key=None
+        grid=self._geometry
+        self.display_grid=grid
+        self._display_scale=scale.copy()
+        mode=result.settings['mode']
+        unit='g/cm³' if mode=='gravity' else ('SI' if mode=='induced' else 'A/m')
+        if boxed and not native and not shell:
             bounds=[(limits[0][0]-origin[0])*scale[0],(limits[0][1]-origin[0])*scale[0],(limits[1][0]-origin[1])*scale[1],(limits[1][1]-origin[1])*scale[1],-limits[2][1]*scale[2],-limits[2][0]*scale[2]]
             grid=grid.clip_box(bounds,invert=False)
             if grid.n_cells==0: self.color_note.setText('В выбранной области нет активных ячеек.'); p.render(); return
@@ -578,10 +600,10 @@ class ModelView(QWidget):
         elif overview:
             self.info.setText(self.info.text()+' · Обзор до 40 × 40 × 40. Карты срезов и экспорт используют исходную сетку.')
         self.component.setEnabled(result.model.ndim==2)
-        values=grid['property']; amplitude=float(np.max(np.abs(values))); limit=max(amplitude,1e-15)
+        values=self._property_sample if native else grid['property']
         self._compact_axes=self.width()<700 or self.height()<650
         font=min(self.axis_font.value(),11) if self._compact_axes else self.axis_font.value()
-        cmap,norm,clim=self.colors_for(result,self._geometry['property'] if result.mesh.size>250000 else None)
+        cmap,norm,clim=self.colors_for(result,self._property_sample)
         from matplotlib.colors import ListedColormap
         cmap=ListedColormap(cmap(norm(np.linspace(clim[0],clim[1],1024))))
         if self.color_range.currentIndex()!=2:
@@ -589,17 +611,13 @@ class ModelView(QWidget):
         options=dict(scalars='property',cmap=cmap,clim=clim,scalar_bar_args={
             'title':unit,'color':'#222222','title_font_size':font,'label_font_size':max(10,font-4),
             'n_labels':4,'fmt':'%.3g','position_x':.80,'position_y':.18,'width':.05,'height':.65,'vertical':True})
-        kind=self.kind.currentIndex()
-        if hybrid:
-            self.render_prism_shell(grid, options)
-        elif kind==0:
-            chosen=grid if shell else grid.extract_cells(np.flatnonzero(np.abs(values)>=amplitude*self.threshold.value()/100))
-            if chosen.n_cells:
-                if self.smooth_colors.isChecked(): chosen=chosen.cell_data_to_point_data(pass_cell_data=True)
-                actor=p.add_mesh(chosen,show_edges=self.edges.isChecked(),edge_color='#333333',opacity=self.opacity.value(),interpolate_before_map=True,**options)
-                lod_options={k:v for k,v in options.items() if k!='scalar_bar_args'}
-                key=(self._geometry_key,self.threshold.value(),self.clip_enabled.isChecked(),tuple(w.value() for pair in self.clip_ranges for w in pair))
-                if not shell: self.prepare_lod(chosen,actor,lod_options,key)
+        if kind in (0,4,5):
+            actors=self.render_prism_shell(grid,options)
+            if kind==4:
+                self.attach_density_clip(actors,grid,origin,scale,limits,options)
+        elif kind==6:
+            chosen=grid.cell_data_to_point_data() if self.smooth_colors.isChecked() else grid
+            p.add_mesh(chosen,show_edges=self.edges.isChecked(),opacity=self.opacity.value(),**options)
         elif kind==1:
             if grid.__class__.__name__=='UnstructuredGrid':
                 p.add_mesh(grid,opacity=self.opacity.value(),**options)
@@ -614,19 +632,13 @@ class ModelView(QWidget):
                 surface=points.contour(np.linspace(lo,hi,7)[1:-1],scalars='property')
                 if surface.n_points: p.add_mesh(surface,opacity=self.opacity.value(),**options)
         elif kind==3:
-            centers=[(self.slice_coordinates[i].value()-origin[i])*scale[i] if i<2 else -self.slice_coordinates[i].value()*scale[i] for i in range(3)]
-            # One mapper keeps the same explicit color range on all three slices.
-            parts=[grid.slice(normal=axis,origin=centers) for axis,enabled in zip(('x','y','z'),self.slice_enabled) if enabled.isChecked()]
-            import pyvista as pv
-            combined=pv.MultiBlock(parts).combine() if parts else None
-            if self.smooth_colors.isChecked(): self.render_section_textures(origin,scale,cmap,clim,options)
-            elif combined is not None and combined.n_cells: p.add_mesh(combined,opacity=self.opacity.value(),lighting=False,**options)
-        else:
-            if self.smooth_colors.isChecked(): grid=grid.cell_data_to_point_data(pass_cell_data=True)
-            index=self.clip_normal.currentIndex(); normal=np.eye(3)[index]; normal[2]*=-1
-            center=np.array(grid.center); center[index]=(self.slice_coordinates[index].value()-origin[index])*scale[index] if index<2 else -self.slice_coordinates[2].value()*scale[2]
-            p.add_mesh_clip_plane(grid,normal=normal,origin=center,normal_rotation=False,opacity=self.opacity.value(),**options)
-            widget_manager.plane_widgets[-1].AddObserver('EndInteractionEvent',lambda widget,event:self.plane_moved(widget,index,origin,scale))
+            show_bar=True
+            for axis,enabled in enumerate(self.slice_enabled):
+                if enabled.isChecked():
+                    part=self.section_geometry(axis,self.slice_coordinates[axis].value(),origin,scale,limits)
+                    if part.n_cells:
+                        self.render_prism_shell(part,options,prefix=f'section-{axis}-',show_bar=show_bar,section=True)
+                        show_bar=False
         if self.outline.isChecked(): p.add_mesh(grid.outline(),color='#333333')
         p.add_axes(xlabel='X / East',ylabel='Y / North',zlabel='Z / Up',color='#222222')
         divisor=1000 if self.axis_unit.currentText()=='км' else 1
@@ -650,26 +662,112 @@ class ModelView(QWidget):
         self._reorient_pending=False
         p.render()
 
-    def render_prism_shell(self, grid, options):
-        import pyvista as pv
-        from .voxel_surface import upper_prism_limits
-        mesh=self.result.mesh
-        limits=upper_prism_limits(mesh.active, mesh.shape, self.prism_percent.value())
-        columns,depths=np.divmod(grid.cell_data['voxel_id'], mesh.shape[2])
-        detailed=depths < limits[columns]
-        # Both pieces share the same coordinates. Hidden faces are generated
-        # only when a layer cut exposes them.
-        for upper,mask in ((False,~detailed),(True,detailed)):
-            if not mask.any():
+    @staticmethod
+    def property_sample(result,component):
+        """Bound histogram memory and keep the exact extrema of active cells."""
+        stride=max(1,(result.mesh.size+249999)//250000)
+        samples=[]
+        lo,hi=np.inf,-np.inf
+        for start in range(0,result.mesh.size,131072):
+            block=result.model[start:start+131072][result.mesh.active[start:start+131072]]
+            if not len(block):
                 continue
-            part=pv.PolyData.from_regular_faces(grid.points,grid.regular_faces[mask])
-            part.cell_data['property']=grid.cell_data['property'][mask]
-            if not upper and self.smooth_colors.isChecked():
-                part=part.cell_data_to_point_data()
-            self.plotter.add_mesh(part,show_edges=upper or self.edges.isChecked(),edge_color='#404040',
-                                  edge_opacity=0.28 if upper else 1.0,
-                                  name='upper-prisms' if upper else 'lower-shell',
-                                  show_scalar_bar=not upper or detailed.all(),**options)
+            if block.ndim==2:
+                block=np.linalg.norm(block,axis=1) if component=='amplitude' else block[:,{'East':0,'North':1,'Down':2}[component]]
+            lo=min(lo,float(block.min()))
+            hi=max(hi,float(block.max()))
+            samples.append(block[::stride].copy())
+        return np.concatenate([*samples,[lo,hi]]) if samples else np.zeros(1)
+
+    def render_prism_shell(self,grid,options,prefix='',show_bar=True,section=False):
+        from .voxel_surface import upper_prism_limits,prism_parts
+        mesh=self.result.mesh
+        key=(id(mesh),self.prism_percent.value())
+        if self._band_key!=key:
+            self._band_limits=upper_prism_limits(mesh.active,mesh.shape,self.prism_percent.value())
+            self._band_key=key
+        smooth=self.smooth_colors.isChecked()
+        style=(key,smooth,self.edges.isChecked())
+        if section or self._parts_style!=style:
+            parts=prism_parts(grid,self._band_limits,mesh.shape[2],smooth,section,mesh.bounds is not None,self.edges.isChecked())
+            if not section:
+                self._shell_parts=parts
+                self._parts_style=style
+        else:
+            parts=self._shell_parts
+        actors=[]
+        for upper,part,wire in parts:
+            name=prefix+('upper-prisms' if upper else 'lower-shell')
+            actor=self.plotter.add_mesh(part,name=name,opacity=self.opacity.value() if self.opacity.isEnabled() else 1.,
+                                        show_edges=self.edges.isChecked() and not (upper and smooth),
+                                        lighting=not section,ambient=0.65,diffuse=0.35,
+                                        show_scalar_bar=show_bar,render=False,**options)
+            actors.append(actor)
+            if wire is not None:
+                actors.append(self.plotter.add_mesh(wire,name=name+'-edges',
+                              color='#404040',show_scalar_bar=False,render=False))
+            if not upper and not section and self.kind.currentIndex()==0 and mesh.size<=250000:
+                lod_options={k:v for k,v in options.items() if k!='scalar_bar_args'}
+                self.prepare_lod(part,actor,lod_options,(self._geometry_key,key,smooth))
+            show_bar=False
+        return actors
+
+    def section_geometry(self,axis,coordinate,origin,scale,limits):
+        from .voxel_surface import section_faces
+        cutoff=np.max(np.abs(self._property_sample))*self.threshold.value()/100
+        part=section_faces(self.result,self.component.currentText(),axis,coordinate,limits,cutoff)
+        if part.n_cells:
+            part.translate(-origin,inplace=True)
+            part.scale(scale,inplace=True)
+        return part
+
+    def attach_density_clip(self,actors,grid,origin,scale,limits,options):
+        from time import monotonic
+        from vtkmodules.vtkCommonDataModel import vtkPlane
+        axis=self.clip_normal.currentIndex()
+        sign=-1 if axis==2 else 1
+        normal=np.eye(3)[axis]*sign
+        position=np.array(grid.center)
+        plane=vtkPlane()
+        plane.SetNormal(normal)
+        for actor in actors:
+            actor.mapper.AddClippingPlane(plane)
+        cap_actors=[]
+        last=None
+        last_draw=0.
+        def update(coordinate):
+            nonlocal last,last_draw
+            coordinate=float(np.clip(coordinate,*limits[axis]))
+            position[axis]=(sign*coordinate-origin[axis])*scale[axis]
+            # Suppress coplanar shell fragments exactly at a voxel boundary.
+            spacing=(limits[axis,1]-limits[axis,0])*scale[axis]
+            plane.SetOrigin(position+normal*(spacing*1e-9))
+            if last==coordinate:
+                return
+            last=coordinate
+            last_draw=monotonic()
+            for actor in cap_actors:
+                self.plotter.remove_actor(actor,render=False,reset_camera=False)
+            cap_actors.clear()
+            cap=self.section_geometry(axis,coordinate,origin,scale,limits)
+            if cap.n_cells:
+                cap_actors.extend(self.render_prism_shell(cap,options,prefix='cut-',show_bar=False,section=True))
+        update(self.slice_coordinates[axis].value())
+        widget=self.plotter.add_plane_widget(None,normal=normal,origin=position,bounds=grid.bounds,
+                          normal_rotation=False,outline_translation=False,test_callback=False)
+        widget.GetPlaneProperty().SetOpacity(0)
+        widget.GetSelectedPlaneProperty().SetOpacity(0)
+        def moved(widget,event):
+            value=(widget.GetOrigin()[axis]/scale[axis]+origin[axis])*sign
+            if event=='EndInteractionEvent' or monotonic()-last_draw>=0.05:
+                update(value)
+                self.plotter.render()
+            if event=='EndInteractionEvent':
+                if not limits[axis,0]<=value<=limits[axis,1]:
+                    widget.SetOrigin(position)
+                self.plane_moved(widget,axis,origin,scale)
+        widget.AddObserver('InteractionEvent',moved)
+        widget.AddObserver('EndInteractionEvent',moved)
 
     def sync_depth_controls(self):
         self.depth_slider.blockSignals(True); self.depth_slider.setValue(self.slices[2].value()); self.depth_slider.blockSignals(False)
@@ -684,37 +782,7 @@ class ModelView(QWidget):
         self.slices[index].setValue(round((value-axis[0])/(axis[-1]-axis[0])*100)); self._explicit_slices.add(index); self.sync_depth_controls()
         self.state_changed.emit()
 
-    def render_section_textures(self,origin,scale,cmap,clim,options):
-        import pyvista as pv
-        from .section_rendering import sample_section
-        # Scalar interpolation precedes palette mapping; the GPU then moves a
-        # four-vertex textured plane rather than a dense triangulated section.
-        scalar_cmap,scalar_norm,_=self.colors_for(self.result,self._geometry['property'])
-        actor=None
-        for axis,enabled in enumerate(self.slice_enabled):
-            if not enabled.isChecked(): continue
-            coordinate=self.slice_coordinates[axis].value()
-            image,extent=sample_section(self.result,axis,coordinate,component=self.component.currentText())
-            u0,u1,v0,v1=extent; free=[i for i in range(3) if i!=axis]
-            if self.clip_enabled.isChecked():
-                limits=[(a.value(),b.value()) for a,b in self.clip_ranges]
-                xx=np.linspace(u0,u1,image.shape[1],endpoint=False)+(u1-u0)/image.shape[1]/2
-                yy=np.linspace(v0,v1,image.shape[0],endpoint=False)+(v1-v0)/image.shape[0]/2
-                keep=(xx[None,:]>=limits[free[0]][0])&(xx[None,:]<=limits[free[0]][1])&(yy[:,None]>=limits[free[1]][0])&(yy[:,None]<=limits[free[1]][1])
-                image[~keep]=np.nan
-                if not limits[axis][0]<=coordinate<=limits[axis][1]: continue
-            if not np.isfinite(image).any(): continue
-            points=np.zeros((4,3)); points[:,axis]=coordinate
-            points[:,free[0]]=[u0,u1,u1,u0]; points[:,free[1]]=[v0,v0,v1,v1]
-            points[:,2]*=-1; points=(points-origin)*scale
-            plane=pv.PolyData(points,faces=[4,0,1,2,3]); plane.active_texture_coordinates=np.array([[0,0],[1,0],[1,1],[0,1]],dtype=float)
-            rgba=scalar_cmap(scalar_norm(np.ma.masked_invalid(image)),bytes=True); rgba[~np.isfinite(image),3]=0
-            texture=pv.Texture(np.ascontiguousarray(rgba[::-1])); texture.interpolate=True
-            actor=self.plotter.add_mesh(plane,texture=texture,opacity=self.opacity.value(),lighting=False,show_scalar_bar=False)
-        if actor is not None:
-            actor.mapper.lookup_table=pv.LookupTable(cmap=cmap,scalar_range=clim)
-            actor.mapper.scalar_range=clim
-            self.plotter.add_scalar_bar(mapper=actor.mapper,**options['scalar_bar_args'])
+
 
     def shutdown(self):
         self._shutting_down=True
