@@ -1,5 +1,5 @@
 """Initial voxel models, explicit coordinate conventions and reversible operations."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, InitVar
 from pathlib import Path
 import json
 import os
@@ -21,8 +21,11 @@ class VoxelModel:
     source_path: str = ''
     source_array: str = ''
 
-    def __post_init__(self):
-        self.values = np.asarray(self.values, dtype=float).copy()
+    own_values: InitVar[bool] = False
+
+    def __post_init__(self,own_values):
+        self.values = np.asarray(self.values, dtype=float)
+        if not own_values: self.values=self.values.copy()
         shape = (self.mesh.size,3) if self.mode == 'vector' else (self.mesh.size,)
         if self.values.shape != shape:
             raise ValueError(f'Ожидались свойства {shape}, получено {self.values.shape}.')
@@ -94,6 +97,32 @@ def _numbers(path):
                 yield from repeat(float(value.replace('D','E').replace('d','e')),int(count))
 
 
+def _ubc_blocks(path):
+    from itertools import islice, repeat
+    import warnings
+
+    def expanded(lines):
+        for line in lines:
+            for token in line.partition(b'!')[0].partition(b'#')[0].split():
+                count,value=token.split(b'*') if b'*' in token else (1,token)
+                count=int(count)
+                if count<0: raise ValueError('Неверный повтор UBC.')
+                yield from repeat(float(value.upper().replace(b'D',b'E')),count)
+
+    with Path(path).open('rb') as stream:
+        while lines:=list(islice(stream,32768)):
+            lines[0]=lines[0].removeprefix(b'\xef\xbb\xbf')
+            data=b' '.join(lines)
+            if any(marker in data for marker in (b'*',b'#',b'!')):
+                tokens=expanded(lines)
+                while (block:=np.fromiter(islice(tokens,65536),dtype=float)).size:
+                    yield block
+            else:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('error',DeprecationWarning)
+                    yield np.fromstring(data.replace(b'D',b'E').replace(b'd',b'e'),sep=' ')
+
+
 def read_ubc(mesh_path,model_path,mode='gravity',dummy=None,crs=''):
     """UBC tensor mesh: SW top elevation; z fastest, East next, North last."""
     a = np.asarray(list(_numbers(mesh_path)))
@@ -104,14 +133,26 @@ def read_ubc(mesh_path,model_path,mode='gravity',dummy=None,crs=''):
     nx,ny,nz = counts; widths = np.split(a[6:],[nx,nx+ny])
     if any(np.any(w<=0) for w in widths): raise ValueError('Размеры UBC ячеек должны быть >0.')
     mesh = Mesh(a[3]+np.r_[0,np.cumsum(widths[0])],a[4]+np.r_[0,np.cumsum(widths[1])],-a[5]+np.r_[0,np.cumsum(widths[2])])
-    v = np.fromiter(_numbers(model_path),dtype=float)
-    components = 3 if mode=='vector' else 1
-    if v.size!=mesh.size*components: raise ValueError('UBC model: число свойств не соответствует mesh.')
-    cube = v.reshape((ny,nx,nz)+(() if components==1 else (3,))).swapaxes(0,1)
-    v = cube.reshape((mesh.size,)+(() if components==1 else (3,)))
-    valid = np.isfinite(v) & ((v != dummy) if dummy is not None else True)
-    mesh.active = valid if components==1 else valid.all(axis=1)
-    return VoxelModel(mesh,v,mode,crs,[dict(operation='UBC import',source=Path(model_path).name,dummy=dummy)])
+    components=3 if mode=='vector' else 1
+    v=np.empty((mesh.size,components))
+    cursor=0
+    for block in _ubc_blocks(model_path):
+        end=cursor+len(block)
+        if end>v.size: raise ValueError('UBC model: число свойств не соответствует mesh.')
+        src=np.arange(cursor,end)
+        cell=src//components
+        y,remainder=np.divmod(cell,nx*nz)
+        x,z=np.divmod(remainder,nz)
+        v[(x*ny+y)*nz+z,src%components]=block
+        cursor=end
+    if cursor!=v.size: raise ValueError('UBC model: число свойств не соответствует mesh.')
+    for start in range(0,mesh.size,131072):
+        s=slice(start,start+131072)
+        valid=np.isfinite(v[s])
+        if dummy is not None: valid &= v[s]!=dummy
+        mesh.active[s]=valid.all(axis=1)
+    return VoxelModel(mesh,v[:,0] if components==1 else v,mode,crs,
+                      [dict(operation='UBC import',source=Path(model_path).name,dummy=dummy)],own_values=True)
 
 
 def read_centers(path,mode='gravity',vertical='Down',crs=''):

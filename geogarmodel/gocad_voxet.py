@@ -79,8 +79,8 @@ def read_voxet(path,mode='gravity',crs='',property_id=None):
         selected=[by_name[k] for k in ('JE','JN','JD')]
     else:
         selected=[property_id or next(iter(props))]
-    values=[]
-    for key in selected:
+    values=np.empty(mesh.shape+(len(selected),),dtype=float)
+    for component,key in enumerate(selected):
         p=props[key]
         size=int(p.get('PROP_ESIZE','4'))
         if size not in (4,8) or p.get('PROP_ETYPE','IEEE').upper()!='IEEE' or p.get('PROP_FORMAT','RAW').upper()!='RAW':
@@ -94,14 +94,18 @@ def read_voxet(path,mode='gravity',crs='',property_id=None):
         if offset<0 or binary.stat().st_size-offset<mesh.size*size:
             raise ValueError('Неверное смещение или неполный бинарный файл Voxet.')
         raw=np.memmap(binary,dtype=dtype,mode='r',offset=offset,shape=n,order='F')
-        v=np.asarray(raw.transpose(np.argsort(xyz))[tuple(rev)],dtype=float).ravel()
-        mask=np.isfinite(v)
-        if 'PROP_NO_DATA_VALUE' in p:
-            mask &= v!=np.array(float(p['PROP_NO_DATA_VALUE']),dtype=dtype).item()
-        mesh.active &= mask
-        values.append(np.where(mask,v,0.))
-    return VoxelModel(mesh,values[0] if len(values)==1 else np.column_stack(values),
-                      mode,meta.get('crs') or crs,[dict(operation='GOCAD Voxet',properties=selected)])
+        dest=values[...,component][tuple(rev)].transpose(xyz)
+        active=mesh.active.reshape(mesh.shape)[tuple(rev)].transpose(xyz)
+        dummy=np.array(float(p['PROP_NO_DATA_VALUE']),dtype=dtype).item() if 'PROP_NO_DATA_VALUE' in p else None
+        for w in range(n[2]):
+            plane=raw[:,:,w]
+            dest[:,:,w]=plane
+            valid=np.isfinite(plane)
+            if dummy is not None: valid &= plane!=dummy
+            active[:,:,w]&=valid
+    shape=(mesh.size,) if len(selected)==1 else (mesh.size,len(selected))
+    return VoxelModel(mesh,values.reshape(shape),mode,meta.get('crs') or crs,
+                      [dict(operation='GOCAD Voxet',properties=selected)],own_values=True)
 
 
 def write_voxet(result,path,policy='exact'):

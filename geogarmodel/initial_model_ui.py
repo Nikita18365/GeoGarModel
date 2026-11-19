@@ -51,8 +51,11 @@ class InitialModelPanel(QGroupBox):
         self.undo_model=previous.copy() if previous is not None else (self.model.copy() if self.model is not None else None)
         if previous is not None: model.source_path=''; model.source_array=''
         self.model=model; self.source.setCurrentIndex(1)
-        m=model.mesh; v=model.values[m.active]
-        self.info.setText(f'{m.shape} · {m.active.sum():,}/{m.size:,} активных · {model.mode}\nE: {m.east[0]:g}…{m.east[-1]:g}; N: {m.north[0]:g}…{m.north[-1]:g}\nDown: {m.depth[0]:g}…{m.depth[-1]:g} м; свойства {v.min():.5g}…{v.max():.5g}\nГеометрия загруженной модели используется при запуске. Nx/Ny/Nz применяются только к новой сетке или переносу.')
+        m=model.mesh
+        mask=m.active[:,None] if model.values.ndim==2 else m.active
+        minimum=np.min(model.values,where=mask,initial=np.inf)
+        maximum=np.max(model.values,where=mask,initial=-np.inf)
+        self.info.setText(f'{m.shape} · {m.active.sum():,}/{m.size:,} активных · {model.mode}\nE: {m.east[0]:g}…{m.east[-1]:g}; N: {m.north[0]:g}…{m.north[-1]:g}\nDown: {m.depth[0]:g}…{m.depth[-1]:g} м; свойства {minimum:.5g}…{maximum:.5g}\nГеометрия загруженной модели используется при запуске. Nx/Ny/Nz применяются только к новой сетке или переносу.')
         if model.crs: self.tab.crs.setCurrentText(model.crs)
         self.tab.status.setText('Начальная модель готова. Проверьте единицы, диапазон свойств и границы ограничения.')
 
@@ -64,7 +67,17 @@ class InitialModelPanel(QGroupBox):
             model_path,_=QFileDialog.getOpenFileName(self,'UBC свойства (соответствующий MOD/SUS/DEN)','','Все файлы (*)')
             if not model_path: return None
             options['model_path']=model_path
-            dummy,ok=QInputDialog.getText(self,'UBC dummy','Неактивное значение (пусто = все конечные активны; Geosoft export часто −1):')
+            import json
+            default=''
+            sidecar=Path(path).with_suffix('.json')
+            if sidecar.is_file():
+                try:
+                    meta=json.loads(sidecar.read_text(encoding='utf-8-sig'))
+                    if Path(model_path).name in meta.get('model_files',[]):
+                        default=str(float(meta['dummy']))
+                except (OSError,ValueError,TypeError,KeyError,AttributeError):
+                    pass
+            dummy,ok=QInputDialog.getText(self,'UBC dummy','Неактивное значение (пусто = все конечные активны):',text=default)
             if not ok: return None
             options['dummy']=float(dummy) if dummy.strip() else None
         elif ext in ('.vtk','.vtr','.vti'):
