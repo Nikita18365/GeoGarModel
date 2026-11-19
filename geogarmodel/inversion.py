@@ -30,13 +30,22 @@ class Mesh:
         self.active = np.ones(self.size, dtype=bool) if self.active is None else np.asarray(self.active, dtype=bool).reshape(self.size).copy()
         if self.bounds is not None:
             self.bounds = np.asarray(self.bounds, dtype=float).reshape(self.size,6).copy()
-            if not np.isfinite(self.bounds).all() or np.any(self.bounds[self.active,3:] <= self.bounds[self.active,:3]):
-                raise ValueError('Некорректные границы активных призм.')
-            bounds=self.bounds; self.bounds=None
-            base=self.cells()
-            if np.any(bounds[self.active,:3]<base[self.active,:3]) or np.any(bounds[self.active,3:]>base[self.active,3:]):
-                raise ValueError('Обрезанные призмы должны лежать внутри исходных ячеек.')
-            self.bounds=None if np.array_equal(bounds,base) else bounds
+            clipped = False
+            for start in range(0, self.size, 131072):
+                stop = min(self.size, start + 131072)
+                bounds = self.bounds[start:stop]
+                active = self.active[start:stop]
+                if not np.isfinite(bounds).all() or np.any((bounds[:, 3:] <= bounds[:, :3]) & active[:, None]):
+                    raise ValueError('Некорректные границы активных призм.')
+                indices = np.unravel_index(np.arange(start, stop), self.shape)
+                for dim, (axis, index) in enumerate(zip((self.east, self.north, self.depth), indices)):
+                    low, high = axis[index], axis[index + 1]
+                    if np.any(active & ((bounds[:, dim] < low) | (bounds[:, dim + 3] > high))):
+                        raise ValueError('Обрезанные призмы должны лежать внутри исходных ячеек.')
+                    if not clipped:
+                        clipped = not (np.array_equal(bounds[:, dim], low) and np.array_equal(bounds[:, dim + 3], high))
+            if not clipped:
+                self.bounds = None
 
     @property
     def shape(self):
@@ -317,13 +326,16 @@ class InversionResult:
     def load(cls, path):
         with np.load(path,allow_pickle=False) as saved:
             meta=json.loads(str(saved['metadata']))
-            mesh=Mesh(saved['east'],saved['north'],saved['depth'],saved['active'] if 'active' in saved else None,saved['bounds'] if 'bounds' in saved and saved['bounds'].size else None)
-            model=saved['model'].copy()
+            bounds=saved['bounds'] if 'bounds' in saved.files else None
+            mesh=Mesh(saved['east'],saved['north'],saved['depth'],saved['active'] if 'active' in saved.files else None,
+                      bounds if bounds is not None and bounds.size else None)
+            del bounds
+            model=saved['model']
             expected=(mesh.size,3) if meta['settings']['mode']=='vector' else (mesh.size,)
             if model.shape!=expected or not np.isfinite(model).all():
                 raise ValueError('Некорректная размерность / значения 3D-модели.')
-            return cls(mesh,model,saved['observations'].copy(),saved['observed'].copy(),
-                       saved['predicted'].copy(),meta['history'],meta['settings'],meta['status'])
+            return cls(mesh,model,saved['observations'],saved['observed'],
+                       saved['predicted'],meta['history'],meta['settings'],meta['status'])
 
 
 def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
