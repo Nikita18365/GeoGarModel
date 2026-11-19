@@ -68,7 +68,7 @@ class InversionTab(QWidget):
         for code,name in gsk2011_zones(): self.crs.addItem(f'{code} | {name}')
         self.crs.setCurrentText('EPSG:20910 | GSK-2011 / Gauss-Kruger zone 10')
         self.height_constant=self.number(-1e6,1e6,0)
-        self.sigma=self.number(1e-8,1e8,1,6)
+        self.sigma=self.number(1e-8,1e8,1,8)
         self.stride=self.integer(1,100000,1)
         for name,w in [('East, м',self.east),('North, м',self.north),('Высота Up, м',self.height),('Высота константа',self.height_constant),('Аномалия',self.value),('Ошибка σ: столбец',self.error),('σ константа',self.sigma),('CRS',self.crs)]: form.addRow(name,w)
         panel.addWidget(data)
@@ -131,6 +131,43 @@ class InversionTab(QWidget):
         self.early_stop.toggled.connect(self.early_tolerance.setEnabled)
         self.early_stop.toggled.connect(self.early_patience.setEnabled)
         self.early_tolerance.setToolTip('Если относительное уменьшение RMS/σ меньше порога несколько итераций подряд, возвращается лучшая завершённая модель.')
+        self.reference_model=None
+        self.reference_source=QComboBox()
+        self.reference_source.addItems(['Нулевой контраст','Начальная модель','Отдельный воксель'])
+        self.reference_load=QPushButton('Загрузить опорную модель…')
+        self.reference_load.clicked.connect(lambda:self.workbench.guard(self.load_reference))
+        self.reference_info=QLabel(); self.reference_info.setWordWrap(True)
+        self.penalty_norm=QComboBox()
+        for title,key in [('Квадратичная L2','l2'),('Компактная модель · сглаженная L1','compact'),('Сохранение границ · сглаженная TV','tv')]:
+            self.penalty_norm.addItem(title,key)
+        self.penalty_weight=QComboBox()
+        for title,key in [('Равномерные','uniform'),('По глубине','depth'),('По чувствительности','sensitivity')]:
+            self.penalty_weight.addItem(title,key)
+        self.weight_power=self.number(0,4,1)
+        self.vertical_factor=self.number(0,1000,1,4)
+        self.penalty_epsilon=self.number(.000001,1e5,.01,6)
+        self.structural=QCheckBox('Учитывать границы опорной модели')
+        self.freeze_reference=QCheckBox('Зафиксировать активные ячейки опорного вокселя')
+        self.boundary_jump=self.number(.000001,1e5,.1,6)
+        fft_form=QFormLayout()
+        fft_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        fft_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        fft_fields=[('Опорная модель',self.reference_source),('Тип штрафа',self.penalty_norm),
+                    ('Масштаб перехода, г/см³',self.penalty_epsilon),('Вес малости',self.penalty_weight),
+                    ('Показатель веса',self.weight_power),('Множитель гладкости по Z',self.vertical_factor),
+                    ('Порог скачка, г/см³',self.boundary_jump)]
+        for name,widget in fft_fields:
+            fft_form.addRow(name,widget)
+            if widget is self.reference_source:
+                fft_form.addRow(self.reference_load); fft_form.addRow(self.reference_info); fft_form.addRow(self.freeze_reference)
+            if widget is self.vertical_factor: fft_form.addRow(self.structural)
+        fft_content=QWidget(); fft_content.setLayout(fft_form)
+        self.fft_prior_section=Disclosure('Опорная модель и регуляризация FFT',fft_content)
+        sf.addRow(self.fft_prior_section)
+        self._prior_form=fft_form
+        for combo in (self.reference_source,self.penalty_norm,self.penalty_weight):
+            combo.currentIndexChanged.connect(self.update_prior_controls)
+        self.structural.toggled.connect(self.update_prior_controls)
         compute=QGroupBox('07 · Вычисления'); cf=QFormLayout(compute)
         cf.addRow('Устройство',self.device); cf.addRow('GPU ID',self.gpu)
         cf.addRow('Режим памяти',self.memory_policy); cf.addRow('Лимит кэша, МиБ',self.cache)
@@ -148,10 +185,6 @@ class InversionTab(QWidget):
         form_details(sf,[self.early_tolerance,self.early_patience],'Параметры ранней остановки')
         self._solver_group=solver
         self._fft_hidden=[self.stride,form.labelForField(self.stride)]
-        for index in range(sf.count()):
-            widget=sf.itemAt(index).widget()
-            if widget is not None and widget not in (self.iterations,sf.labelForField(self.iterations)):
-                self._fft_hidden.append(widget)
         mesh_form=mesh_group.layout()
         self._fft_new_grid=mesh_group
         self._initial_label=settings.layout().labelForField(self.initial)
@@ -172,6 +205,8 @@ class InversionTab(QWidget):
         for label in left.findChildren(QLabel): label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         for combo in left.findChildren(QComboBox):
             combo.setMinimumContentsLength(10); combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        from .inversion_help import install_parameter_help
+        install_parameter_help(self,left)
         scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(left)
         controls=QWidget(); cl=QVBoxLayout(controls); cl.addWidget(scroll)
         self.run_button=self.button('Запустить 3D-моделирование',self.run,cl); self.run_button.setObjectName('primary')
@@ -260,6 +295,43 @@ class InversionTab(QWidget):
     def is_fft(self):
         return self.mode.currentData()=='gravity' and self.method.currentData()=='layer_fft'
 
+    def load_reference(self):
+        loader=self.initial_panel.ask_load('gravity','Опорная модель плотности')
+        if loader is not None: self.model_task(loader,self.set_reference)
+
+    def set_reference(self,model):
+        self.reference_model=model
+        self.reference_info.setText((model.source_path or 'Опорный воксель') if model is not None else 'Выберите файл вокселя.')
+        if model is not None: self.reference_source.setCurrentIndex(2)
+
+    def update_prior_controls(self,*args):
+        independent=self.reference_source.currentIndex()==2
+        self.reference_load.setVisible(independent)
+        self.reference_info.setVisible(independent)
+        self.freeze_reference.setVisible(independent)
+        for widget,visible in ((self.penalty_epsilon,self.penalty_norm.currentData()!='l2'),
+                               (self.weight_power,self.penalty_weight.currentData()!='uniform'),
+                               (self.boundary_jump,self.structural.isChecked())):
+            widget.setVisible(visible)
+            self._prior_form.labelForField(widget).setVisible(visible)
+
+    def reference_values(self,initial):
+        selection=self.reference_source.currentIndex()
+        if selection==0:
+            if self.structural.isChecked(): raise ValueError('Для структурных границ выберите опорную модель.')
+            return None
+        if selection==1: return initial.values
+        ref=self.reference_model
+        if ref is None: raise ValueError('Загрузите отдельную опорную модель.')
+        if ref.mode!='gravity' or (ref.crs and initial.crs and ref.crs!=initial.crs):
+            raise ValueError('Проверьте свойство плотности и систему координат опорного вокселя.')
+        if any(not np.array_equal(getattr(ref.mesh,key),getattr(initial.mesh,key)) for key in ('east','north','depth')):
+            raise ValueError('Границы сетки опорной модели должны совпадать с расчётными, включая запас.')
+        if np.any(initial.mesh.active & ~ref.mesh.active):
+            if not self.freeze_reference.isChecked(): raise ValueError('Опорная модель должна покрывать все активные ячейки.')
+            return np.where(ref.mesh.active,ref.values,initial.values)
+        return ref.values
+
     def update_memory_controls(self):
         manual=self.memory_policy.currentData()=='manual'
         self.cache.setEnabled(manual)
@@ -270,7 +342,8 @@ class InversionTab(QWidget):
         fft=self.is_fft()
         self.update_memory_controls()
         self.method.setVisible(self.mode.currentData()=='gravity')
-        self._solver_group.setTitle('Предел итераций' if fft else '06 · Решатель и регуляризация')
+        self.fft_prior_section.setVisible(fft)
+        self.update_prior_controls()
         for widget in self._fft_hidden: widget.setVisible(not fft)
         new_grid=not fft or self.initial_panel.source.currentIndex()==0
         self._fft_new_grid.setTitle('03 · Сетка и запас по краям' if fft else '03 · Новая сетка / сетка переноса')
@@ -448,10 +521,22 @@ class InversionTab(QWidget):
                            cache_mb=self.cache.value(),memory_policy=self.memory_policy.currentData())
         if not fft:
             operator_args.update(field_strength=self.field.value(),inclination=self.inc.value(),declination=self.dec.value())
-            settings.update(damping=self.damping.value(),smoothness=self.smooth.value(),
+        settings.update(damping=self.damping.value(),smoothness=self.smooth.value(),
                             depth_index=self.depth_index.value(),step_scale=self.step.value(),target_rms=self.target.value(),
                             fit_offset=self.offset.isChecked(),early_stop=self.early_stop.isChecked(),
                             early_tolerance=self.early_tolerance.value()/100,early_patience=self.early_patience.value())
+        reference_label=None
+        if fft:
+            reference_label=self.reference_source.currentText()
+            if self.reference_source.currentIndex()==2 and self.reference_model is not None:
+                reference_label=self.reference_model.source_path or reference_label
+            settings.update(reference=self.reference_values(initial_model),weighting=self.penalty_weight.currentData(),
+                            norm=self.penalty_norm.currentData(),weight_power=self.weight_power.value(),
+                            vertical_factor=self.vertical_factor.value(),epsilon=self.penalty_epsilon.value(),
+                            boundary_jump=self.boundary_jump.value() if self.structural.isChecked() else None)
+            if self.reference_source.currentIndex()==2 and self.freeze_reference.isChecked():
+                settings['fixed_mask']=mesh.active & self.reference_model.mesh.active
+                if not settings['fixed_mask'].any(): raise ValueError('В опорном вокселе нет активных ячеек для фиксации.')
         def compute(progress,cancel):
             started=perf_counter()
             op=(LayerFFT(mesh,observations,**operator_args,cancel_event=cancel) if fft else
@@ -461,6 +546,7 @@ class InversionTab(QWidget):
             result.settings['run_elapsed_seconds']=perf_counter()-started
             result.settings.update(crs=crs,gpu_id=operator_args['gpu_id'])
             result.settings.update(initial_model_history=initial_model.history,observation_stride=observation_stride)
+            if fft: result.settings['reference_source']=reference_label
             return result
         self.result=None; self.history=[]; self.curve.setData([],[]); self.log.clear()
         self.timing_curve.setData([],[])

@@ -12,7 +12,8 @@ ML_CONTROLS=('x_column','y_column','target','spatial','block','test_fraction','s
 INV_CONTROLS=('mode','east','north','height','value','error','crs','height_constant','sigma','stride','nx','ny','nz',
     'top','bottom','padding','cache','memory_policy','field','inc','dec','lower','upper','initial','iterations','damping',
     'smooth','depth_index','target','step','offset','device','gpu','early_stop','early_tolerance','early_patience',
-    'method','fft_grid','extend_fft')
+    'method','fft_grid','extend_fft','reference_source','penalty_norm','penalty_weight','weight_power',
+    'vertical_factor','penalty_epsilon','structural','boundary_jump','freeze_reference')
 
 
 def controls_state(owner,names):
@@ -78,6 +79,7 @@ class ProjectWorkspace:
             self.best_trial_label.setText('Лучший trial: ещё нет завершённых результатов')
             self.table_info.setText('Загрузите обучающую и прогнозную таблицы.')
             t=self.inversion; t.result=t.table=None; t.history=[]; t.initial_panel.model=t.initial_panel.undo_model=None
+            t.set_reference(None)
             for w in (t.east,t.north,t.height,t.value,t.error): w.clear()
             apply_controls(t,self._inv_defaults); t.mode_changed(); t.initial_panel.source.setCurrentIndex(0)
             t.initial_panel.info.setText('Без файла: новая сетка заполняется полем «Начальное значение».')
@@ -116,7 +118,8 @@ class ProjectWorkspace:
         inversion_key=None
         if t.result is not None:
             inversion_key=seen.setdefault(id(t.result),str(len(seen))); models[inversion_key]=t.result
-        voxels={key:value for key,value in [('initial',t.initial_panel.model),('undo',t.initial_panel.undo_model)] if value is not None}
+        voxels={key:value for key,value in [('initial',t.initial_panel.model),('undo',t.initial_panel.undo_model),
+                                            ('reference',t.reference_model)] if value is not None}
         state=dict(name=self.map_project_name,entries=entries,windows=t.scene.snapshot(),inversion_result=inversion_key,
             ml_controls=controls_state(self,ML_CONTROLS),inv_controls=controls_state(t,INV_CONTROLS),
             transform_controls=controls_state(self,('operation','height','wave','degree')),
@@ -179,13 +182,18 @@ class ProjectWorkspace:
                 inversion_controls = dict(state['inv_controls'])
                 if inversion_controls['mode']=='Послойная 2D FFT · плотностное моделирование':
                     inversion_controls.update(mode=t.mode.itemText(0), method='Послойная 2D FFT', padding=0.)
+                if inversion_controls.get('method')=='Послойная 2D FFT' and 'penalty_norm' not in inversion_controls:
+                    for name in ('depth_index','smooth','damping','step','target','offset','early_stop','early_patience','early_tolerance'):
+                        inversion_controls[name]=self._inv_defaults[name]
                 t.mode.setCurrentText(inversion_controls['mode'])
                 t.mode_changed()
                 apply_controls(t,inversion_controls)
                 t.cache.setEnabled(t.memory_policy.currentData()=='manual'); t.early_tolerance.setEnabled(t.early_stop.isChecked()); t.early_patience.setEnabled(t.early_stop.isChecked())
                 if 'initial' in data['voxels']:
                     t.initial_panel.assign(data['voxels']['initial'],check_crs=False)
-                    for key,model in data['voxels'].items(): model.source_path=state['initial_sources'][key]['path']; model.source_array=state['initial_sources'][key]['array']
+                for key,model in data['voxels'].items():
+                    model.source_path=state['initial_sources'][key]['path']; model.source_array=state['initial_sources'][key]['array']
+                t.set_reference(data['voxels'].get('reference'))
                 t.initial_panel.undo_model=data['voxels'].get('undo'); t.initial_panel.source.setCurrentIndex(state['initial_source'])
                 apply_controls(t,inversion_controls)
                 t.update_fft_inputs()

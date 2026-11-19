@@ -30,6 +30,13 @@ def test_fft_prisms_and_adjoint(device):
     actual=fft.value_gradient(fft.xp.asarray(model),fft.xp.asarray(data),fft.xp.asarray(sigma),True)
     for a,b in zip(actual,expected): np.testing.assert_allclose(host(a),b,atol=1e-9)
     assert len(fft.partial)==2
+    from geogarmodel.inversion import prism_kernel
+    matrix=prism_kernel(obs,mesh.cells())
+    matrix[:,~mesh.active]=0
+    for fit_offset in (False,True):
+        centered=matrix-np.average(matrix,axis=0,weights=1/sigma**2) if fit_offset else matrix
+        np.testing.assert_allclose(host(fft.sensitivity_norm(sigma,fit_offset)),
+                                   np.linalg.norm(centered/sigma[:,None],axis=0),atol=1e-9)
     obs[-1,2]+=1
     with pytest.raises(ValueError,match='постоянной'): LayerFFT(mesh,obs)
     obs[-1,2]-=1
@@ -37,11 +44,19 @@ def test_fft_prisms_and_adjoint(device):
     with pytest.raises(ValueError,match='регулярной'): LayerFFT(mesh,obs)
 
 
-def test_fft_workflow(qt_application_lifetime,tmp_path):
+def test_fft_workflow(qt_application_lifetime,tmp_path,monkeypatch):
     from PyQt5.QtCore import QEventLoop,QTimer
     from geogarmodel.app import MainWindow
     window=MainWindow()
     tab=window.inversion
+    # This test exercises the solver dialog and project archive. VTK has separate rendering tests.
+    monkeypatch.setattr(tab.scene,'render',lambda *args:None)
+    from geogarmodel.inversion_help import ParameterHelp
+    from PyQt5.QtWidgets import QMessageBox
+    shown=[]
+    monkeypatch.setattr(QMessageBox,'information',lambda parent,title,body:shown.append(body))
+    next(button for button in tab.findChildren(ParameterHelp) if button.field is tab.depth_index).click()
+    assert 'от 0 до 4' in shown[0]
     try:
         tab.method.setCurrentIndex(1)
         tab.demo()
@@ -56,6 +71,17 @@ def test_fft_workflow(qt_application_lifetime,tmp_path):
         tab.table.loc[0,'height']=10
         with pytest.raises(ValueError,match='постоянной'): tab.run()
         tab.table.loc[0,'height']=0
+        ref=tab.prepared_model()
+        ref.values[::2]=.15
+        tab.set_reference(ref)
+        tab.structural.setChecked(True)
+        tab.penalty_weight.setCurrentIndex(2)
+        tab.penalty_norm.setCurrentIndex(2)
+        tab.vertical_factor.setValue(.3)
+        tab.target.setValue(.2)
+        tab.early_stop.setChecked(True)
+        tab.early_tolerance.setValue(99)
+        tab.early_patience.setValue(2)
         tab.run()
         loop=QEventLoop()
         tab.worker.finished.connect(loop.quit)
@@ -64,6 +90,9 @@ def test_fft_workflow(qt_application_lifetime,tmp_path):
         assert tab.result.settings['resources']['method']=='layer_fft'
         assert tab.result.mesh.shape==(21,11,4)
         assert tab.result.settings['resources']['cached_layers']==0
+        assert tab.result.status=='early_stop'
+        assert tab.result.settings['vertical_factor']==.3 and tab.result.settings['target_rms']==.2
+        assert tab.result.settings['norm']=='tv' and tab.result.settings['weighting']=='sensitivity'
         assert tab.result.history[-1]['rmse']<tab.result.history[0]['rmse']
         path=tmp_path/'fft.ggproject'
         window.save_project_to(path)
@@ -73,7 +102,35 @@ def test_fft_workflow(qt_application_lifetime,tmp_path):
         assert tab.is_fft() and tab.stride.isHidden()
         assert tab.fft_grid.currentIndex()==1 and tab.nx.value()==21 and tab.cache.isEnabled()
         assert tab.result.settings['resources']['method']=='layer_fft'
+        np.testing.assert_array_equal(tab.reference_model.values,ref.values)
+        assert tab.structural.isChecked() and tab.early_stop.isChecked()
     finally: window.close()
+
+
+@pytest.mark.parametrize('norm',['compact','tv','l2'])
+def test_prior_regularizer_gradient(norm):
+    from geogarmodel.inversion import regularization
+    mesh=Mesh([0,2,4,6],[0,3,6],[1,2,4,8])
+    mesh.active[4]=False
+    rng=np.random.default_rng(57)
+    model,delta=rng.normal(size=(2,mesh.size))
+    options=dict(reference=np.arange(mesh.size)%2*.2,penalty_weights=rng.uniform(.01,1,mesh.size),
+                 norm=norm,epsilon=.03,vertical_factor=.4,boundary_jump=.1)
+    def evaluate(m): return regularization(m,mesh,.5,.7,**options)
+    step=1e-5
+    numeric=(evaluate(model+step*delta)[0]-evaluate(model-step*delta)[0])/(2*step)
+    np.testing.assert_allclose(evaluate(model)[1] @ delta,numeric,atol=1e-8)
+
+
+def test_fft_fixed_density_contributes_to_field():
+    from geogarmodel.inversion import invert
+    mesh=Mesh([0,1,2],[0,1,2],[1,2,3])
+    op=LayerFFT(mesh,np.array([[.5,.5,0],[1.5,1.5,0]]))
+    ref=np.linspace(.1,.8,mesh.size)
+    fixed=np.arange(mesh.size)%2==0
+    result=invert(op,np.array([.1,.2]),iterations=3,target_rms=0,reference=ref,fixed_mask=fixed)
+    np.testing.assert_array_equal(result.model[fixed],ref[fixed])
+    np.testing.assert_allclose(result.predicted,op.field(result.model))
 
 
 @pytest.mark.parametrize('device',['cpu','gpu'])

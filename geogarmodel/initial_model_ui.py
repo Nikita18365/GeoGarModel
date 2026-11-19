@@ -56,8 +56,8 @@ class InitialModelPanel(QGroupBox):
         if model.crs: self.tab.crs.setCurrentText(model.crs)
         self.tab.status.setText('Начальная модель готова. Проверьте единицы, диапазон свойств и границы ограничения.')
 
-    def ask_load(self,mode):
-        path,_=QFileDialog.getOpenFileName(self,'Начальная модель','','Voxel (*.geosoft_voxel *.msh *.mesh *.npz *.vtr *.vtk *.vti *.csv *.xlsx *.txt);;Все файлы (*)')
+    def ask_load(self,mode,title='Начальная модель'):
+        path,_=QFileDialog.getOpenFileName(self,title,'','Voxel (*.geosoft_voxel *.msh *.mesh *.npz *.vtr *.vtk *.vti *.csv *.xlsx *.txt);;Все файлы (*)')
         if not path: return None
         options={}; ext=Path(path).suffix.lower()
         if ext in ('.msh','.mesh'):
