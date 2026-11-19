@@ -176,7 +176,16 @@ class ModelView(QWidget):
         self.smooth_colors.setToolTip('Интерполяция для изображения. Свойства ячеек модели и экспорт не изменяются.')
         color_form.addRow('Непрозрачность',self.opacity); color_form.addRow(self.edges); color_form.addRow(self.outline)
         color_form.addRow(self.smooth_colors)
-        for control in (self.opacity,self.edges,self.outline,self.smooth_colors):
+        self.terrain_top=QCheckBox('Плавная верхняя поверхность')
+        self.terrain_top.setChecked(True)
+        self.terrain_top.setToolTip('Вид «Воксели», непрозрачность 1. Соединяет высоты верхних активных ячеек по XY только при отображении.')
+        color_form.addRow(self.terrain_top)
+        self.relief_gain=QDoubleSpinBox()
+        self.relief_gain.setRange(1,50); self.relief_gain.setValue(1); self.relief_gain.setSuffix(' ×')
+        self.relief_gain.setKeyboardTracking(False)
+        self.relief_gain.setToolTip('Усиление перепада кровли для просмотра. Подошва остаётся на месте.')
+        color_form.addRow('Усиление рельефа кровли',self.relief_gain)
+        for control in (self.opacity,self.edges,self.outline,self.smooth_colors,self.terrain_top,self.relief_gain):
             (control.valueChanged if isinstance(control,QDoubleSpinBox) else control.toggled).connect(self.refresh_if_ready)
         settings_rows.insertWidget(settings_rows.count()-1,colors_group)
         performance=QGroupBox('Быстродействие'); performance_form=QFormLayout(performance)
@@ -381,7 +390,7 @@ class ModelView(QWidget):
     def state_controls(self):
         names=('kind','component','axis_unit','camera_view','palette','reverse_palette','color_range','color_min','color_max',
             'threshold','axis_font','opacity','color_distribution','discrete_colors','color_bins','zone_values','edges','outline',
-            'smooth_colors','full_resolution','high_quality_transparency','moving_detail','rest_detail','clip_enabled','clip_normal')
+            'smooth_colors','terrain_top','relief_gain','full_resolution','high_quality_transparency','moving_detail','rest_detail','clip_enabled','clip_normal')
         controls={name:getattr(self,name) for name in names}
         for name,widgets in [('scale',self.axis_scales),('slider',self.slices),('coordinate',self.slice_coordinates),('enabled',self.slice_enabled),('clip',[w for pair in self.clip_ranges for w in pair])]:
             controls.update({f'{name}_{i}':w for i,w in enumerate(widgets)})
@@ -460,15 +469,20 @@ class ModelView(QWidget):
         # Transform display geometry only, so slices and clip widgets share its coordinates.
         # Axes below retain the unscaled physical coordinate ranges.
         scale=np.array([widget.value() for widget in self.axis_scales])
-        shell=(result.mesh.size>250000 and self.kind.currentIndex()==0
-               and self.opacity.value()==1 and not self.clip_enabled.isChecked())
+        self.terrain_top.setEnabled(result.mesh.bounds is None and self.kind.currentIndex()==0 and
+                                   self.opacity.value()==1 and not self.clip_enabled.isChecked())
+        terrain=self.terrain_top.isEnabled() and self.terrain_top.isChecked()
+        self.relief_gain.setEnabled(terrain)
+        gain=self.relief_gain.value() if terrain else 1.
+        shell=(self.kind.currentIndex()==0 and self.opacity.value()==1 and not self.clip_enabled.isChecked()
+               and (result.mesh.size>250000 or (terrain and not result.mesh.active.all())))
         overview=result.mesh.size>250000 and not shell and not self.full_resolution.isChecked()
-        geometry_key=(id(result),self.component.currentText(),tuple(scale),overview,shell,
+        geometry_key=(id(result),self.component.currentText(),tuple(scale),overview,shell,terrain,gain,
                       self.threshold.value() if shell else None)
         if not reuse_geometry or geometry_key!=self._geometry_key:
             if shell:
                 from .voxel_surface import exterior
-                grid=exterior(result,self.component.currentText(),self.threshold.value())
+                grid=exterior(result,self.component.currentText(),self.threshold.value(),smooth_top=terrain,relief_gain=gain)
             else:
                 builder=display_geometry if overview else vtk_grid
                 grid=builder(result,self.component.currentText())
@@ -502,7 +516,12 @@ class ModelView(QWidget):
             if grid.n_cells==0: self.color_note.setText('В выбранной области нет активных ячеек.'); p.render(); return
         self.info.setText(f'{result.mesh.active.sum():,} активных ячеек · {unit} · Оси: исходные East / North, Z = Up (вверх). Локальное начало геометрии: E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м. Вращение: ЛКМ; перемещение: средняя кнопка; масштаб: колесо.')
         if shell:
-            self.info.setText(self.info.text()+' · Полное разрешение · наружные грани исходных ячеек.')
+            caption=' · Полное разрешение'
+            if terrain:
+                caption+=f' · Плавная кровля {gain:g}×'
+            if gain!=1:
+                caption+=' · Высоты показа условные'
+            self.info.setText(self.info.text()+caption+' · Наружные грани исходных ячеек.')
         elif overview:
             self.info.setText(self.info.text()+' · Обзор до 40 × 40 × 40. Карты срезов и экспорт используют исходную сетку.')
         self.component.setEnabled(result.model.ndim==2)
@@ -563,7 +582,7 @@ class ModelView(QWidget):
                     color='#222222',font_size=font,bold=True,fmt='%.2f' if divisor==1000 else '%.0f',
                     use_2d=False,use_3d_text=False,
                     xtitle=f'East ({unit_label})',ytitle=f'North ({unit_label})',
-                    ztitle=f'Z ({unit_label})',n_xlabels=2 if self._compact_axes else 3,n_ylabels=2 if self._compact_axes else 3,n_zlabels=2 if self._compact_axes else 3)
+                    ztitle=(f'Z visual, relief x{gain:g} ({unit_label})' if shell and gain!=1 else f'Z ({unit_label})'),n_xlabels=2 if self._compact_axes else 3,n_ylabels=2 if self._compact_axes else 3,n_zlabels=2 if self._compact_axes else 3)
         self.bounds_axes.GetProperty().SetLineWidth(1.5)
         if camera is None or new_model or self._reorient_pending: self.fit_model()
         else:
