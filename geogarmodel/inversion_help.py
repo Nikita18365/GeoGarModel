@@ -107,5 +107,9 @@ def install_parameter_help(tab, panel):
     for name,description in HELP.items():
         field = tab.initial_panel.source if name=='source' else getattr(tab,name)
         anchor = labels.get(field,field)
-        title = anchor.text() if isinstance(anchor,(QLabel,QCheckBox)) else (field.accessibleName() or field.currentText())
+        if isinstance(anchor,(QLabel,QCheckBox)):
+            title = anchor.text()
+        else:
+            title = {'mode':'Физическое свойство','method':'Метод расчёта',
+                     'source':'Источник начальной модели'}.get(name,'Параметр расчёта')
         ParameterHelp(anchor,field,title,description)
