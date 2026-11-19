@@ -38,29 +38,102 @@ def export_zmap(result, path):
     Path(path).write_text('\n'.join(lines)+'\n',encoding='utf-8')
 
 
-def export_ubc(result, path):
-    """Tensor UBC mesh + scalar properties; vector exported as JE/JN/JD files."""
+def clipped_count(mesh):
+    from .model_archive import cell_blocks
+    if mesh.bounds is None:
+        return 0
+    return sum(int(np.count_nonzero(mesh.active[ids] & (mesh.bounds[ids]!=regular).any(axis=1)))
+               for ids,regular in cell_blocks(mesh))
+
+
+def export_ubc(result, path, policy='exact'):
+    """Stage the whole bundle before replacing any previous export."""
+    import tempfile
+    path=Path(path).with_suffix('.msh')
+    with tempfile.TemporaryDirectory(dir=path.parent) as folder:
+        root=Path(folder)
+        _write_ubc(result,root/path.name,policy)
+        outputs=list(root.iterdir())
+        backups={}
+        installed=[]
+        try:
+            for source in outputs:
+                dest=path.parent/source.name
+                if dest.is_file():
+                    backup=root/(source.name+'.bak')
+                    dest.replace(backup)
+                    backups[dest]=backup
+                source.replace(dest)
+                installed.append(dest)
+        except OSError:
+            for dest in installed: dest.unlink(missing_ok=True)
+            for dest,backup in backups.items(): backup.replace(dest)
+            raise
+
+
+def _write_ubc(result, path, policy):
+    """Write bounded strips in UBC order: depth, East, North."""
+    from .model_archive import regular_cells
     mesh=result.mesh
-    if mesh.bounds is not None:
-        raise ValueError('Обрезанные призмы нельзя точно записать в UBC tensor mesh. Выберите NPZ или VTK/VTU.')
+    count=clipped_count(mesh)
+    if policy not in ('exact','keep','mass') or (policy=='mass' and result.settings['mode']!='gravity'):
+        raise ValueError('Недопустимый способ экспорта UBC.')
+    if count and policy=='exact':
+        raise ValueError('Обрезанные призмы требуют явного выбора ступенчатого приближения.')
     path=Path(path).with_suffix('.msh')
     dummy=-1e32
-    if np.any(result.model[mesh.active]==dummy):
-        raise ValueError('Свойство совпадает с UBC dummy; выберите NPZ.')
-    lines=[' '.join(map(str,mesh.shape)),f'{mesh.east[0]:.17g} {mesh.north[0]:.17g} {-mesh.depth[0]:.17g}']
-    lines += [' '.join(f'{v:.17g}' for v in np.diff(a)) for a in (mesh.east,mesh.north,mesh.depth)]
-    values=result.model.copy(); values[~mesh.active]=dummy
-    components=[('',values)] if values.ndim==1 else [(name,values[:,i]) for i,name in enumerate(('JE','JN','JD'))]
+    nx,ny,nz=mesh.shape
+    names=[''] if result.model.ndim==1 else ['_JE','_JN','_JD']
     files=[]
-    for name,v in components:
-        dest=path.with_name(path.stem+('_'+name if name else '')+'.mod')
-        ordered=v.reshape(mesh.shape).swapaxes(0,1).ravel()
-        files.append((dest,ordered))
+    for component,name in enumerate(names):
+        dest=path.with_name(path.stem+name+'.mod')
+        files.append(dest.name)
+        with dest.open('w',encoding='ascii') as stream:
+            step=max(1,65536//nz)
+            for y in range(ny):
+                for x in range(0,nx,step):
+                    ids=((np.arange(x,min(nx,x+step))[:,None]*ny+y)*nz+np.arange(nz)).ravel()
+                    values=result.model[ids] if not name else result.model[ids,component]
+                    if count and policy=='mass':
+                        b=mesh.bounds[ids]
+                        base=regular_cells(mesh,ids)
+                        values*=np.prod(b[:,3:]-b[:,:3],axis=1)/np.prod(base[:,3:]-base[:,:3],axis=1)
+                    if np.any((values==dummy)&mesh.active[ids]):
+                        raise ValueError('Свойство совпадает с UBC dummy.')
+                    values[~mesh.active[ids]]=dummy
+                    np.savetxt(stream,values,fmt='%.17g')
+    lines=[' '.join(map(str,mesh.shape)),f'{mesh.east[0]:.17g} {mesh.north[0]:.17g} {-mesh.depth[0]:.17g}']
+    lines+=[' '.join(f'{v:.17g}' for v in np.diff(a)) for a in (mesh.east,mesh.north,mesh.depth)]
     path.write_text('\n'.join(lines)+'\n',encoding='utf-8')
-    for dest,v in files:
-        np.savetxt(dest,v,fmt='%.17g')
     meta=dict(mode=result.settings['mode'],crs=result.settings.get('crs',''),dummy=dummy,
               density_unit='g/cm3',susceptibility_unit='SI',magnetization_unit='A/m',
               components='JE East, JN North, JD Down',selected_iteration=result.settings.get('selected_iteration'),
-              model_files=[p.name for p,_ in files])
+              clipped_cells=count,geometry_policy=policy,model_files=files)
     path.with_suffix('.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding='utf-8')
+
+
+def oasis_package(result,directory,policy):
+    """Portable script uses ASCII relative names and runs inside the user's Oasis project."""
+    import tempfile
+    import os
+    directory=Path(directory)
+    if directory.exists():
+        raise ValueError('Выберите новое имя папки комплекта Oasis montaj.')
+    with tempfile.TemporaryDirectory(dir=directory.parent) as staging:
+        folder=Path(staging)/'package'
+        folder.mkdir()
+        _write_ubc(result,folder/'model.msh',policy)
+        meta=json.loads((folder/'model.json').read_text(encoding='utf-8'))
+        commands=[]
+        for mod in meta['model_files']:
+            for key,value in [('MODEL_FILE',mod),('MSH_HEADER_FILE','model.msh'),
+                              ('OUTPUT_FILE',Path(mod).stem+'.geosoft_voxel'),('DUMMY_VALUE','-1e32')]:
+                commands.append(f'SETINI IMPORTUBCTOVOX.{key}="{value}"')
+            commands.append('GX geogxnet.dll(Geosoft.GX.VoxUtils.ImportUBCToVox;Run)')
+        (folder/'convert.gs').write_text('\n'.join(commands)+'\n',encoding='ascii')
+        (folder/'README.txt').write_text(
+            'Откройте проект Oasis montaj в этой папке и запустите convert.gs (Run Script).\n'
+            'Проверьте систему координат: '+str(meta['crs'])+'\n'
+            'Вручную: Voxel > Conversions > UBC to Voxel. Выберите model.msh и соответствующий MOD. '
+            'Dummy = -1e32. Для векторной модели создаются отдельные JE, JN, JD.\n',encoding='utf-8-sig')
+        os.rename(folder,directory)
