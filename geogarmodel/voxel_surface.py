@@ -58,7 +58,117 @@ def upper_prism_limits(active, shape, percentage):
     return limits
 
 
-def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_shell=False,cut_axis=2,first_layer=0):
+def prism_parts(grid,band_limits,nz,smooth,section,partial,edges):
+    """Share the interpolated scalar values along the detail boundary."""
+    import pyvista as pv
+    columns,depths=np.divmod(grid.cell_data['voxel_id'],nz)
+    detailed=depths<band_limits[columns]
+    if smooth and not section:
+        # Separate perpendicular faces before averaging: the top colours
+        # come from cells on the roof, independently of the vertical walls.
+        if partial:
+            grid=grid.clean(tolerance=0)
+        grid=grid.compute_normals(split_vertices=True,feature_angle=45,cell_normals=False,
+                                  consistent_normals=False)
+    if smooth:
+        nodal=grid.cell_data_to_point_data().point_data['property']
+    parts=[]
+    for upper,mask in ((False,~detailed),(True,detailed)):
+        if not mask.any():
+            continue
+        faces=grid.regular_faces[mask]
+        cell_values=grid.cell_data['property'][mask]
+
+        if upper and smooth:
+            # Linear triangles retain the measured cell value at the centre
+            # and share the smooth boundary colours of the lower shell.
+            nodes,local=np.unique(faces,return_inverse=True)
+            local=local.reshape(faces.shape)
+            coordinates=grid.points[nodes]
+            centers=coordinates[local].mean(axis=1)
+            center_ids=np.broadcast_to((len(nodes)+np.arange(len(faces)))[:,None],local.shape)
+            triangles=np.stack((local,np.roll(local,-1,axis=1),center_ids),axis=-1).reshape(-1,3)
+            part=pv.PolyData.from_regular_faces(np.vstack((coordinates,centers)),triangles)
+            part.point_data['property']=np.concatenate((nodal[nodes],cell_values))
+        else:
+            part=pv.PolyData.from_regular_faces(grid.points,faces)
+            if smooth:
+                part.point_data['property']=nodal
+            else:
+                part.cell_data['property']=cell_values
+        wire=None
+        if upper and smooth and edges:
+            wire=pv.PolyData.from_regular_faces(grid.points,faces).extract_all_edges()
+        parts.append((upper,part,wire))
+    return parts
+
+
+def section_faces(result, component, axis, coordinate, limits, cutoff=0.):
+    """Native cell footprints in a section, with Down reflected into display Z."""
+    import pyvista as pv
+    mesh = result.mesh
+    axes = (mesh.east, mesh.north, mesh.depth)
+    if not limits[axis][0] <= coordinate <= limits[axis][1]:
+        return pv.PolyData()
+    at_end = coordinate == limits[axis][1]
+    layer = np.clip(np.searchsorted(axes[axis], coordinate, side='left' if at_end else 'right')-1, 0, mesh.shape[axis]-1)
+    section = [slice(None)]*3
+    section[axis] = layer
+    free = [i for i in range(3) if i != axis]
+    indices = [None]*3
+    indices[free[0]], indices[free[1]] = np.nonzero(mesh.active.reshape(mesh.shape)[tuple(section)])
+    indices[axis] = np.full_like(indices[free[0]], layer)
+    ids = np.ravel_multi_index(tuple(indices), mesh.shape)
+    if mesh.bounds is None:
+        low = np.column_stack([axes[i][indices[i]] for i in free])
+        high = np.column_stack([axes[i][indices[i]+1] for i in free])
+    else:
+        bounds = mesh.bounds[ids]
+        hits = (bounds[:,axis] <= coordinate) & ((coordinate < bounds[:,axis+3]) |
+                (at_end & (coordinate == bounds[:,axis+3])))
+        ids, bounds = ids[hits], bounds[hits]
+        low, high = bounds[:,free], bounds[:,[i+3 for i in free]]
+    low = np.maximum(low, [limits[i][0] for i in free])
+    high = np.minimum(high, [limits[i][1] for i in free])
+    values = result.model[ids]
+    if values.ndim == 2:
+        values = np.linalg.norm(values,axis=1) if component=='amplitude' else values[:,{'East':0,'North':1,'Down':2}[component]]
+    keep = (high > low).all(axis=1) & (np.abs(values) >= cutoff)
+    ids, low, high = ids[keep], low[keep], high[keep]
+    if not ids.size:
+        return pv.PolyData()
+    if mesh.bounds is None:
+        # Adjacent rectangles share vertices directly. Moving a section then
+        # requires no filter to merge millions of duplicated corner points.
+        u,v=free
+        ui,vi=indices[u][keep],indices[v][keep]
+        u0,u1=int(ui.min()),int(ui.max())+1
+        v0,v1=int(vi.min()),int(vi.max())+1
+        us=np.clip(axes[u][u0:u1+1],*limits[u])
+        vs=np.clip(axes[v][v0:v1+1],*limits[v])
+        nodes=np.empty((us.size,vs.size,3))
+        nodes[:,:,axis]=coordinate
+        nodes[:,:,u]=us[:,None]
+        nodes[:,:,v]=vs
+        nodes[:,:,2]*=-1
+        first=(ui-u0)*vs.size+vi-v0
+        faces=first[:,None]+[0,vs.size,vs.size+1,1]
+        grid=pv.PolyData.from_regular_faces(nodes.reshape(-1,3),faces)
+        grid.cell_data['voxel_id']=ids
+        grid.cell_data['property']=values[keep]
+        return grid
+    points = np.empty((len(ids),4,3))
+    points[:,:,axis] = coordinate
+    points[:,:,free[0]] = np.column_stack((low[:,0],high[:,0],high[:,0],low[:,0]))
+    points[:,:,free[1]] = np.column_stack((low[:,1],low[:,1],high[:,1],high[:,1]))
+    points[:,:,2] *= -1
+    grid = pv.PolyData.from_regular_faces(points.reshape(-1,3),np.arange(len(ids)*4).reshape(-1,4))
+    grid.cell_data['voxel_id'] = ids
+    grid.cell_data['property'] = values[keep]
+    return grid.clean(tolerance=0)
+
+
+def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_shell=False,cut_axis=2,first_layer=0,limits=None):
     import pyvista as pv
     mesh=result.mesh
     values=result.model
@@ -87,6 +197,20 @@ def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_sh
         removed=[slice(None)]*3
         removed[cut_axis]=slice(0,first_layer)
         active.reshape(shape)[tuple(removed)]=False
+    if limits is not None:
+        if active is mesh.active:
+            active=active.copy()
+        mask=active.reshape(shape)
+        for i,edges in enumerate((mesh.east,mesh.north,mesh.depth)):
+            excluded=(edges[1:]<=limits[i][0]) | (edges[:-1]>=limits[i][1])
+            key=[slice(None)]*3
+            key[i]=excluded
+            mask[tuple(key)]=False
+        if mesh.bounds is not None:
+            for start in range(0,mesh.size,131072):
+                s=slice(start,start+131072)
+                b=mesh.bounds[s]
+                active[s]&=((b[:,3:]>limits[:,0]) & (b[:,:3]<limits[:,1])).all(axis=1)
     strides=(shape[1]*shape[2],shape[2],1)
     axes=(mesh.east,mesh.north,-mesh.depth)
     nodes=tuple(len(a) for a in axes)
@@ -180,6 +304,9 @@ def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_sh
                     fade=np.clip((base+heights[move])/(base-cap),0.,1.)
                     heights[move]+=(relief_gain-1.)*(deepest-cap)*fade
         faces=inverse[:quad_size].reshape(-1,4)
+    if limits is not None:
+        np.clip(points, [limits[0,0],limits[1,0],-limits[2,1]],
+                [limits[0,1],limits[1,1],-limits[2,0]], out=points)
     if triangles:
         tris=inverse[quad_size:].reshape(-1,3)
         quads=np.column_stack((np.full(len(faces),4),faces)).ravel()

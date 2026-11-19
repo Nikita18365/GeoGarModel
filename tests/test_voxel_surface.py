@@ -85,3 +85,46 @@ def test_prism_layer_cut_reveals_exact_properties():
     np.testing.assert_array_equal(cut['property'],result.model[cut['voxel_id']])
     assert cut.bounds[-1]==-3
     np.testing.assert_array_equal(mesh.active,original)
+
+
+@pytest.mark.parametrize('axis',[0,1,2])
+def test_native_section_face_values_and_cropped_footprints(axis):
+    pytest.importorskip('pyvista')
+    from geogarmodel.voxel_surface import section_faces
+    mesh=Mesh([0.,2.,5.],[10.,11.,16.],[0.,3.,8.])
+    mesh.active[-1]=False
+    mesh.bounds=mesh.cells()
+    mesh.bounds[0,2]=1.5
+    r=VoxelModel(mesh,np.arange(mesh.size,dtype=float)).result()
+    limits=np.array([[0.5,4.5],[10.,15.],[0.,6.]])
+    coord=[1.,10.5,1.][axis]
+    part=section_faces(r,'amplitude',axis,coord,limits)
+    expected=np.flatnonzero(mesh.active & (mesh.bounds[:,axis]<=coord) & (mesh.bounds[:,axis+3]>coord))
+    np.testing.assert_array_equal(np.sort(part['voxel_id']),expected)
+    np.testing.assert_array_equal(part['property'],r.model[part['voxel_id']])
+    np.testing.assert_allclose(part.points[:,axis],coord if axis!=2 else -coord)
+    xyz=part.points*np.array([1,1,-1])
+    assert np.all(xyz>=limits[:,0]) and np.all(xyz<=limits[:,1])
+
+
+def test_smooth_xy_shares_boundary_colour_and_preserves_upper_cell_centres():
+    pytest.importorskip('pyvista')
+    from geogarmodel.voxel_surface import section_faces,upper_prism_limits,prism_parts
+    mesh=Mesh(np.arange(4.),np.arange(3.),np.arange(4.))
+    mesh.active.reshape(mesh.shape)[1:,:,0]=False
+    r=VoxelModel(mesh,np.arange(mesh.size,dtype=float)).result()
+    grid=section_faces(r,'amplitude',2,1.5,np.array([[0.,3.],[0.,2.],[0.,3.]]))
+    band=upper_prism_limits(mesh.active,mesh.shape,2)
+    (low,coarse,wire1),(up,fine,wire2)=prism_parts(grid,band,3,True,True,False,False)
+    assert up and not low and wire1 is None and wire2 is None
+    for y in (0.,1.,2.):
+        boundary=[1.,y,-1.5]
+        low_values=coarse['property'][np.all(coarse.points==boundary,axis=1)]
+        top_values=fine['property'][np.all(fine.points==boundary,axis=1)]
+        assert top_values.size==1
+        np.testing.assert_array_equal(low_values,top_values)
+    for x in (1,2):
+        for y in (0,1):
+            center=np.array([x+.5,y+.5,-1.5])
+            np.testing.assert_array_equal(fine['property'][np.all(fine.points==center,axis=1)],
+                                          [r.model.reshape(mesh.shape)[x,y,1]])
