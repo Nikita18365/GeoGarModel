@@ -57,7 +57,7 @@ class InitialModelPanel(QGroupBox):
         self.tab.status.setText('Начальная модель готова. Проверьте единицы, диапазон свойств и границы ограничения.')
 
     def ask_load(self,mode,title='Начальная модель'):
-        path,_=QFileDialog.getOpenFileName(self,title,'','Voxel (*.geosoft_voxel *.msh *.mesh *.npz *.ggmodel *.vtr *.vtk *.vti *.csv *.xlsx *.txt);;Все файлы (*)')
+        path,_=QFileDialog.getOpenFileName(self,title,'','Voxel (*.geosoft_voxel *.msh *.mesh *.npz *.ggmodel *.vo *.vtr *.vtk *.vti *.csv *.xlsx *.txt);;Все файлы (*)')
         if not path: return None
         options={}; ext=Path(path).suffix.lower()
         if ext in ('.msh','.mesh'):
@@ -73,6 +73,14 @@ class InitialModelPanel(QGroupBox):
             array,ok=QInputDialog.getItem(self,'Свойство VTK','Выберите cell-массив (Z = Up; вектор East/North/Down):',names,0,False)
             if not ok: return None
             options['array']=array
+        elif ext=='.vo':
+            from .gocad_voxet import header
+            _,props,meta=header(path)
+            if len(props)>1 and mode!='vector' and meta.get('mode')!='vector':
+                labels={f"{k} · {p.get('PROPERTY',k)}":k for k,p in props.items()}
+                label,ok=QInputDialog.getItem(self,'GOCAD Voxet','Свойство',list(labels),0,False)
+                if not ok: return None
+                options['property_id']=labels[label]
         elif ext not in ('.npz','.ggmodel','.geosoft_voxel'):
             vertical,ok=QInputDialog.getItem(self,'Вертикальная координата','Столбец Down (глубина) или Up (высота):',['Down','Up'],0,False)
             if not ok: return None
@@ -80,7 +88,8 @@ class InitialModelPanel(QGroupBox):
         crs=self.tab.crs.currentText().split('|')[0].strip()
         def loader():
             model=load_voxel(path,mode,crs,**options)
-            model.source_path=str(Path(path).resolve()); model.source_array=options.get('array',options.get('model_path',''))
+            model.source_path=str(Path(path).resolve())
+            model.source_array=options.get('array',options.get('model_path',options.get('property_id','')))
             return model
         return loader
 

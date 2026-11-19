@@ -257,7 +257,7 @@ class InversionTab(QWidget):
         from PyQt5.QtWidgets import QMenu
         export_button=QPushButton('Сохранить результат…'); export_menu=QMenu(export_button)
         for title,callback in [('Модель и поле · GeoGarModel / NPZ',self.save),('Модель · UBC / Oasis montaj',self.save_ubc),
-                               ('Поля · CSV / ZMAP',self.save_fields),('Модель · VTK',self.save_vtk)]:
+                               ('Модель · GOCAD Voxet',self.save_voxet),('Поля · CSV / ZMAP',self.save_fields),('Модель · VTK',self.save_vtk)]:
             export_menu.addAction(title,lambda checked=False,fn=callback:self.workbench.guard(fn))
         export_button.setMenu(export_menu); actions.addWidget(export_button)
         root.addWidget(ParameterSplitter(controls,right))
@@ -733,7 +733,7 @@ class InversionTab(QWidget):
                     'Автоматического сохранения на диск нет.')
         text.setWordWrap(True); layout.addWidget(text)
         for title,callback in [('Модель и полный результат · GeoGarModel / NPZ…',self.save),('Модель UBC / Oasis montaj…',self.save_ubc),
-                               ('Модель VTK / VTR / VTU…',self.save_vtk),('Рассчитанное поле ZMAP / поля CSV…',self.save_fields)]:
+                               ('Модель GOCAD Voxet…',self.save_voxet),('Модель VTK / VTR / VTU…',self.save_vtk),('Рассчитанное поле ZMAP / поля CSV…',self.save_fields)]:
             button=QPushButton(title); layout.addWidget(button)
             button.clicked.connect(lambda checked=False,fn=callback:self.workbench.guard(fn))
         done=QPushButton('Показать модель и поля'); done.clicked.connect(dialog.accept); layout.addWidget(done)
@@ -828,23 +828,42 @@ class InversionTab(QWidget):
                 export_zmap(r,path if path.lower().endswith('.zmap') else path+'.zmap')
             else:
                 field_table(r).to_csv(path if path.lower().endswith('.csv') else path+'.csv',index=False,encoding='utf-8-sig')
-    def save_ubc(self,r=None):
-        if r is None: r=self.require_result()
-        from PyQt5.QtWidgets import QInputDialog,QMessageBox
-        from .inversion_export import clipped_count,oasis_package
-        path,kind=QFileDialog.getSaveFileName(self,'Экспорт UBC / Oasis montaj','inversion',
-            'UBC mesh (*.msh);;Комплект Oasis montaj (*.oasis)')
-        if not path: return
+    def tensor_export_policy(self,r):
+        from PyQt5.QtWidgets import QInputDialog
+        from .inversion_export import clipped_count
         count=clipped_count(r.mesh)
         policy='exact'
         if count:
             choices={'Сохранить свойство в полной ячейке':'keep'}
             if r.settings['mode']=='gravity': choices['Сохранить массу (распределить по полной ячейке)']='mass'
             choice,ok=QInputDialog.getItem(self,'Ступенчатая поверхность',
-                f'Частично обрезанных ячеек: {count:,}. В UBC они займут полный объём. Выберите правило:',
+                f'Частично обрезанных ячеек: {count:,}. В экспортируемой сетке они займут полный объём. Выберите правило:',
                 list(choices),0,False)
             if not ok: return
             policy=choices[choice]
+        return policy
+
+    def save_voxet(self,r=None):
+        from .gocad_voxet import write_voxet
+        from PyQt5.QtWidgets import QMessageBox
+        if r is None: r=self.require_result()
+        path,_=QFileDialog.getSaveFileName(self,'GOCAD Voxet · IEEE float32','inversion.vo','GOCAD Voxet (*.vo)')
+        if not path: return
+        binary=Path(path).with_suffix('.bin')
+        if binary.exists() and QMessageBox.question(self,'Заменить бинарный файл?',str(binary),
+                QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes: return
+        policy=self.tensor_export_policy(r)
+        if policy: write_voxet(r,path,policy)
+
+    def save_ubc(self,r=None):
+        if r is None: r=self.require_result()
+        from PyQt5.QtWidgets import QMessageBox
+        from .inversion_export import oasis_package
+        path,kind=QFileDialog.getSaveFileName(self,'Экспорт UBC / Oasis montaj','inversion',
+            'UBC mesh (*.msh);;Комплект Oasis montaj (*.oasis)')
+        if not path: return
+        policy=self.tensor_export_policy(r)
+        if not policy: return
         if 'oasis' in kind or path.lower().endswith('.oasis'):
             folder=Path(path).with_suffix('.oasis')
             oasis_package(r,folder,policy)

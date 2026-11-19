@@ -53,22 +53,27 @@ def export_ubc(result, path, policy='exact'):
     with tempfile.TemporaryDirectory(dir=path.parent) as folder:
         root=Path(folder)
         _write_ubc(result,root/path.name,policy)
-        outputs=list(root.iterdir())
-        backups={}
-        installed=[]
-        try:
-            for source in outputs:
-                dest=path.parent/source.name
-                if dest.is_file():
-                    backup=root/(source.name+'.bak')
-                    dest.replace(backup)
-                    backups[dest]=backup
-                source.replace(dest)
-                installed.append(dest)
-        except OSError:
-            for dest in installed: dest.unlink(missing_ok=True)
-            for dest,backup in backups.items(): backup.replace(dest)
-            raise
+        install_bundle(root,path.parent)
+
+
+def install_bundle(root,parent):
+    """Roll back already installed members if a sibling cannot be replaced."""
+    outputs=list(root.iterdir())
+    backups={}
+    installed=[]
+    try:
+        for source in outputs:
+            dest=parent/source.name
+            if dest.is_file():
+                backup=root/(source.name+'.bak')
+                dest.replace(backup)
+                backups[dest]=backup
+            source.replace(dest)
+            installed.append(dest)
+    except OSError:
+        for dest in installed: dest.unlink(missing_ok=True)
+        for dest,backup in backups.items(): backup.replace(dest)
+        raise
 
 
 def _write_ubc(result, path, policy):

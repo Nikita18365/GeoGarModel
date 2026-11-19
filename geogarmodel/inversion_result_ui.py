@@ -82,7 +82,8 @@ class ResultWindow(QDialog):
             layers.clicked.connect(lambda:tab.workbench.guard(lambda:self.open_layer(result)))
             footer.addWidget(layers)
         for name, save in [('Модель и поле · GeoGarModel / NPZ', tab.save), ('Модель · UBC / Oasis montaj', tab.save_ubc),
-                           ('Модель · VTK', tab.save_vtk), ('Поле · CSV / ZMAP', tab.save_fields)]:
+                           ('Модель · VTK', tab.save_vtk), ('Модель · GOCAD Voxet',tab.save_voxet),
+                           ('Поле · CSV / ZMAP', tab.save_fields)]:
             menu.addAction(name, lambda checked=False, fn=save: tab.workbench.guard(
                 lambda: fn(self.result if fn==tab.save_fields else full_result())))
         export.setMenu(menu)

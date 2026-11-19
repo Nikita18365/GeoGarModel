@@ -200,6 +200,9 @@ def read_geosoft(path,mode='gravity',crs=''):
 
 def load_voxel(path,mode='gravity',crs='',**kwargs):
     ext=Path(path).suffix.lower()
+    if ext=='.vo':
+        from .gocad_voxet import read_voxet
+        return read_voxet(path,mode,crs,kwargs.get('property_id'))
     if ext=='.ggmodel':
         from .model_archive import ModelArchive
         r=ModelArchive(path).load()
