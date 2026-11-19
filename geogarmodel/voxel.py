@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from .work_progress import report
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator, LinearNDInterpolator
 from .inversion import Mesh, InversionResult
@@ -145,6 +146,7 @@ def read_ubc(mesh_path,model_path,mode='gravity',dummy=None,crs=''):
         x,z=np.divmod(remainder,nz)
         v[(x*ny+y)*nz+z,src%components]=block
         cursor=end
+        report(cursor,v.size,'Свойства UBC')
     if cursor!=v.size: raise ValueError('UBC model: число свойств не соответствует mesh.')
     for start in range(0,mesh.size,131072):
         s=slice(start,start+131072)

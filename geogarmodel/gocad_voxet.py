@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import shlex
 import tempfile
+from .work_progress import report
 import numpy as np
 from .inversion import Mesh
 from .inversion_export import clipped_count
@@ -103,6 +104,7 @@ def read_voxet(path,mode='gravity',crs='',property_id=None):
             valid=np.isfinite(plane)
             if dummy is not None: valid &= plane!=dummy
             active[:,:,w]&=valid
+            report(component*n[2]+w+1,len(selected)*n[2],'Слои Voxet')
     shape=(mesh.size,) if len(selected)==1 else (mesh.size,len(selected))
     return VoxelModel(mesh,values.reshape(shape),mode,meta.get('crs') or crs,
                       [dict(operation='GOCAD Voxet',properties=selected)],own_values=True)
@@ -153,6 +155,7 @@ def write_voxet(result,path,policy='exact'):
                             raise ValueError('Свойство выходит за диапазон float32 или совпадает с NoData.')
                         v[~active]=nodata
                         stream.write(v.tobytes())
+                    report((i-1)*nz+k+1,len(props)*nz,'Запись слоёв Voxet')
         (root/path.name).write_text('\n'.join(lines+['END','']),encoding='utf-8')
         from .inversion_export import install_bundle
         install_bundle(root,path.parent)

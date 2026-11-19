@@ -1,4 +1,5 @@
 """Full-resolution opaque voxel shell. Interior voxels stay on the original grid."""
+from .work_progress import report
 import numpy as np
 
 
@@ -224,6 +225,7 @@ def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_sh
     indices=[]; properties=[]; vertices=[]
     triangles=[]; triangle_values=[]
     for start in range(0,mesh.size,131072):
+        report(start,mesh.size,'Поиск открытых граней')
         ids=start+np.flatnonzero(active[start:start+131072])
         ijk=np.unravel_index(ids,shape)
         for axis in range(3):
@@ -283,6 +285,7 @@ def exterior(result,component,percent,smooth_top=False,relief_gain=1.,*,prism_sh
                 properties.append(values[cells])
                 if prism_shell:
                     source_cells.append(cells.astype(np.int32 if mesh.size <= np.iinfo(np.int32).max else np.int64, copy=False))
+    report(0,0,'Сборка поверхности')
     if not properties:
         return pv.PolyData()
     if vertices:

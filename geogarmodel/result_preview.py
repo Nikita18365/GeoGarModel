@@ -1,4 +1,5 @@
 """Bounded display geometry. Full resolution arrays belong to the inversion result."""
+from .work_progress import report
 import numpy as np
 
 
@@ -16,6 +17,7 @@ def preview_volume(result, limit=32):
     dx, dy, dz = map(np.diff, axes)
     # Limit temporary arrays even for wide, thin grids. Each tile starts/ends at bin edges.
     for bx, (x0, x1) in enumerate(zip(cuts[0][:-1], cuts[0][1:])):
+        report(bx,shape[0],'Подготовка обзора')
         for by, (y0, y1) in enumerate(zip(cuts[1][:-1], cuts[1][1:])):
             for x in range(x0, x1):
                 rows = max(1, 131072 // len(dz))

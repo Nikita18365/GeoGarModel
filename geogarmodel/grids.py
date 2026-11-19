@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
+from .work_progress import report
 import numpy as np
 from scipy.interpolate import griddata
 
@@ -89,7 +90,8 @@ def read_zmap(path):
     xmin, xmax, ymin, ymax = map(float, header[2:6])
     end = next(i for i in range(start + 3, len(lines)) if lines[i].strip() == "@")
     values = []
-    for line in lines[end + 1:]:
+    for number,line in enumerate(lines[end + 1:]):
+        if number%1024==0: report(len(values),nx*ny,'Чтение ZMAP')
         # Fixed-width is essential when negative numbers touch their neighbours.
         chunks = [line[i:i + width].strip() for i in range(0, len(line), width)]
         try:

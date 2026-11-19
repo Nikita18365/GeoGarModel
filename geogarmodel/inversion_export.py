@@ -1,6 +1,7 @@
 """Exports preserve observation samples and tensor-cell geometry explicitly."""
 from pathlib import Path
 import json
+from .work_progress import report
 import numpy as np
 import pandas as pd
 from .grids import Grid
@@ -32,10 +33,13 @@ def export_zmap(result, path):
     lines=['! Calculated field; units: '+('mGal' if result.settings['mode']=='gravity' else 'nT'),
            '! CRS: '+result.settings.get('crs',''), '@GeoGarModel, GRID, 5',
            f'24, {null}, , 16, 1',f'{len(y)}, {len(x)}, {x[0]:.17g}, {x[-1]:.17g}, {y[0]:.17g}, {y[-1]:.17g}', '0, 0, 0', '@']
-    for column in grid.values[::-1].T:
-        for start in range(0,len(column),5):
-            lines.append(''.join(f'{v if np.isfinite(v) else null:24.16E}' for v in column[start:start+5]))
-    Path(path).write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    from .model_archive import atomic_output
+    with atomic_output(path) as tmp, tmp.open('w',encoding='utf-8') as out:
+        out.write('\n'.join(lines)+'\n')
+        for number,column in enumerate(grid.values[::-1].T,1):
+            for start in range(0,len(column),5):
+                out.write(''.join(f'{v if np.isfinite(v) else null:24.16E}' for v in column[start:start+5])+'\n')
+            report(number,len(x),'Столбцы ZMAP')
 
 
 def clipped_count(mesh):
@@ -107,6 +111,7 @@ def _write_ubc(result, path, policy):
                         raise ValueError('Свойство совпадает с UBC dummy.')
                     values[~mesh.active[ids]]=dummy
                     np.savetxt(stream,values,fmt='%.17g')
+                    report((component*ny+y)*nx+min(nx,x+step),len(names)*ny*nx,'Запись свойств UBC')
     lines=[' '.join(map(str,mesh.shape)),f'{mesh.east[0]:.17g} {mesh.north[0]:.17g} {-mesh.depth[0]:.17g}']
     lines+=[' '.join(f'{v:.17g}' for v in np.diff(a)) for a in (mesh.east,mesh.north,mesh.depth)]
     path.write_text('\n'.join(lines)+'\n',encoding='utf-8')

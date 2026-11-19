@@ -11,6 +11,7 @@ from .map_project import save_project as save_maps,load_project as load_maps
 from .inversion import InversionResult
 from .voxel import VoxelModel
 from .models import TrainingResult
+from .work_progress import report
 from .model_persistence import dump_pipeline,StoredPipeline
 
 
@@ -35,14 +36,23 @@ def write_project(path,state,maps,tables,training_result,models,voxels):
                 try: versions[name]=version(name)
                 except PackageNotFoundError: pass
             state={**state,'format':'GeoGarModel','version':1,'tables':[],'models':list(models),'voxels':list(voxels),'versions':versions}
+            total=1+sum(t is not None for t in tables.values())+len(models)+len(voxels)+int(training_result is not None)
+            done=1
+            report(done,total,'Разделы проекта')
             for name,table in tables.items():
                 if table is not None:
                     archive.writestr(f'tables/{name}.json',table.to_json(orient='table',double_precision=15,date_unit='ns'))
                     state['tables'].append(name)
+                    done+=1
+                    report(done,total,'Разделы проекта')
             for key,result in models.items():
                 stream=BytesIO(); result.save(stream); archive.writestr(f'models/{key}.npz',stream.getvalue())
+                done+=1
+                report(done,total,'Разделы проекта')
             for key,model in voxels.items():
                 stream=BytesIO(); model.save(stream); archive.writestr(f'voxels/{key}.npz',stream.getvalue())
+                done+=1
+                report(done,total,'Разделы проекта')
             if training_result is not None:
                 r=training_result; metadata,blobs=dump_pipeline(r.model)
                 state['training_result']={key:getattr(r,key) for key in ('features','target','coordinates','model_name','metrics','settings','optimization_history')}
@@ -62,14 +72,27 @@ def read_project(path):
         state=json.loads(archive.read('manifest.json'))
         if state.get('format')!='GeoGarModel' or state.get('version')!=1: raise ValueError('Неподдерживаемый формат общего проекта.')
         maps=load_maps(BytesIO(archive.read('maps.npz')))
-        tables={name:pd.read_json(StringIO(archive.read(f'tables/{name}.json').decode()),orient='table') for name in state['tables']}
-        models={key:InversionResult.load(BytesIO(archive.read(f'models/{key}.npz'))) for key in state['models']}
+        total=1+len(state['tables'])+len(state['models'])+len(state['voxels'])+int('training_result' in state)
+        done=1
+        report(done,total,'Разделы проекта')
+        tables={}
+        for name in state['tables']:
+            tables[name]=pd.read_json(StringIO(archive.read(f'tables/{name}.json').decode()),orient='table')
+            done+=1
+            report(done,total,'Разделы проекта')
+        models={}
+        for key in state['models']:
+            models[key]=InversionResult.load(BytesIO(archive.read(f'models/{key}.npz')))
+            done+=1
+            report(done,total,'Разделы проекта')
         voxels={}
         from .inversion import Mesh
         for key in state['voxels']:
             with np.load(BytesIO(archive.read(f'voxels/{key}.npz')),allow_pickle=False) as data:
                 meta=json.loads(str(data['voxel_metadata'])); mesh=Mesh(data['east'],data['north'],data['depth'],data['active'],data['bounds'] if data['bounds'].size else None)
                 voxels[key]=VoxelModel(mesh,data['model'],**meta)
+            done+=1
+            report(done,total,'Разделы проекта')
         trained=None
         if 'training_result' in state:
             meta=dict(state['training_result']); model_meta=meta.pop('model_metadata'); blob_keys=meta.pop('blobs')

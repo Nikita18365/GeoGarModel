@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 from zipfile import ZipFile
+from .work_progress import report
 import numpy as np
 from .inversion import InversionResult, Mesh
 from .result_preview import preview_volume
@@ -52,6 +53,7 @@ def write_archive(path, result):
         for k in range(mesh.shape[2]):
             put(f'value{k}',cube[:,:,k])
             put(f'mask{k}',np.packbits(mask[:,:,k]))
+            report(k+1,mesh.shape[2],'Запись слоёв')
         blocks = []
         if mesh.bounds is not None:
             for ids, regular in cell_blocks(mesh):
@@ -118,6 +120,7 @@ class ModelArchive:
             mask=mesh.active.reshape(mesh.shape)
             for k in range(mesh.shape[2]):
                 cube[:,:,k],mask[:,:,k]=self.read_layer(f,k)
+                report(k+1,mesh.shape[2],'Чтение слоёв')
             if self.meta['blocks']:
                 bounds=np.empty((mesh.size,6))
                 for ids,regular in cell_blocks(mesh):

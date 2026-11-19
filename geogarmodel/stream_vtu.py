@@ -1,4 +1,5 @@
 """Uncompressed VTK XML appended data, generated in bounded batches."""
+from .work_progress import report
 import numpy as np
 from .model_archive import atomic_output,regular_cells
 
@@ -25,6 +26,7 @@ def write_vtu(result,path):
     corners=np.array([[0,0,1],[1,0,1],[1,1,1],[0,1,1],[0,0,0],[1,0,0],[1,1,0],[0,1,0]],bool)
     with atomic_output(path) as tmp,tmp.open('wb') as out:
         out.write(header.encode('ascii'))
+        payload_start=out.tell()
         for name,_,_,size in arrays:
             out.write(size.to_bytes(8,'little'))
             if name in ('connectivity','offsets','types'):
@@ -34,6 +36,7 @@ def write_vtu(result,path):
                     elif name=='offsets': data=np.arange(start+1,end+1,dtype='<i8')*8
                     else: data=np.full(end-start,12,dtype=np.uint8)
                     out.write(data.tobytes())
+                    report(out.tell()-payload_start,offset,'Байты VTU')
             else:
                 for start in range(0,mesh.size,16384):
                     ids=start+np.flatnonzero(mesh.active[start:start+16384])
@@ -45,4 +48,5 @@ def write_vtu(result,path):
                         data=result.model[ids]
                         if name=='property' and vector: data=np.linalg.norm(data,axis=1)
                     out.write(data.astype('<f8',copy=False).tobytes())
+                    report(out.tell()-payload_start,offset,'Байты VTU')
         out.write(b'</AppendedData></VTKFile>')
