@@ -109,7 +109,8 @@ def test_prism_view_percentage_and_cut_round_trip(qt_application_lifetime):
     view=ModelView()
     try:
         r=result()
-        view.kind.setCurrentText('Верхние призмы и оболочка')
+        kinds=[view.kind.itemText(i) for i in range(view.kind.count())]
+        assert kinds==['Воксели','Объём','Изоповерхности','Срезы XYZ','Интерактивное отсечение']
         view.render(r)
         assert view.prism_percent.value()==2
         assert not view.prism_panel.isHidden()
@@ -124,15 +125,15 @@ def test_prism_view_percentage_and_cut_round_trip(qt_application_lifetime):
             actors=view.plotter.renderer.actors
             assert ('upper-prisms' in actors)==(percent>0)
             assert ('lower-shell' in actors)==(percent<100)
-        view.prism_layer.setValue(2)
-        assert view.display_grid.bounds[-1]==-100
+        view.restore_state({'kind':'Верхние призмы и оболочка','prism_axis':'Z','prism_layer':2,'prism_percent':12.5})
+        assert view.kind.currentText()=='Интерактивное отсечение'
+        assert view.depth_value.value()==100 and view.prism_percent.value()==12.5
         saved=view.capture_state()
-        view.prism_axis.setCurrentText('X')
-        assert view.prism_layer.value()==1
-        view.prism_percent.setValue(0)
+        assert 'prism_layer' not in saved
+        view.restore_state({'kind':'Сглаженная кровля','relief_gain':5})
+        assert view.kind.currentText()=='Воксели'
         view.restore_state(saved)
-        assert view.prism_percent.value()==12.5
-        assert view.prism_axis.currentText()=='Z' and view.prism_layer.value()==2
+        assert view.kind.currentText()=='Интерактивное отсечение' and view.depth_value.value()==100
     finally:
         view.shutdown()
         view.close()

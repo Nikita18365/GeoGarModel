@@ -56,7 +56,7 @@ class ModelView(QWidget):
         self.info=QLabel('Для интерактивного 3D нажмите «Открыть / обновить 3D». Требуется geogarmodel[volume].')
         self.info.setWordWrap(True); layout.addWidget(self.info)
         self.controls=QHBoxLayout(); layout.addLayout(self.controls)
-        self.kind=QComboBox(); self.kind.addItems(['Воксели','Объём','Изоповерхности','Срезы XYZ','Интерактивное отсечение','Верхние призмы и оболочка','Сглаженная кровля'])
+        self.kind=QComboBox(); self.kind.addItems(['Воксели','Объём','Изоповерхности','Срезы XYZ','Интерактивное отсечение'])
         self.component=QComboBox(); self.component.addItems(['amplitude','East','North','Down'])
         self.threshold=QDoubleSpinBox(); self.threshold.setRange(0,99); self.threshold.setValue(0); self.threshold.setSuffix('% от max |m|')
         for w in (self.kind,self.component,self.threshold): self.controls.addWidget(w)
@@ -176,16 +176,7 @@ class ModelView(QWidget):
         self.smooth_colors.setToolTip('Интерполяция для изображения. Свойства ячеек модели и экспорт не изменяются.')
         color_form.addRow('Непрозрачность',self.opacity); color_form.addRow(self.edges); color_form.addRow(self.outline)
         color_form.addRow(self.smooth_colors)
-        self.terrain_top=QCheckBox('Плавная верхняя поверхность')
-        self.terrain_top.setChecked(True)
-        self.terrain_top.setToolTip('Вид «Сглаженная кровля». Соединяет высоты верхних активных ячеек по XY только при отображении.')
-        color_form.addRow(self.terrain_top)
-        self.relief_gain=QDoubleSpinBox()
-        self.relief_gain.setRange(1,50); self.relief_gain.setValue(1); self.relief_gain.setSuffix(' ×')
-        self.relief_gain.setKeyboardTracking(False)
-        self.relief_gain.setToolTip('Усиление перепада кровли для просмотра. Подошва остаётся на месте.')
-        color_form.addRow('Усиление рельефа кровли',self.relief_gain)
-        for control in (self.opacity,self.edges,self.outline,self.smooth_colors,self.terrain_top,self.relief_gain):
+        for control in (self.opacity,self.edges,self.outline,self.smooth_colors):
             (control.valueChanged if isinstance(control,QDoubleSpinBox) else control.toggled).connect(self.refresh_if_ready)
         settings_rows.insertWidget(settings_rows.count()-1,colors_group)
         performance=QGroupBox('Быстродействие'); performance_form=QFormLayout(performance)
@@ -246,23 +237,10 @@ class ModelView(QWidget):
         self.prism_percent.setToolTip('Доля активных ячеек от местной кровли каждого столбца. Округление вверх.')
         prism_row.addWidget(QLabel('Верхние призмы'))
         prism_row.addWidget(self.prism_percent)
-        self.prism_axis=QComboBox()
-        self.prism_axis.addItems(['X','Y','Z'])
-        self.prism_axis.setCurrentText('Z')
-        self.prism_axis_label=QLabel('Срез')
-        prism_row.addWidget(self.prism_axis_label)
-        prism_row.addWidget(self.prism_axis)
-        self.prism_layer=QSpinBox()
-        self.prism_layer.setRange(1,2147483647)
-        self.prism_layer.setKeyboardTracking(False)
-        self.prism_layer.setToolTip('1 — весь куб. Увеличьте номер, чтобы открыть следующий слой по выбранной оси. По Z отсчёт идёт от поверхности вниз.')
-        self.prism_layer_label=QLabel('Слой от')
-        prism_row.addWidget(self.prism_layer_label)
-        prism_row.addWidget(self.prism_layer)
+        self.section_count=QLabel()
+        prism_row.addWidget(self.section_count)
         prism_row.addStretch()
         self.prism_percent.valueChanged.connect(self.refresh_if_ready)
-        self.prism_axis.currentIndexChanged.connect(self.change_prism_axis)
-        self.prism_layer.valueChanged.connect(self.refresh_if_ready)
         layout.insertWidget(2,self.prism_panel)
         self.prism_panel.hide()
         self._slice_dialogs=[]
@@ -280,11 +258,6 @@ class ModelView(QWidget):
         super().resizeEvent(event)
         compact=self.width()<700 or self.height()<650
         if getattr(self,'plotter',None) is not None and compact!=getattr(self,'_compact_axes',None): self._resize_timer.start()
-
-    def change_prism_axis(self):
-        with QSignalBlocker(self.prism_layer):
-            self.prism_layer.setValue(1)
-        self.refresh_if_ready()
 
     def show_view_settings(self):
         self.view_settings.show(); self.view_settings.raise_(); self.view_settings.activateWindow()
@@ -371,7 +344,7 @@ class ModelView(QWidget):
             self._lod_cache={level:surface.decimate_pro(1-level/100,preserve_topology=True,splitting=False) for level in requested}
             self._lod_cache_key=cache_key
         for level,mesh in self._lod_cache.items():
-            low=self.plotter.add_mesh(mesh,show_scalar_bar=False,opacity=self.opacity.value(),**options)
+            low=self.plotter.add_mesh(mesh,lighting=False,show_scalar_bar=False,opacity=self.opacity.value(),**options)
             self._lod_actors.append((level,low))
         self.apply_detail()
 
@@ -426,7 +399,7 @@ class ModelView(QWidget):
     def state_controls(self):
         names=('kind','component','axis_unit','camera_view','palette','reverse_palette','color_range','color_min','color_max',
             'threshold','axis_font','opacity','color_distribution','discrete_colors','color_bins','zone_values','edges','outline',
-            'smooth_colors','terrain_top','relief_gain','prism_percent','prism_axis','prism_layer','full_resolution','high_quality_transparency','moving_detail','rest_detail','clip_enabled','clip_normal')
+            'smooth_colors','prism_percent','full_resolution','high_quality_transparency','moving_detail','rest_detail','clip_enabled','clip_normal')
         controls={name:getattr(self,name) for name in names}
         for name,widgets in [('scale',self.axis_scales),('slider',self.slices),('coordinate',self.slice_coordinates),('enabled',self.slice_enabled),('clip',[w for pair in self.clip_ranges for w in pair])]:
             controls.update({f'{name}_{i}':w for i,w in enumerate(widgets)})
@@ -446,6 +419,15 @@ class ModelView(QWidget):
         return state
 
     def restore_state(self,state,refresh=True):
+        self._legacy_layer=None
+        if state.get('kind') in ('Верхние призмы и оболочка','Сглаженная кровля'):
+            state=dict(state)
+            depth_cut=state['kind']=='Верхние призмы и оболочка' and state.get('prism_layer',1)>1
+            state['kind']='Интерактивное отсечение' if depth_cut else 'Воксели'
+            if depth_cut:
+                state['clip_normal']=state.get('prism_axis','Z')
+                state['clip_enabled']=False
+                self._legacy_layer=int(state['prism_layer'])-1
         if state.get('palette_entry') and state.get('palette'): self.palette_library[state['palette']]=state['palette_entry']
         controls=self.state_controls(); blockers=[QSignalBlocker(w) for w in controls.values()]
         for name,w in controls.items():
@@ -456,8 +438,6 @@ class ModelView(QWidget):
                 w.setCurrentText(value)
             elif isinstance(w,QCheckBox): w.setChecked(value)
             else:
-                if name=='prism_layer':
-                    w.setMaximum(2147483647)
                 w.setValue(value)
         del blockers
         self._explicit_slices=set(range(3))
@@ -490,16 +470,9 @@ class ModelView(QWidget):
         self.color_note.clear()
         self.depth_panel.setVisible(self.kind.currentIndex()==3 or (self.kind.currentIndex()==4 and self.clip_normal.currentIndex()==2))
         kind=self.kind.currentIndex()
-        layered=kind==5
-        native=kind in (0,3,4,5)
+        native=kind in (0,3,4)
         self.prism_panel.setVisible(native)
-        for control in (self.prism_axis_label,self.prism_axis,self.prism_layer_label,self.prism_layer):
-            control.setVisible(layered)
-        self.opacity.setEnabled(not layered)
-        self.clip_enabled.setEnabled(not layered)
-        cut_axis=self.prism_axis.currentIndex()
-        with QSignalBlocker(self.prism_layer):
-            self.prism_layer.setMaximum(result.mesh.shape[cut_axis])
+        self.section_count.setVisible(kind==4)
         camera=p.camera_position if p.renderer.actors else None
         camera_scale=p.camera.parallel_scale
         p.clear(); p.clear_plane_widgets()
@@ -528,6 +501,15 @@ class ModelView(QWidget):
                 w=self.slice_coordinates[i]; w.blockSignals(True); w.setRange(axis[0],axis[-1]); w.setValue(axis[0] if i==2 else (axis[0]+axis[-1])/2); w.blockSignals(False)
                 for control,value in zip(self.clip_ranges[i],(axis[0],axis[-1])): control.setValue(value)
             self._coordinate_ready=True
+        if getattr(self,'_legacy_layer',None) is not None:
+            axis=self.clip_normal.currentIndex()
+            edges=(result.mesh.east,result.mesh.north,result.mesh.depth)[axis]
+            value=edges[min(self._legacy_layer,len(edges)-2)]
+            with QSignalBlocker(self.slice_coordinates[axis]):
+                self.slice_coordinates[axis].setValue(value)
+            self.slices[axis].setValue(round(100*(value-edges[0])/(edges[-1]-edges[0])))
+            self._explicit_slices.add(axis)
+            self._legacy_layer=None
         for i,axis in enumerate((result.mesh.east,result.mesh.north,result.mesh.depth)):
             if i in self._explicit_slices: continue
             w=self.slice_coordinates[i]; w.blockSignals(True); w.setValue(axis[0]+(axis[-1]-axis[0])*self.slices[i].value()/100); w.blockSignals(False)
@@ -536,7 +518,7 @@ class ModelView(QWidget):
         import pyvista as pv
         axes=(result.mesh.east,result.mesh.north,result.mesh.depth)
         limits=np.array([(axis[0],axis[-1]) for axis in axes])
-        boxed=self.clip_enabled.isChecked() and not layered
+        boxed=self.clip_enabled.isChecked()
         if boxed:
             limits=np.array([(max(a.value(),axis[0]),min(b.value(),axis[-1]))
                              for (a,b),axis in zip(self.clip_ranges,axes)])
@@ -544,15 +526,11 @@ class ModelView(QWidget):
                 self.color_note.setText('В выбранной области нет объёма.')
                 p.render()
                 return
-        self.terrain_top.setEnabled(kind==6 and result.mesh.bounds is None)
-        terrain=self.terrain_top.isEnabled() and self.terrain_top.isChecked()
-        self.relief_gain.setEnabled(terrain)
-        gain=self.relief_gain.value() if terrain else 1.
-        shell=kind in (0,4,5,6)
+        shell=kind in (0,4)
+        section_axis=self.clip_normal.currentIndex() if kind==4 else None
         overview=kind in (1,2) and result.mesh.size>250000 and not self.full_resolution.isChecked()
-        geometry_key=(id(result),self.component.currentText(),tuple(scale),overview,shell,native,terrain,gain,
-                      self.threshold.value() if shell else None,tuple(limits.ravel()) if boxed else None,
-                      (cut_axis,self.prism_layer.value()) if layered else None)
+        geometry_key=(id(result),self.component.currentText(),tuple(scale),overview,shell,native,section_axis,
+                      self.threshold.value() if shell else None,tuple(limits.ravel()) if boxed else None)
         component=self.component.currentText()
         if not reuse_geometry or new_model or getattr(self,'_property_key',None)!=(id(result),component):
             self._property_sample=self.property_sample(result,component)
@@ -563,9 +541,8 @@ class ModelView(QWidget):
             self._shell_parts=[]
             self._lod_cache={}
             if shell:
-                grid=exterior(result,component,self.threshold.value(),smooth_top=terrain,relief_gain=gain,
-                              prism_shell=native,cut_axis=cut_axis,first_layer=self.prism_layer.value()-1 if layered else 0,
-                              limits=limits if boxed else None)
+                grid=exterior(result,component,self.threshold.value(),prism_shell=True,
+                              section_axis=section_axis,limits=limits if boxed else None)
                 if not grid.n_cells:
                     self.display_grid=None
                     self.color_note.setText('В выбранной области нет видимых ячеек.')
@@ -585,18 +562,16 @@ class ModelView(QWidget):
         self._display_scale=scale.copy()
         mode=result.settings['mode']
         unit='g/cm³' if mode=='gravity' else ('SI' if mode=='induced' else 'A/m')
-        if boxed and not native and not shell:
-            bounds=[(limits[0][0]-origin[0])*scale[0],(limits[0][1]-origin[0])*scale[0],(limits[1][0]-origin[1])*scale[1],(limits[1][1]-origin[1])*scale[1],-limits[2][1]*scale[2],-limits[2][0]*scale[2]]
+        bounds=(limits-origin[:,None])*scale[:,None]
+        bounds[2]=-bounds[2,::-1]
+        bounds=bounds.ravel()
+        if boxed and not native:
             grid=grid.clip_box(bounds,invert=False)
             if grid.n_cells==0: self.color_note.setText('В выбранной области нет активных ячеек.'); p.render(); return
+        frame=pv.Box(bounds=bounds) if kind==4 else grid
         self.info.setText(f'{result.mesh.active.sum():,} активных ячеек · {unit} · Оси: исходные East / North, Z = Up (вверх). Локальное начало геометрии: E₀={origin[0]:.1f}, N₀={origin[1]:.1f} м. Вращение: ЛКМ; перемещение: средняя кнопка; масштаб: колесо.')
         if shell:
-            caption=' · Полное разрешение'
-            if terrain:
-                caption+=f' · Плавная кровля {gain:g}×'
-            if gain!=1:
-                caption+=' · Высоты показа условные'
-            self.info.setText(self.info.text()+caption+' · Наружные грани исходных ячеек.')
+            self.info.setText(self.info.text()+' · Свойства исходных ячеек.')
         elif overview:
             self.info.setText(self.info.text()+' · Обзор до 40 × 40 × 40. Карты срезов и экспорт используют исходную сетку.')
         self.component.setEnabled(result.model.ndim==2)
@@ -611,13 +586,10 @@ class ModelView(QWidget):
         options=dict(scalars='property',cmap=cmap,clim=clim,scalar_bar_args={
             'title':unit,'color':'#222222','title_font_size':font,'label_font_size':max(10,font-4),
             'n_labels':4,'fmt':'%.3g','position_x':.80,'position_y':.18,'width':.05,'height':.65,'vertical':True})
-        if kind in (0,4,5):
+        if shell:
             actors=self.render_prism_shell(grid,options)
             if kind==4:
-                self.attach_density_clip(actors,grid,origin,scale,limits,options)
-        elif kind==6:
-            chosen=grid.cell_data_to_point_data() if self.smooth_colors.isChecked() else grid
-            p.add_mesh(chosen,show_edges=self.edges.isChecked(),opacity=self.opacity.value(),**options)
+                self.attach_density_clip(actors,frame,origin,scale,limits,options)
         elif kind==1:
             if grid.__class__.__name__=='UnstructuredGrid':
                 p.add_mesh(grid,opacity=self.opacity.value(),**options)
@@ -639,24 +611,24 @@ class ModelView(QWidget):
                     if part.n_cells:
                         self.render_prism_shell(part,options,prefix=f'section-{axis}-',show_bar=show_bar,section=True)
                         show_bar=False
-        if self.outline.isChecked(): p.add_mesh(grid.outline(),color='#333333')
+        if self.outline.isChecked(): p.add_mesh(frame.outline(),color='#333333')
         p.add_axes(xlabel='X / East',ylabel='Y / North',zlabel='Z / Up',color='#222222')
         divisor=1000 if self.axis_unit.currentText()=='км' else 1
         unit_label='km' if divisor==1000 else 'm'
-        physical_bounds=np.array(grid.bounds)/np.repeat(scale,2)
-        self.bounds_axes=p.show_bounds(bounds=grid.bounds,axes_ranges=(physical_bounds+np.repeat(origin,2))/divisor,
+        physical_bounds=np.array(frame.bounds)/np.repeat(scale,2)
+        self.bounds_axes=p.show_bounds(bounds=frame.bounds,axes_ranges=(physical_bounds+np.repeat(origin,2))/divisor,
                     grid='back' if self.outline.isChecked() else False,all_edges=self.outline.isChecked(),location='outer',
                     color='#222222',font_size=font,bold=True,fmt='%.2f' if divisor==1000 else '%.0f',
                     use_2d=False,use_3d_text=False,
                     xtitle=f'East ({unit_label})',ytitle=f'North ({unit_label})',
-                    ztitle=(f'Z visual, relief x{gain:g} ({unit_label})' if shell and gain!=1 else f'Z ({unit_label})'),n_xlabels=2 if self._compact_axes else 3,n_ylabels=2 if self._compact_axes else 3,n_zlabels=2 if self._compact_axes else 3)
+                    ztitle=f'Z ({unit_label})',n_xlabels=2 if self._compact_axes else 3,n_ylabels=2 if self._compact_axes else 3,n_zlabels=2 if self._compact_axes else 3)
         self.bounds_axes.GetProperty().SetLineWidth(1.5)
         if camera is None or new_model or self._reorient_pending: self.fit_model()
         else:
             p.camera_position=camera
             if self._fit_pending:
                 # Refit the stretched geometry while retaining the user's rotated view.
-                p.reset_camera(bounds=grid.bounds); p.camera.zoom(.82)
+                p.reset_camera(bounds=frame.bounds); p.camera.zoom(.82)
             else: p.camera.parallel_scale=camera_scale
         self._fit_pending=False
         self._reorient_pending=False
@@ -698,9 +670,9 @@ class ModelView(QWidget):
         actors=[]
         for upper,part,wire in parts:
             name=prefix+('upper-prisms' if upper else 'lower-shell')
-            actor=self.plotter.add_mesh(part,name=name,opacity=self.opacity.value() if self.opacity.isEnabled() else 1.,
+            actor=self.plotter.add_mesh(part,name=name,opacity=self.opacity.value(),
                                         show_edges=self.edges.isChecked() and not (upper and smooth),
-                                        lighting=not section,ambient=0.65,diffuse=0.35,
+                                        lighting=False,culling='back' if self.kind.currentIndex()==4 and not section else False,
                                         show_scalar_bar=show_bar,render=False,**options)
             actors.append(actor)
             if wire is not None:
@@ -750,6 +722,8 @@ class ModelView(QWidget):
                 self.plotter.remove_actor(actor,render=False,reset_camera=False)
             cap_actors.clear()
             cap=self.section_geometry(axis,coordinate,origin,scale,limits)
+            self.section_count.setText(f'Ячеек на сечении: {cap.n_cells:,}'.replace(',', ' ') if cap.n_cells
+                                       else 'На этой отметке нет видимых ячеек')
             if cap.n_cells:
                 cap_actors.extend(self.render_prism_shell(cap,options,prefix='cut-',show_bar=False,section=True))
         update(self.slice_coordinates[axis].value())

@@ -110,7 +110,10 @@ def test_depth_clipping_is_downward_and_expanded_state_matches(qt_application_li
         np.testing.assert_allclose(cap.points[:,2],-45)
         density=r.model.reshape(r.mesh.shape)[:,:,1]
         np.testing.assert_allclose([cap['property'].min(),cap['property'].max()],[density.min(),density.max()])
-        plane=view.plotter.renderer.actors['lower-shell'].mapper.GetClippingPlanes().GetItem(0)
+        wall=view.plotter.renderer.actors['lower-shell']
+        assert not wall.prop.lighting and wall.prop.GetBackfaceCulling()
+        assert view.section_count.text().endswith(str(density.size))
+        plane=wall.mapper.GetClippingPlanes().GetItem(0)
         assert plane.EvaluateFunction(0,0,-100)>0>plane.EvaluateFunction(0,0,-44)
         assert view.plotter.plane_widgets[-1].GetPlaneProperty().GetOpacity()==0
         widget=view.plotter.plane_widgets[-1]; center=list(widget.GetOrigin()); center[2]=-70; widget.SetOrigin(center); widget.InvokeEvent('EndInteractionEvent')
