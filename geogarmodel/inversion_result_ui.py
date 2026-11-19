@@ -17,7 +17,9 @@ class ResultWindow(QDialog):
         self.setWindowTitle(f'Результат 3D-моделирования · расчёт {number}')
         self.resize(900, 680)
         self.result = result
-        self.axes, self.values = preview_volume(result)
+        from .model_archive import ModelArchive
+        archived=isinstance(result,ModelArchive)
+        self.axes, self.values = result.preview if archived else preview_volume(result)
         self.unit = {'gravity': 'г/см³', 'induced': 'ед. СИ', 'vector': 'А/м'}[result.settings['mode']]
         self.figure = Figure()
         self.canvas = FigureCanvasQTAgg(self.figure)
@@ -53,18 +55,61 @@ class ResultWindow(QDialog):
         self.tabs.addTab(self.field_page, 'Рассчитанное поле')
         self.tabs.currentChanged.connect(self.show_field)
         footer = QHBoxLayout()
-        counts = ' × '.join(map(str, result.mesh.shape))
+        counts = ' × '.join(map(str, result.shape if archived else result.mesh.shape))
         footer.addWidget(QLabel(f'Сетка результата {counts}. В окне показан обзор.'))
         footer.addStretch()
         export = QPushButton('Сохранить…')
         menu = QMenu(export)
-        for name, save in [('Модель и поле · NPZ', tab.save), ('Модель · UBC', tab.save_ubc),
+        def full_result():
+            return self.result.load() if isinstance(self.result,ModelArchive) else self.result
+        if archived:
+            load_button=QPushButton('Загрузить полностью')
+            def load_full():
+                if tab.worker or tab.workbench.worker:
+                    raise ValueError('Дождитесь завершения текущего расчёта.')
+                def loaded(r):
+                    r.settings['source_path']=str(result.path.resolve())
+                    tab.finished_result(r,offer_export=False)
+                    tab.curve.setData([v['iteration'] for v in r.history],[v['rmse'] for v in r.history])
+                    from PyQt5 import sip
+                    if not sip.isdeleted(load_button):
+                        self.result=r
+                        load_button.setEnabled(False)
+                tab.model_task(result.load,loaded)
+            load_button.clicked.connect(lambda:tab.workbench.guard(load_full))
+            footer.addWidget(load_button)
+            layers=QPushButton('Точный слой…')
+            layers.clicked.connect(lambda:tab.workbench.guard(lambda:self.open_layer(result)))
+            footer.addWidget(layers)
+        for name, save in [('Модель и поле · GeoGarModel / NPZ', tab.save), ('Модель · UBC / Oasis montaj', tab.save_ubc),
                            ('Модель · VTK', tab.save_vtk), ('Поле · CSV / ZMAP', tab.save_fields)]:
-            menu.addAction(name, lambda checked=False, fn=save: tab.workbench.guard(lambda: fn(result)))
+            menu.addAction(name, lambda checked=False, fn=save: tab.workbench.guard(
+                lambda: fn(self.result if fn==tab.save_fields else full_result())))
         export.setMenu(menu)
         footer.addWidget(export)
         layout.addLayout(footer)
         self.show_layer(0)
+
+    def open_layer(self,archive):
+        from PyQt5.QtWidgets import QInputDialog
+        k,ok=QInputDialog.getInt(self,'Горизонтальный слой','Номер слоя от поверхности',1,1,archive.shape[2])
+        if not ok: return
+        values,active=archive.layer(k-1)
+        if values.ndim==3: values=np.linalg.norm(values,axis=-1)
+        dialog=QDialog(self,Qt.Window)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.setWindowTitle(f'Слой {k} · {archive.axes[2][k-1]:g}…{archive.axes[2][k]:g} м')
+        layout=QVBoxLayout(dialog)
+        figure=Figure(constrained_layout=True)
+        canvas=FigureCanvasQTAgg(figure)
+        layout.addWidget(canvas)
+        layout.addWidget(NavigationToolbar2QT(canvas,dialog))
+        ax=figure.add_subplot()
+        im=ax.pcolormesh(*archive.axes[:2],np.ma.array(values,mask=~active).T,cmap='coolwarm')
+        ax.set(xlabel='East, м',ylabel='North, м',aspect='equal')
+        figure.colorbar(im,ax=ax,label=self.unit)
+        dialog.resize(800,600)
+        dialog.show()
 
     def show_layer(self, index):
         faces, colors = surface_faces(self.axes, self.values, index)

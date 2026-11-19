@@ -73,7 +73,7 @@ class InversionTab(QWidget):
         self.grid_button=self.button('Взять выбранную карту',self.load_grid,panel)
         self.button('Показать наблюдённое поле',self.preview_field,panel)
         self.demo_button=self.button('Синтетический пример для режима',self.demo,panel)
-        self.model_load=self.button('Открыть сохранённый результат NPZ…',self.load_result,panel)
+        self.model_load=self.button('Открыть результат…',self.load_result,panel)
         self.data_info=QLabel('Загрузите аномалии силы тяжести в редукции Буге (mGal) или аномальное магнитное поле (nT).'); self.data_info.setWordWrap(True); panel.addWidget(self.data_info)
         data=QGroupBox('01 · Координаты и наблюдения'); form=QFormLayout(data)
         self.east,self.north,self.height,self.value,self.error=[QComboBox() for _ in range(5)]
@@ -256,7 +256,7 @@ class InversionTab(QWidget):
         self.button('Карты срезов…',self.open_slice_maps,actions)
         from PyQt5.QtWidgets import QMenu
         export_button=QPushButton('Сохранить результат…'); export_menu=QMenu(export_button)
-        for title,callback in [('Модель и отчёт · NPZ',self.save),('Модель · UBC',self.save_ubc),
+        for title,callback in [('Модель и поле · GeoGarModel / NPZ',self.save),('Модель · UBC / Oasis montaj',self.save_ubc),
                                ('Поля · CSV / ZMAP',self.save_fields),('Модель · VTK',self.save_vtk)]:
             export_menu.addAction(title,lambda checked=False,fn=callback:self.workbench.guard(fn))
         export_button.setMenu(export_menu); actions.addWidget(export_button)
@@ -732,7 +732,7 @@ class InversionTab(QWidget):
                     'останутся в программе; экспорт будет доступен и позднее.\n'
                     'Автоматического сохранения на диск нет.')
         text.setWordWrap(True); layout.addWidget(text)
-        for title,callback in [('Модель и полный результат NPZ…',self.save),('Модель UBC…',self.save_ubc),
+        for title,callback in [('Модель и полный результат · GeoGarModel / NPZ…',self.save),('Модель UBC / Oasis montaj…',self.save_ubc),
                                ('Модель VTK / VTR / VTU…',self.save_vtk),('Рассчитанное поле ZMAP / поля CSV…',self.save_fields)]:
             button=QPushButton(title); layout.addWidget(button)
             button.clicked.connect(lambda checked=False,fn=callback:self.workbench.guard(fn))
@@ -797,7 +797,11 @@ class InversionTab(QWidget):
     def open_slice_maps(self):
         self.scene.result=self.require_result(); self.scene.open_slice_maps()
     def load_result(self):
-        path,_=QFileDialog.getOpenFileName(self,'Сохранённый результат 3D-моделирования','','NPZ (*.npz)')
+        path,_=QFileDialog.getOpenFileName(self,'Сохранённый результат 3D-моделирования','','Модель (*.ggmodel *.npz)')
+        if path and Path(path).suffix.lower()=='.ggmodel':
+            from .model_archive import ModelArchive
+            self.open_result_window(ModelArchive(path))
+            return
         if path:
             result=InversionResult.load(path)
             result.settings['source_path']=str(Path(path).resolve())
@@ -806,8 +810,16 @@ class InversionTab(QWidget):
             self.finished_result(result,offer_export=False)
     def save(self,result=None):
         if result is None: result=self.require_result()
-        path,_=QFileDialog.getSaveFileName(self,'3D-модель и отчёт','inversion.npz','NPZ (*.npz)')
-        if path: result.save(path if path.lower().endswith('.npz') else path+'.npz')
+        path,kind=QFileDialog.getSaveFileName(self,'3D-модель и отчёт','inversion',
+            'Быстрая модель (*.ggmodel);;NPZ без сжатия (*.npz);;Архив NPZ (*.npz)')
+        if not path: return
+        if Path(path).suffix.lower()=='.ggmodel' or ('ggmodel' in kind and not Path(path).suffix):
+            from .model_archive import write_archive
+            write_archive(path if path.lower().endswith('.ggmodel') else path+'.ggmodel',result)
+        else:
+            from .model_archive import atomic_output
+            with atomic_output(path if path.lower().endswith('.npz') else path+'.npz') as tmp,tmp.open('wb') as out:
+                result.save(out,compressed='без сжатия' not in kind)
     def save_fields(self,r=None):
         if r is None: r=self.require_result()
         path,kind=QFileDialog.getSaveFileName(self,'Поля и невязки','inversion-fields.csv','CSV (*.csv);;Рассчитанное поле ZMAP (*.zmap)')
@@ -818,10 +830,34 @@ class InversionTab(QWidget):
                 field_table(r).to_csv(path if path.lower().endswith('.csv') else path+'.csv',index=False,encoding='utf-8-sig')
     def save_ubc(self,r=None):
         if r is None: r=self.require_result()
-        path,_=QFileDialog.getSaveFileName(self,'UBC: mesh, свойства и описание','inversion.msh','UBC mesh (*.msh)')
-        if path: export_ubc(r,path)
+        from PyQt5.QtWidgets import QInputDialog,QMessageBox
+        from .inversion_export import clipped_count,oasis_package
+        path,kind=QFileDialog.getSaveFileName(self,'Экспорт UBC / Oasis montaj','inversion',
+            'UBC mesh (*.msh);;Комплект Oasis montaj (*.oasis)')
+        if not path: return
+        count=clipped_count(r.mesh)
+        policy='exact'
+        if count:
+            choices={'Сохранить свойство в полной ячейке':'keep'}
+            if r.settings['mode']=='gravity': choices['Сохранить массу (распределить по полной ячейке)']='mass'
+            choice,ok=QInputDialog.getItem(self,'Ступенчатая поверхность',
+                f'Частично обрезанных ячеек: {count:,}. В UBC они займут полный объём. Выберите правило:',
+                list(choices),0,False)
+            if not ok: return
+            policy=choices[choice]
+        if 'oasis' in kind or path.lower().endswith('.oasis'):
+            folder=Path(path).with_suffix('.oasis')
+            oasis_package(r,folder,policy)
+            QMessageBox.information(self,'Комплект Oasis montaj',
+                f'Откройте проект Oasis montaj в папке {folder} и выполните convert.gs. Проверьте СК {r.settings.get("crs","")}.')
+        else: export_ubc(r,path,policy)
     def save_vtk(self,r=None):
         if r is None: r=self.require_result()
         ext='.vtu' if r.mesh.bounds is not None or not r.mesh.active.all() else '.vtr'
         path,_=QFileDialog.getSaveFileName(self,'VTK-модель','inversion'+ext,'VTK (*'+ext+')')
-        if path: vtk_grid(r).save(path if path.lower().endswith(ext) else path+ext)
+        if path:
+            dest=path if path.lower().endswith(ext) else path+ext
+            if ext=='.vtu':
+                from .stream_vtu import write_vtu
+                write_vtu(r,dest)
+            else: vtk_grid(r).save(dest)

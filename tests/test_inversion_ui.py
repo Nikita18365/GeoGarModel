@@ -61,6 +61,25 @@ def test_previous_overview_exports_its_own_model_and_field(monkeypatch,tmp_path)
         np.testing.assert_allclose(frame['predicted'],first.result.predicted)
         first.close()
         assert list(tab.result_windows.values())==[second]
+        path=tmp_path/'second.ggmodel'
+        monkeypatch.setattr(QFileDialog,'getSaveFileName',lambda *args:(str(path),'Быстрая модель (*.ggmodel)'))
+        tab.save()
+        monkeypatch.setattr(QFileDialog,'getOpenFileName',lambda *args:(str(path),''))
+        tab.load_result()
+        overview=list(tab.result_windows.values())[-1]
+        from geogarmodel.model_archive import ModelArchive
+        assert isinstance(overview.result,ModelArchive)
+        overview.tabs.setCurrentIndex(1)
+        monkeypatch.setattr(QInputDialog,'getInt',lambda *args:(1,True))
+        overview.open_layer(overview.result)
+        button=next(b for b in overview.findChildren(QPushButton) if b.text()=='Загрузить полностью')
+        button.click()
+        loop=QEventLoop()
+        tab.worker.finished.connect(loop.quit)
+        QTimer.singleShot(30000,loop.quit)
+        loop.exec_()
+        assert not button.isEnabled()
+        np.testing.assert_array_equal(overview.result.model,second.result.model)
     finally: window.close()
 
 
