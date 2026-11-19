@@ -4,7 +4,8 @@ from PyQt5.QtCore import Qt,QTimer
 from PyQt5.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QFormLayout,QComboBox,
     QLineEdit,QDoubleSpinBox,QSpinBox,QDialogButtonBox,QPushButton,QLabel,QMessageBox,QFileDialog,QProgressDialog,QApplication,QCheckBox)
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg,NavigationToolbar2QT
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from .figure_toolbar import FigureToolbar
 from matplotlib.collections import PolyCollection
 from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -56,7 +57,7 @@ class SliceGallery(QDialog):
         toolbar.addWidget(self.smooth); self.smooth.toggled.connect(self.render_page)
         self.figure=Figure(facecolor='white'); self.canvas=FigureCanvasQTAgg(self.figure)
         self.canvas.mpl_connect('resize_event',lambda event:self.relayout())
-        self.toolbar=NavigationToolbar2QT(self.canvas,self); root.addWidget(self.toolbar); root.addWidget(self.canvas,1)
+        self.toolbar=FigureToolbar(self.canvas,self); root.addWidget(self.toolbar); root.addWidget(self.canvas,1)
         previous.clicked.connect(lambda:self.change(-1)); following.clicked.connect(lambda:self.change(1)); self.count.valueChanged.connect(lambda *a:self.change(0,reset=True))
         export=QPushButton('Сохранить все карты в PDF…'); toolbar.addWidget(export); export.clicked.connect(self.export_pdf)
         self.render_page()
@@ -73,43 +74,65 @@ class SliceGallery(QDialog):
     def render_page(self):
         self.figure.clear(); start=self.page*self.count.value(); selected=self.depths[start:start+self.count.value()]
         self.toolbar.update()
-        mesh=self.result.mesh; unit=property_unit(self.result)
+        self.draw_slices(self.figure,self.result,selected,self.component,self.smooth.isChecked(),self.cmap,self.norm)
+        self.page_label.setText(f'Срезы {start+1}–{start+len(selected)} из {len(self.depths)} · {self.component}')
+        self.canvas.draw_idle()
+
+    @staticmethod
+    def draw_slices(figure,result,selected,component,smooth,cmap,norm):
+        mesh=result.mesh; unit=property_unit(result)
         for i,depth in enumerate(selected):
-            section=horizontal_slice(self.result,float(depth),self.component); ax=self.figure.add_subplot(1,len(selected),i+1)
-            if self.smooth.isChecked():
-                values,extent=sample_section(self.result,2,float(depth),width=1000,height=1000,component=self.component)
-                image=ax.imshow(np.ma.masked_invalid(values),extent=extent,origin='lower',cmap=self.cmap,norm=self.norm,
+            section=horizontal_slice(result,float(depth),component); ax=figure.add_subplot(1,len(selected),i+1)
+            if smooth:
+                values,extent=sample_section(result,2,float(depth),width=1000,height=1000,component=component)
+                image=ax.imshow(np.ma.masked_invalid(values),extent=extent,origin='lower',cmap=cmap,norm=norm,
                     interpolation='bilinear',interpolation_stage='data',rasterized=True)
             elif section.rectangles is None:
-                image=ax.pcolormesh(mesh.east,mesh.north,section.values,cmap=self.cmap,norm=self.norm,shading='flat',rasterized=True)
+                image=ax.pcolormesh(mesh.east,mesh.north,section.values,cmap=cmap,norm=norm,shading='flat',rasterized=True)
             else:
                 r=section.rectangles; polygons=np.stack([r[:,[0,1]],r[:,[2,1]],r[:,[2,3]],r[:,[0,3]]],axis=1)
-                image=PolyCollection(polygons,array=section.rectangle_values,cmap=self.cmap,norm=self.norm,rasterized=True,edgecolors='none'); ax.add_collection(image)
+                image=PolyCollection(polygons,array=section.rectangle_values,cmap=cmap,norm=norm,rasterized=True,edgecolors='none'); ax.add_collection(image)
                 ax.set_xlim(mesh.east[0],mesh.east[-1]); ax.set_ylim(mesh.north[0],mesh.north[-1])
             divider=make_axes_locatable(ax); color_ax=divider.append_axes('right',size='5%',pad=.08)
-            self.figure.colorbar(image,cax=color_ax,label=unit)
+            figure.colorbar(image,cax=color_ax,label=unit)
             ax.set(xlabel='East, м',ylabel='North, м',title=f'Глубина Down = {depth:g} м'); ax.set_aspect('equal')
             ax.ticklabel_format(style='plain',useOffset=False)
             ax.xaxis.set_major_locator(MaxNLocator(nbins=3)); ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
             ax.tick_params(labelsize=9)
             if not np.isfinite(section.values).any(): ax.text(.5,.5,'Нет активных ячеек',transform=ax.transAxes,ha='center')
-        style_map_figure(self.figure); self.figure.tight_layout(pad=1.8)
-        self.page_label.setText(f'Срезы {start+1}–{start+len(selected)} из {len(self.depths)} · {self.component}')
-        self.canvas.draw_idle()
+        style_map_figure(figure); figure.tight_layout(pad=1.8)
 
     def export_pdf(self):
         path,_=QFileDialog.getSaveFileName(self,'Все срезы в PDF','','PDF (*.pdf)')
         if not path: return
+        from copy import copy
+        from threading import Event
         from matplotlib.backends.backend_pdf import PdfPages
-        page=self.page
-        pages=(len(self.depths)+self.count.value()-1)//self.count.value()
-        progress=QProgressDialog('Сохранение карт срезов…','Остановить',0,pages,self)
+        from .activity_ui import find_activity
+        from .work_progress import report
+        progress=QProgressDialog('Сохранение карт срезов…','Остановить',0,100,self)
         progress.setWindowModality(Qt.WindowModal); progress.setMinimumDuration(500)
-        try:
+        cancel=Event()
+        progress.canceled.connect(cancel.set)
+        count=self.count.value()
+        size=self.figure.get_size_inches()
+        result,depths,component=self.result,self.depths,self.component
+        smooth,cmap,norm=self.smooth.isChecked(),copy(self.cmap),copy(self.norm)
+        activity=find_activity(self)
+        def write_pdf():
             with PdfPages(path if path.lower().endswith('.pdf') else path+'.pdf') as pdf:
-                for self.page in range(pages):
-                    progress.setValue(self.page); QApplication.processEvents()
-                    if progress.wasCanceled(): break
-                    self.render_page(); pdf.savefig(self.figure,dpi=300)
+                for start in range(0,len(depths),count):
+                    if cancel.is_set(): break
+                    figure=Figure(figsize=size,facecolor='white')
+                    SliceGallery.draw_slices(figure,result,depths[start:start+count],component,smooth,cmap,norm)
+                    pdf.savefig(figure,dpi=300)
+                    figure.clear()
+                    end=min(start+count,len(depths))
+                    report(end,len(depths),'Карты срезов')
+                    if activity is None:
+                        progress.setValue(100*end//len(depths)); QApplication.processEvents()
+        try:
+            if activity is None: write_pdf()
+            else: activity.file_job('Экспорт срезов PDF',write_pdf,progress)
         except (OSError,ValueError) as error: QMessageBox.warning(self,'Экспорт срезов',str(error))
-        finally: progress.close(); self.page=page; self.render_page()
+        finally: progress.close()

@@ -446,7 +446,20 @@ class ModelView(QWidget):
         if self.plotter is not None and 'camera_position' in state:
             self.plotter.camera_position=state['camera_position']; self.plotter.camera.parallel_scale=state['camera_scale']; self.plotter.render()
 
+    def prepare(self,title,function,*args,**kwargs):
+        from .activity_ui import find_activity
+        activity=find_activity(self)
+        if activity is None or self.result.mesh.size<=250000:
+            return function(*args,**kwargs)
+        self._preparing=True
+        try:
+            return activity.run(title,function,*args,**kwargs)
+        finally:
+            self._preparing=False
+
     def refresh_if_ready(self):
+        if getattr(self,'_preparing',False):
+            return
         if self.result is not None and self.plotter is not None:
             self.render(self.result,reuse_geometry=True)
 
@@ -533,7 +546,7 @@ class ModelView(QWidget):
                       self.threshold.value() if shell else None,tuple(limits.ravel()) if boxed else None)
         component=self.component.currentText()
         if not reuse_geometry or new_model or getattr(self,'_property_key',None)!=(id(result),component):
-            self._property_sample=self.property_sample(result,component)
+            self._property_sample=self.prepare('Диапазон свойств модели',self.property_sample,result,component)
             self._property_key=(id(result),component)
             self._band_key=None
         if not reuse_geometry or geometry_key!=self._geometry_key:
@@ -541,7 +554,7 @@ class ModelView(QWidget):
             self._shell_parts=[]
             self._lod_cache={}
             if shell:
-                grid=exterior(result,component,self.threshold.value(),prism_shell=True,
+                grid=self.prepare('Подготовка 3D-модели',exterior,result,component,self.threshold.value(),prism_shell=True,
                               section_axis=section_axis,limits=limits if boxed else None)
                 if not grid.n_cells:
                     self.display_grid=None
@@ -552,7 +565,7 @@ class ModelView(QWidget):
                 grid=pv.Box(bounds=(*limits[0],*limits[1],-limits[2,1],-limits[2,0]))
             else:
                 builder=display_geometry if overview else vtk_grid
-                grid=builder(result,component)
+                grid=self.prepare('Подготовка объёма',builder,result,component)
             grid.translate(-origin,inplace=True)
             if grid.__class__.__name__=='UnstructuredGrid': grid=grid.clean(produce_merge_map=False)
             grid.scale(scale,inplace=True)
@@ -656,12 +669,12 @@ class ModelView(QWidget):
         mesh=self.result.mesh
         key=(id(mesh),self.prism_percent.value())
         if self._band_key!=key:
-            self._band_limits=upper_prism_limits(mesh.active,mesh.shape,self.prism_percent.value())
+            self._band_limits=self.prepare('Детализация призм',upper_prism_limits,mesh.active,mesh.shape,self.prism_percent.value())
             self._band_key=key
         smooth=self.smooth_colors.isChecked()
         style=(key,smooth,self.edges.isChecked())
         if section or self._parts_style!=style:
-            parts=prism_parts(grid,self._band_limits,mesh.shape[2],smooth,section,mesh.bounds is not None,self.edges.isChecked())
+            parts=self.prepare('Окраска поверхности',prism_parts,grid,self._band_limits,mesh.shape[2],smooth,section,mesh.bounds is not None,self.edges.isChecked())
             if not section:
                 self._shell_parts=parts
                 self._parts_style=style

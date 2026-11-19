@@ -244,4 +244,11 @@ class TrainingDashboard(QWidget):
         from pyqtgraph.exporters import ImageExporter
         exporter = ImageExporter(self.plots[name].plotItem)
         exporter.parameters()["width"] = 1800
-        exporter.export(path)
+        from .activity_ui import find_activity
+        activity=find_activity(self)
+        if activity is None:
+            exporter.export(path)
+        else:
+            image=exporter.export(toBytes=True)
+            if not activity.run('Экспорт графика PNG',image.save,path,'PNG'):
+                raise OSError('Не удалось записать изображение.')

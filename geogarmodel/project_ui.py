@@ -136,7 +136,7 @@ class ProjectWorkspace:
             inversion_progress=[t.progress.minimum(),t.progress.maximum(),t.progress.value()],
             ml_views={name:plot.getViewBox().viewRange() for name,plot in self.dashboard.plots.items()})
         QApplication.setOverrideCursor(Qt.WaitCursor)
-        try: write_project(path,state,maps,dict(training=self.training,prediction=self.prediction,output=self.output,observations=t.table),self.result,models,voxels)
+        try: self.activity.run('Сохранение проекта',write_project,path,state,maps,dict(training=self.training,prediction=self.prediction,output=self.output,observations=t.table),self.result,models,voxels)
         finally: QApplication.restoreOverrideCursor()
         self.map_project_path=str(path); self._project_dirty=False; self.map_dirty=False
         self.statusBar().showMessage('Сохранён общий проект: карты, ML/Optuna и 3D-моделирование.')
@@ -147,7 +147,7 @@ class ProjectWorkspace:
         if path: self.open_project_from(path)
 
     def open_project_from(self,path):
-        self.project_idle(); data=read_project(path)
+        self.project_idle(); data=self.activity.run('Открытие проекта',read_project,path)
         if 'state' in data:
             state=data['state']
             if set(state['ml_controls'])-set(ML_CONTROLS) or set(state['inv_controls'])-set(INV_CONTROLS): raise ValueError('Неизвестные настройки в проекте.')

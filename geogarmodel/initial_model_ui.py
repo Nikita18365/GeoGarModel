@@ -22,7 +22,8 @@ class InitialModelPanel(QGroupBox):
         layout.addWidget(Disclosure('Компоненты и предыдущий результат',extra))
 
     def open_editor(self):
-        self.current()
+        if self.source.currentIndex()==1:
+            self.current(copy=False)
         dialog=QDialog(self); dialog.setWindowTitle('Редактор начального вокселя'); dialog.resize(570,600)
         layout=QVBoxLayout(dialog)
         note=QLabel('Необязательная подготовка модели. Изменения применяются сразу. Для просмотра результата закройте редактор кнопкой «Готово».')
@@ -40,22 +41,30 @@ class InitialModelPanel(QGroupBox):
             if self.model.mode!=self.tab.mode.currentData(): raise ValueError('Тип начальной модели отличается от выбранной физики. Загрузите нужное свойство.')
             crs=self.tab.crs.currentText().split('|')[0].strip()
             if self.model.crs and self.model.crs!=crs: raise ValueError('CRS модели и наблюдений различаются; автоматического перепроецирования нет.')
-            return self.model.copy() if copy else self.model
+            return self.tab.workbench.activity.run('Копирование модели',self.model.copy) if copy else self.model
         mesh=self.tab.new_mesh()
-        return VoxelModel(mesh,np.full((mesh.size,3) if self.tab.mode.currentData()=='vector' else (mesh.size,),self.tab.initial.value()),self.tab.mode.currentData(),self.tab.crs.currentText().split('|')[0].strip())
+        mode=self.tab.mode.currentData()
+        crs=self.tab.crs.currentText().split('|')[0].strip()
+        initial=self.tab.initial.value()
+        shape=(mesh.size,3) if mode=='vector' else (mesh.size,)
+        return self.tab.workbench.activity.run('Создание начальной модели',
+            lambda: VoxelModel(mesh,np.full(shape,initial),mode,crs,own_values=True))
 
     def assign(self,model,previous=None,check_crs=True):
         crs=self.tab.crs.currentText().split('|')[0].strip()
         if check_crs and self.tab.table is not None and model.crs and crs and model.crs!=crs:
             raise ValueError('CRS загруженной модели отличается от CRS наблюдений. Согласуйте координаты и CRS перед загрузкой.')
-        self.undo_model=previous.copy() if previous is not None else (self.model.copy() if self.model is not None else None)
+        old=previous if previous is not None else self.model
+        self.undo_model=self.tab.workbench.activity.run('Подготовка отмены операции',old.copy) if old is not None else None
         if previous is not None: model.source_path=''; model.source_array=''
         self.model=model; self.source.setCurrentIndex(1)
         m=model.mesh
-        mask=m.active[:,None] if model.values.ndim==2 else m.active
-        minimum=np.min(model.values,where=mask,initial=np.inf)
-        maximum=np.max(model.values,where=mask,initial=-np.inf)
-        self.info.setText(f'{m.shape} · {m.active.sum():,}/{m.size:,} активных · {model.mode}\nE: {m.east[0]:g}…{m.east[-1]:g}; N: {m.north[0]:g}…{m.north[-1]:g}\nDown: {m.depth[0]:g}…{m.depth[-1]:g} м; свойства {minimum:.5g}…{maximum:.5g}\nГеометрия загруженной модели используется при запуске. Nx/Ny/Nz применяются только к новой сетке или переносу.')
+        def summary():
+            mask=m.active[:,None] if model.values.ndim==2 else m.active
+            return (m.active.sum(),np.min(model.values,where=mask,initial=np.inf),
+                    np.max(model.values,where=mask,initial=-np.inf))
+        count,minimum,maximum=self.tab.workbench.activity.run('Проверка свойств модели',summary)
+        self.info.setText(f'{m.shape} · {count:,}/{m.size:,} активных · {model.mode}\nE: {m.east[0]:g}…{m.east[-1]:g}; N: {m.north[0]:g}…{m.north[-1]:g}\nDown: {m.depth[0]:g}…{m.depth[-1]:g} м; свойства {minimum:.5g}…{maximum:.5g}\nГеометрия загруженной модели используется при запуске. Nx/Ny/Nz применяются только к новой сетке или переносу.')
         if model.crs: self.tab.crs.setCurrentText(model.crs)
         self.tab.status.setText('Начальная модель готова. Проверьте единицы, диапазон свойств и границы ограничения.')
 
@@ -82,8 +91,10 @@ class InitialModelPanel(QGroupBox):
             options['dummy']=float(dummy) if dummy.strip() else None
         elif ext in ('.vtk','.vtr','.vti'):
             import pyvista as pv
-            reader=pv.get_reader(path)
-            names=list(reader.cell_array_names) if hasattr(reader,'cell_array_names') else list(reader.read().cell_data.keys())
+            def arrays():
+                reader=pv.get_reader(path)
+                return list(reader.cell_array_names) if hasattr(reader,'cell_array_names') else list(reader.read().cell_data.keys())
+            names=self.tab.workbench.activity.run('Чтение структуры VTK',arrays)
             array,ok=QInputDialog.getItem(self,'Свойство VTK','Выберите cell-массив (Z = Up; вектор East/North/Down):',names,0,False)
             if not ok: return None
             options['array']=array
@@ -134,7 +145,7 @@ class InitialModelPanel(QGroupBox):
         self.tab.scene.render(self.tab.prepared_model(copy=False).result()); self.tab.tabs.setCurrentIndex(0)
 
     def operation(self):
-        model=self.current()
+        model=self.current(copy=False)
         labels={'Заполнить константой (a)':'constant','Умножить на a':'multiply','Прибавить a':'add','Ограничить [a,b]':'clamp','Нормальное распределение (a=среднее,b=σ)':'normal','Равномерное распределение [a,b]':'uniform','Градиент с глубиной: a + b × Down(м)':'depth_gradient'}
         label,ok=QInputDialog.getItem(self,'Операции','Операция над активными ячейками:',list(labels),0,False)
         if not ok: return
@@ -146,10 +157,10 @@ class InitialModelPanel(QGroupBox):
         text,ok=QInputDialog.getText(self,'Параметры','a, b, seed (для случайных распределений):',text='0, 1, 42')
         if not ok: return
         a,b,seed=map(float,text.split(','))
-        self.assign(edit(model,labels[label],a,b,int(seed),component),previous=model); self.preview()
+        self.assign(self.tab.workbench.activity.run('Изменение свойств',edit,model,labels[label],a,b,int(seed),component),previous=model); self.preview()
 
     def clip(self):
-        model=self.current()
+        model=self.current(copy=False)
         path,_=QFileDialog.getOpenFileName(self,'Поверхность: East North Down/Up или ZMAP','','Surface (*.csv *.xlsx *.txt *.dat *.zmap *.npz)')
         if not path: return
         vertical,ok=QInputDialog.getItem(self,'Единицы поверхности','Значения поверхности в метрах:',['Down','Up'],0,False)
@@ -157,34 +168,42 @@ class InitialModelPanel(QGroupBox):
         keep,ok=QInputDialog.getItem(self,'Сторона поверхности','Что оставить?',['Ниже (фундамент)','Выше (осадочный чехол)'],0,False)
         if not ok: return
         if Path(path).suffix.lower() in ('.dat','.zmap','.npz'):
-            g=load_grid(path); x,y=np.meshgrid(g.x,g.y); valid=np.isfinite(g.values)
+            g=self.tab.workbench.activity.run('Загрузка поверхности',load_grid,path); x,y=np.meshgrid(g.x,g.y); valid=np.isfinite(g.values)
             east,north,z=x[valid],y[valid],g.values[valid]
         else:
             from .models import read_table
-            t=read_table(path); east,north,z=[t[c].to_numpy(float) for c in ('East','North',vertical)]
-        self.assign(clip_surface(model,east,north,z,'below' if keep.startswith('Ниже') else 'above',vertical),previous=model); self.preview()
+            t=self.tab.workbench.activity.run('Загрузка поверхности',read_table,path); east,north,z=[t[c].to_numpy(float) for c in ('East','North',vertical)]
+        self.assign(self.tab.workbench.activity.run('Обрезка по поверхности',clip_surface,model,east,north,z,'below' if keep.startswith('Ниже') else 'above',vertical),previous=model); self.preview()
 
     def crop(self):
-        model=self.current(); previous=model.copy()
         text,ok=QInputDialog.getText(self,'Область (метры)','Emin,Emax,Nmin,Nmax,Dmin,Dmax (сохраняются пересекающиеся части призм):')
         if not ok: return
         limits=np.asarray([float(v) for v in text.split(',')]).reshape(3,2)
         if np.any(limits[:,1]<=limits[:,0]): raise ValueError('Максимумы должны быть больше минимумов.')
-        cells=model.mesh.cells(); cells[:,:3]=np.maximum(cells[:,:3],limits[:,0]); cells[:,3:]=np.minimum(cells[:,3:],limits[:,1])
-        active=model.mesh.active&np.all(cells[:,3:]>cells[:,:3],axis=1)
-        if not active.any(): raise ValueError('Область не пересекает активную модель.')
-        cells[~active]=model.mesh.cells()[~active]; model.mesh.bounds=cells; model.mesh.active=active; model.values[~active]=0
-        model.history.append(dict(operation='box crop',limits=limits.tolist())); self.assign(model,previous=previous); self.preview()
+        previous=self.current(copy=False)
+        def crop_model():
+            model=previous.copy()
+            cells=model.mesh.cells()
+            cells[:,:3]=np.maximum(cells[:,:3],limits[:,0])
+            cells[:,3:]=np.minimum(cells[:,3:],limits[:,1])
+            active=model.mesh.active&np.all(cells[:,3:]>cells[:,:3],axis=1)
+            if not active.any(): raise ValueError('Область не пересекает активную модель.')
+            cells[~active]=model.mesh.cells()[~active]
+            model.mesh.bounds=cells; model.mesh.active=active; model.values[~active]=0
+            model.history.append(dict(operation='box crop',limits=limits.tolist()))
+            return model
+        self.assign(self.tab.workbench.activity.run('Обрезка по координатам',crop_model),previous=previous)
+        self.preview()
 
     def transfer(self):
         method,ok=QInputDialog.getItem(self,'Перенос на новую сетку','Новая сетка — Nx/Ny/Nz, верх/низ и площадь наблюдений. Ближайшая ячейка сохраняет значения, линейная сглаживает. Масса и поле могут измениться. Вне исходной области ячейки неактивны.',['nearest','linear'],0,False)
         if not ok: return
-        model=self.current(); self.assign(resample(model,self.tab.new_mesh(),method),previous=model); self.preview()
+        model=self.current(copy=False); self.assign(self.tab.workbench.activity.run('Перенос на сетку',resample,model,self.tab.new_mesh(),method),previous=model); self.preview()
 
     def undo(self):
         if self.undo_model is None: raise ValueError('Нет операции для отмены.')
         old=self.undo_model; self.assign(old); self.preview()
 
     def save(self):
-        model=self.current(); path,_=QFileDialog.getSaveFileName(self,'Начальная модель','','NPZ (*.npz)')
-        if path: model.save(path)
+        model=self.current(copy=False); path,_=QFileDialog.getSaveFileName(self,'Начальная модель','','NPZ (*.npz)')
+        if path: self.tab.workbench.activity.run('Сохранение модели',model.save,path)

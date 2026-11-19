@@ -30,7 +30,13 @@ from .map_navigation import MapToolbar
 from .project_ui import ProjectWorkspace
 
 
+from .activity_ui import Activities
+from .work_progress import reporting, report
+from .table_export import write_csv
+
+
 class Worker(QThread):
+    phase = pyqtSignal(str, int)
     result = pyqtSignal(object)
     failed = pyqtSignal(str)
     progress = pyqtSignal(object)
@@ -43,7 +49,9 @@ class Worker(QThread):
 
     def run(self):
         try:
-            self.result.emit(self.function())
+            with reporting(self.phase.emit):
+                value = self.function()
+            self.result.emit(value)
         except ComputationCancelled:
             self.cancelled.emit()
         except Exception:
@@ -88,6 +96,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         root_layout.addWidget(header)
         root_layout.addWidget(self.tabs)
         self.setCentralWidget(root)
+        self.activity = Activities(self)
         self.make_maps()
         self.make_training()
         from .inversion_ui import InversionTab
@@ -423,9 +432,16 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         if not self.ensure_map_project(): return
         paths, _ = QFileDialog.getOpenFileNames(self, "Сетки", "", "Grid (*.grd *.zmap *.dat *.npz);;Все файлы (*)")
         if not paths: return
+        def read_maps():
+            maps = []
+            for path in paths:
+                maps.append((path,load_grid(path)))
+                report(len(maps),len(paths),'Файлы карт')
+            return maps
         if sum(Path(path).stat().st_size for path in paths)>16*1024**2:
-            self.run_job(lambda:[(path,load_grid(path)) for path in paths],self.finish_grid_import)
-        else: self.finish_grid_import([(path,load_grid(path)) for path in paths])
+            self.run_job(read_maps,self.finish_grid_import,title='Загрузка карт')
+        else:
+            self.finish_grid_import(self.activity.run('Загрузка карт',read_maps))
 
     def finish_grid_import(self,loaded):
         for path,grid in loaded:
@@ -444,7 +460,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         if not self.ensure_map_project(): return
         path, _ = QFileDialog.getOpenFileName(self, "Таблица: первые 3 столбца X Y поле", "", "Таблицы (*.xlsx *.csv *.txt)")
         if path:
-            data = read_table(path)
+            data = self.activity.run('Загрузка таблицы',read_table,path)
             # Plain XYZ tables carry no reliable CRS: never borrow ML defaults.
             from pyproj import CRS
             crs=self.import_source_crs('',Path(path).stem)
@@ -454,7 +470,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
             if not ok: return
             north_first=order.startswith('North')
             coordinate_unit='degrees' if CRS.from_user_input(crs).is_geographic else 'm'
-            self.add_grid(points_to_grid(data.iloc[:, 1 if north_first else 0],
+            self.add_grid(self.activity.run("Интерполяция карты",points_to_grid,data.iloc[:, 1 if north_first else 0],
                                         data.iloc[:, 0 if north_first else 1], data.iloc[:, 2],
                                         name=Path(path).stem, crs=crs, coordinate_unit=coordinate_unit))
 
@@ -484,7 +500,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
                 from .grids import Grid
                 from .map_project import reproject_grid
                 revised=Grid(grid.x,grid.y,grid.values,grid.name,unit.text().strip(),checked,coord_unit.currentText(),list(grid.history))
-                revised=reproject_grid(revised,self.map_project_crs)
+                revised=self.activity.run('Пересчёт координат карты',reproject_grid,revised,self.map_project_crs)
                 self.layers.currentItem().data(Qt.UserRole)['data']=revised
                 self._map_fit=True; self.map_reordered(); return
             grid.crs, grid.unit, grid.coordinate_unit = checked, unit.text().strip(), coord_unit.currentText()
@@ -506,7 +522,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
     def redraw(self):
         return MapWorkspace.redraw(self)
 
-    def run_job(self, function, callback, with_context=False):
+    def run_job(self, function, callback, with_context=False, title='Расчёт'):
         if self.inversion.worker is not None:
             raise ValueError("Дождитесь окончания 3D-моделирования.")
         if self.worker is not None:
@@ -515,8 +531,9 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         if with_context:
             worker.function = lambda: function(worker.progress.emit, worker.cancel_event)
         self.worker = worker
+        self.activity.track(worker,title)
         self.job_outcome = "Расчёт завершён."
-        self.worker.result.connect(lambda value: self.guard(lambda: callback(value)))
+        self.worker.result.connect(lambda value: self.guard(lambda: self.activity.deliver(worker,callback,value)))
         self.worker.failed.connect(self.job_failed)
         self.worker.cancelled.connect(self.job_cancelled)
         self.worker.progress.connect(self.trial_progress)
@@ -535,6 +552,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
                 self.best_trial_label.setText(f"Лучший trial: {snapshot['best_trial'] + 1} · CV RMSE {snapshot['best_cv_rmse']:.6g}")
             except ValueError:
                 pass
+        if self.worker is not None:
+            self.activity.update(self.worker.activity_key,'Optuna · trials',min(99,100*(record['trial']+1)//max(1,self.progress_bar.maximum())))
         self.progress_bar.setValue(record["trial"] + 1)
         self.log.appendPlainText(f"Trial {record['trial'] + 1} · {record['state']} · CV RMSE={record['rmse']}\n"
                                  + json.dumps(record["parameters"], ensure_ascii=False))
@@ -568,24 +587,28 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
     def apply_transform(self):
         grid, operation = self.selected_grid(), self.operation.currentData()
         args = dict(height=self.height.value(), wavelength=self.wave.value(), degree=self.degree.value())
-        self.run_job(lambda: transform(grid, operation, **args), self.add_grid)
+        self.run_job(lambda: transform(grid, operation, **args), self.add_grid,title='Расчёт трансформанты')
 
     def export_grid(self):
         grid = self.selected_grid()
         path, _ = QFileDialog.getSaveFileName(self, "Сохранить сетку с метаданными", "", "NPZ (*.npz)")
         if path:
-            save_grid(grid, path if path.lower().endswith(".npz") else path + ".npz")
+            self.activity.run('Экспорт сетки',save_grid,grid, path if path.lower().endswith(".npz") else path + ".npz")
 
     def export_xyz(self):
         import pandas as pd
         grid = self.selected_grid()
-        xx, yy = np.meshgrid(grid.x, grid.y)
-        self.save_csv(pd.DataFrame({"X": xx.ravel(), "Y": yy.ravel(), grid.name: grid.values.ravel()}), "Поле XYZ")
+        path,_=QFileDialog.getSaveFileName(self,'Поле XYZ','','CSV (*.csv)')
+        if path:
+            def write_xyz():
+                xx, yy = np.meshgrid(grid.x, grid.y)
+                write_csv(pd.DataFrame({"X": xx.ravel(), "Y": yy.ravel(), grid.name: grid.values.ravel()}),path)
+            self.activity.run('Экспорт XYZ',write_xyz)
 
     def open_training(self):
         path, _ = QFileDialog.getOpenFileName(self, "Обучающая таблица", "", "Таблицы (*.xlsx *.csv *.txt)")
         if path:
-            data = read_table(path)
+            data = self.activity.run('Загрузка таблицы',read_table,path)
             if len(data.columns) < 4:
                 raise ValueError("Нужны X, Y, минимум один признак и глубина.")
             self.training, self.result, self.output = data, None, None
@@ -609,7 +632,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
     def open_prediction(self):
         path, _ = QFileDialog.getOpenFileName(self, "Прогнозная таблица", "", "Таблицы (*.xlsx *.csv *.txt)")
         if path:
-            self.prediction = read_table(path)
+            self.prediction = self.activity.run('Загрузка таблицы',read_table,path)
             self.output = None
             self.log.appendPlainText(f"Прогнозная таблица: {len(self.prediction)} строк.")
 
@@ -694,7 +717,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         self.progress_bar.setRange(0, self.trials.value() if self.optimize_check.isChecked() else 1)
         self.progress_bar.setValue(0)
         self.run_job(lambda progress, cancel: train_horizon(table, name, **args, progress=progress, cancel_event=cancel),
-                     self.trained, with_context=True)
+                     self.trained, with_context=True,title='Обучение модели')
 
     def trained(self, result):
         self.result = result
@@ -708,7 +731,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         if self.result is None or self.prediction is None:
             raise ValueError("Обучите модель и загрузите прогнозную таблицу.")
         result, table = self.result, self.prediction.copy()
-        self.run_job(lambda: result.predict(table), self.predicted)
+        self.run_job(lambda: result.predict(table), self.predicted,title='Прогноз горизонта')
 
     def predicted(self, output):
         self.output = output
@@ -719,7 +742,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
             raise ValueError("Нет данных для экспорта.")
         path, _ = QFileDialog.getSaveFileName(self, title, "", "CSV (*.csv)")
         if path:
-            data.to_csv(path, index=False, encoding="utf-8-sig")
+            self.activity.run('Экспорт CSV',write_csv,data,path)
 
     def export_prediction(self):
         self.save_csv(self.output, "Прогноз X Y глубина")
@@ -786,7 +809,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         snapshot = best_snapshot(self.optimization_context, self.dashboard.history)
         path, _ = QFileDialog.getSaveFileName(self, "Лучший завершённый trial Optuna", "optuna-best.json", "JSON (*.json)")
         if path:
-            Path(path).write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+            with self.activity.immediate('Сохранение параметров'):
+                Path(path).write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
 
     def export_chart(self):
         path, _ = QFileDialog.getSaveFileName(self, "Сохранить график", "", "PNG (*.png)")
@@ -797,7 +821,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         if self.result is None:
             raise ValueError("Сначала обучите модель.")
         data = self.result.validation
-        grid = points_to_grid(data.iloc[:, 1 if self.fitted_north_first else 0],
+        grid = self.activity.run("Интерполяция карты",points_to_grid,data.iloc[:, 1 if self.fitted_north_first else 0],
                               data.iloc[:, 0 if self.fitted_north_first else 1],
                               data["residual_pred_minus_observed"], name="Контроль · прогноз − наблюдения", unit="m",
                               crs=self.fitted_crs, coordinate_unit="m")
@@ -810,7 +834,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
     def prediction_map(self):
         if self.output is None:
             raise ValueError("Сначала рассчитайте прогноз.")
-        grid = points_to_grid(self.output.iloc[:, 1 if self.fitted_north_first else 0],
+        grid = self.activity.run("Интерполяция карты",points_to_grid,self.output.iloc[:, 1 if self.fitted_north_first else 0],
                               self.output.iloc[:, 0 if self.fitted_north_first else 1], self.output.iloc[:, 2],
                               name=self.output.columns[-1], unit="m", crs=self.fitted_crs, coordinate_unit="m")
         self.add_grid(grid)
@@ -828,7 +852,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
                           crs=self.fitted_crs, northing_first=self.fitted_north_first,
                           optimization_history=self.result.optimization_history,
                           versions={"numpy": np.__version__, "sklearn": sklearn.__version__, "optuna": optuna.__version__})
-            Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.activity.run('Сохранение отчёта',lambda: Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"))
 
     def closeEvent(self, event):
         if self.worker is not None or self.inversion.worker is not None:

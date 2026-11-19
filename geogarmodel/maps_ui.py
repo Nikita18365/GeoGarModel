@@ -324,7 +324,7 @@ class MapWorkspace:
         if source is None: return
         from .map_project import Vector
         revised=Vector(row['data'].features,source)
-        row['data']=revised.reproject(self.map_project_crs) if self.map_project_crs else revised
+        row['data']=self.activity.run('Пересчёт векторного слоя',revised.reproject,self.map_project_crs) if self.map_project_crs else revised
         self._map_fit=True; self.map_reordered()
 
     def apply_project_crs(self,crs):
@@ -337,7 +337,7 @@ class MapWorkspace:
         for row in self.map_layer_rows():
             source=self.source_crs(row['data'].crs,row['name'])
             if source is None: return False
-            converted.append(reproject_grid(row['data'],target,source) if row['kind']=='grid' else row['data'].reproject(target))
+            converted.append(self.activity.run('Пересчёт карты',reproject_grid,row['data'],target,source) if row['kind']=='grid' else self.activity.run('Пересчёт векторного слоя',row['data'].reproject,target))
         # Commit only after every layer has been transformed successfully.
         for i,value in enumerate(converted): self.layers.item(i).data(Qt.UserRole)['data']=value
         self.map_project_crs=target.to_string(); self.update_project_label()
@@ -436,7 +436,7 @@ class MapWorkspace:
         if self.map_project_crs:
             source=self.source_crs(grid.crs,grid.name)
             if not source: return
-            grid=reproject_grid(grid,self.map_project_crs,source)
+            grid=self.activity.run('Пересчёт карты',reproject_grid,grid,self.map_project_crs,source)
         elif grid.crs:
             if self.layers.count():
                 if not self.apply_project_crs(grid.crs): return
@@ -492,8 +492,7 @@ class MapWorkspace:
                 prj=Path(path).with_suffix('.prj')
                 source=self.import_source_crs(read_prj(prj) if prj.exists() else '',Path(path).stem)
                 if source is None: return
-            vector=read_vector(path,source)
-            vector=vector.reproject(crs)
+            vector=self.activity.run('Загрузка векторного слоя',lambda: read_vector(path,source).reproject(crs))
             self.add_map_layer(dict(kind='vector',name=Path(path).stem,visible=True,style={},data=vector))
 
     def clear_overlays(self):

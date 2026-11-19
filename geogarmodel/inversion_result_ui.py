@@ -1,6 +1,7 @@
 """Independent, non-modal CPU preview of one completed inversion."""
 import numpy as np
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from .figure_toolbar import FigureToolbar
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -19,7 +20,7 @@ class ResultWindow(QDialog):
         self.result = result
         from .model_archive import ModelArchive
         archived=isinstance(result,ModelArchive)
-        self.axes, self.values = result.preview if archived else preview_volume(result)
+        self.axes, self.values = result.preview if archived else tab.workbench.activity.run('Обзор результата',preview_volume,result)
         self.unit = {'gravity': 'г/см³', 'induced': 'ед. СИ', 'vector': 'А/м'}[result.settings['mode']]
         self.figure = Figure()
         self.canvas = FigureCanvasQTAgg(self.figure)
@@ -40,7 +41,7 @@ class ResultWindow(QDialog):
         model_page = QWidget()
         model_layout = QVBoxLayout(model_page)
         model_layout.addWidget(self.canvas)
-        model_layout.addWidget(NavigationToolbar2QT(self.canvas, self))
+        model_layout.addWidget(FigureToolbar(self.canvas, self))
         row = QHBoxLayout()
         self.depth = QLabel()
         row.addWidget(self.depth)
@@ -61,7 +62,7 @@ class ResultWindow(QDialog):
         export = QPushButton('Сохранить…')
         menu = QMenu(export)
         def full_result():
-            return self.result.load() if isinstance(self.result,ModelArchive) else self.result
+            return tab.workbench.activity.run('Чтение полной модели',self.result.load) if isinstance(self.result,ModelArchive) else self.result
         if archived:
             load_button=QPushButton('Загрузить полностью')
             def load_full():
@@ -95,7 +96,7 @@ class ResultWindow(QDialog):
         from PyQt5.QtWidgets import QInputDialog
         k,ok=QInputDialog.getInt(self,'Горизонтальный слой','Номер слоя от поверхности',1,1,archive.shape[2])
         if not ok: return
-        values,active=archive.layer(k-1)
+        values,active=self.parentWidget().workbench.activity.run('Чтение слоя модели',archive.layer,k-1)
         if values.ndim==3: values=np.linalg.norm(values,axis=-1)
         dialog=QDialog(self,Qt.Window)
         dialog.setAttribute(Qt.WA_DeleteOnClose)
@@ -104,7 +105,7 @@ class ResultWindow(QDialog):
         figure=Figure(constrained_layout=True)
         canvas=FigureCanvasQTAgg(figure)
         layout.addWidget(canvas)
-        layout.addWidget(NavigationToolbar2QT(canvas,dialog))
+        layout.addWidget(FigureToolbar(canvas,dialog))
         ax=figure.add_subplot()
         im=ax.pcolormesh(*archive.axes[:2],np.ma.array(values,mask=~active).T,cmap='coolwarm')
         ax.set(xlabel='East, м',ylabel='North, м',aspect='equal')
@@ -126,7 +127,7 @@ class ResultWindow(QDialog):
         figure = Figure(constrained_layout=True)
         canvas = FigureCanvasQTAgg(figure)
         layout.addWidget(canvas)
-        layout.addWidget(NavigationToolbar2QT(canvas, self))
+        layout.addWidget(FigureToolbar(canvas, self))
         ax = figure.add_subplot()
         r = self.result
         stride = max(1, (len(r.predicted) + 99999) // 100000)

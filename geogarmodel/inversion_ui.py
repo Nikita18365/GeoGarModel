@@ -10,7 +10,8 @@ from PyQt5.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QGroupB
     QComboBox,QDoubleSpinBox,QSpinBox,QPushButton,QLabel,QScrollArea,
     QTabWidget,QFileDialog,QProgressBar,QPlainTextEdit,QCheckBox,QAbstractSpinBox,QLineEdit,QAbstractButton,QDialog)
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg,NavigationToolbar2QT
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from .figure_toolbar import FigureToolbar
 from threading import Event
 from .inversion import Mesh,FieldOperator,invert,InversionResult
 from .inversion_view import vtk_grid
@@ -28,14 +29,21 @@ from .inversion_progress import duration
 from .ui_layout import Disclosure,ParameterSplitter,SummaryLabel,details,form_details,quiet_button,prepare_forms
 
 
+from .table_export import write_csv
+from .work_progress import reporting
+
+
 class InversionWorker(QThread):
+    phase=pyqtSignal(str,int)
     progress=pyqtSignal(object); result=pyqtSignal(object); failed=pyqtSignal(str)
     warning=pyqtSignal(str)
     def __init__(self,function,parent,gpu_id=None):
         super().__init__(parent); self.function=function; self.cancel=Event(); self.gpu_id=gpu_id
     def run(self):
         error=None
-        try: result=self.function(self.progress.emit,self.cancel)
+        try:
+            with reporting(self.phase.emit):
+                result=self.function(self.progress.emit,self.cancel)
         except ComputationCancelled: error='Расчёт остановлен до завершения оценки начальной модели. Готовой модели и поля пока нет.'
         except Exception as exc: error=str(exc)
         # Release captured inputs and exception frames before returning cached blocks.
@@ -242,7 +250,7 @@ class InversionTab(QWidget):
         self.tabs=QTabWidget(); rl.addWidget(self.tabs,1)
         self.scene=ModelWorkspace(self,import_callback=lambda:self.workbench.guard(self.import_display_model)); self.tabs.addTab(self.scene,'3D-модели')
         self.figure=Figure(); self.canvas=FigureCanvasQTAgg(self.figure)
-        plot=QWidget(); pl=QVBoxLayout(plot); pl.addWidget(NavigationToolbar2QT(self.canvas,self)); pl.addWidget(self.canvas)
+        plot=QWidget(); pl=QVBoxLayout(plot); pl.addWidget(FigureToolbar(self.canvas,self)); pl.addWidget(self.canvas)
         self.tabs.addTab(plot,'Срезы и поля')
         self.convergence=pg.PlotWidget(background='#101c2f'); self.convergence.setLabel('left','RMSE'); self.convergence.setLabel('bottom','Итерация'); self.curve=self.convergence.plot(pen=pg.mkPen('#2dd4bf',width=2)); self.tabs.addTab(self.convergence,'Сходимость')
         timing_plot=pg.PlotWidget(background='#101c2f'); timing_plot.setLabel('left','Время','s'); timing_plot.setLabel('bottom','Итерация')
@@ -411,7 +419,7 @@ class InversionTab(QWidget):
 
     def load_table(self):
         path,_=QFileDialog.getOpenFileName(self,'Наблюдения','', 'Таблицы (*.xlsx *.csv *.txt)')
-        if path: self.assign_table(read_table(path))
+        if path: self.assign_table(self.workbench.activity.run('Загрузка наблюдений',read_table,path))
 
     def load_grid(self):
         grid=self.workbench.selected_grid()
@@ -425,7 +433,7 @@ class InversionTab(QWidget):
         from .grids import load_grid
         path,_=QFileDialog.getOpenFileName(self,'Наблюдённая аномалия ZMAP','','ZMAP (*.dat *.zmap *.npz)')
         if not path: return
-        g=load_grid(path); x,y=np.meshgrid(g.x,g.y); valid=np.isfinite(g.values)
+        g=self.workbench.activity.run('Загрузка поля',load_grid,path); x,y=np.meshgrid(g.x,g.y); valid=np.isfinite(g.values)
         self.assign_table(pd.DataFrame(dict(East=x[valid],North=y[valid],anomaly=g.values[valid])))
         self.preview_field()
 
@@ -495,7 +503,7 @@ class InversionTab(QWidget):
                 raise ValueError('Загрузите наблюдения, чтобы определить границы расширения.')
             east, north = [pd.to_numeric(self.table[c.currentText()], errors='raise').to_numpy(float)
                            for c in (self.east, self.north)]
-            model = extend_density_model(model,east,north,self.padding.value(),self.initial.value())
+            model = self.workbench.activity.run('Расширение модели',extend_density_model,model,east,north,self.padding.value(),self.initial.value())
         return model
 
     def demo(self):
@@ -580,10 +588,11 @@ class InversionTab(QWidget):
         method = 'Послойная 2D FFT · ' if fft else ''
         self.status.setText(f'{method}{len(data):,} наблюдений × {mesh.active.sum():,} активных ячеек · {operator_args["device"].upper()} · определение бюджета памяти…')
         self.worker=InversionWorker(compute,self,operator_args['gpu_id'] if operator_args['device']=='gpu' else None)
+        self.workbench.activity.track(self.worker,'3D-моделирование')
         self.worker.warning.connect(self.log.appendPlainText)
         self._notify_inversion=True
         self.lock_inputs()
-        self.worker.progress.connect(self.update_progress); self.worker.result.connect(self.finished_result)
+        self.worker.progress.connect(self.update_progress); self.connect_result(self.finished_result)
         self.worker.failed.connect(self.failure); self.worker.finished.connect(self.job_finished)
         self.run_button.setEnabled(False)
         self.stop.setEnabled(True); self.tabs.setCurrentIndex(2); self.worker.start()
@@ -597,6 +606,9 @@ class InversionTab(QWidget):
             trial=f' · пробный шаг {row["trial"]}' if row['trial'] else ''
             blocks=f' · блоки {row["completed"]:,} / {row["total"]:,}' if row['total'] else ''
             estimate=f' · осталось на этапе ≈ {duration(row["stage_remaining_seconds"])}' if row['total'] else ''
+            if self.worker is not None:
+                percent=min(99,100*row['completed']//row['total']) if row['total'] else -1
+                self.workbench.activity.update(self.worker.activity_key,iteration+' · '+stage,percent)
             self.phase_label.setText(f'{iteration}{trial} · {stage}{blocks}\nЭтап: {duration(row["stage_seconds"])}{estimate}')
             if row['total']:
                 self.phase_progress.setRange(0,1000)
@@ -668,6 +680,8 @@ class InversionTab(QWidget):
             text=('Расчёт остановлен пользователем до получения готового результата.' if cancelled
                   else 'Расчёт 3D-модели завершился без готового результата.')
             self.workbench.notifications.send(event,'GeoGarModel: '+text+'\nПодробности доступны в программе.')
+        if self.worker is not None and self.worker.cancel.is_set():
+            self.worker.activity_outcome='Остановлено'
         self.stop_timing(); self.phase_label.setText(message)
         self.status.setText(message); self.log.appendPlainText(message)
     def job_finished(self):
@@ -682,9 +696,15 @@ class InversionTab(QWidget):
         self.status.setText('Чтение начальной модели…')
         self.lock_inputs(); self.run_button.setEnabled(False)
         self.worker=InversionWorker(lambda progress,cancel:function(),self)
-        self.worker.result.connect(lambda model:self.workbench.guard(lambda:callback(model)))
+        self.workbench.activity.track(self.worker,'Загрузка воксельной модели')
+        self.connect_result(callback)
         self.worker.failed.connect(self.failure); self.worker.finished.connect(self.job_finished)
         self.worker.start()
+    def connect_result(self,callback):
+        worker=self.worker
+        worker.result.connect(lambda result:self.workbench.guard(
+            lambda:self.workbench.activity.deliver(worker,callback,result)))
+
     def cancel(self):
         if self.worker:
             self.worker.cancel.set(); self.stop.setEnabled(False)
@@ -702,6 +722,8 @@ class InversionTab(QWidget):
         reason={'cancelled':'Остановлено пользователем','early_stop':'Ранняя остановка'}.get(result.status,result.status)
         live_run=self._notify_inversion
         if live_run:
+            if result.status=='cancelled' and self.worker is not None:
+                self.worker.activity_outcome='Остановлено'
             self._notify_inversion=False
             from .telegram_notifications import result_message
             event=result.status if result.status in ('cancelled','early_stop') else 'finished'
@@ -808,10 +830,10 @@ class InversionTab(QWidget):
         path,_=QFileDialog.getOpenFileName(self,'Сохранённый результат 3D-моделирования','','Модель (*.ggmodel *.npz)')
         if path and Path(path).suffix.lower()=='.ggmodel':
             from .model_archive import ModelArchive
-            self.open_result_window(ModelArchive(path))
+            self.open_result_window(self.workbench.activity.run('Открытие модели',ModelArchive,path))
             return
         if path:
-            result=InversionResult.load(path)
+            result=self.workbench.activity.run('Загрузка результата',InversionResult.load,path)
             result.settings['source_path']=str(Path(path).resolve())
             self.history=list(result.history)
             self.curve.setData([r['iteration'] for r in self.history],[r['rmse'] for r in self.history])
@@ -823,23 +845,25 @@ class InversionTab(QWidget):
         if not path: return
         if Path(path).suffix.lower()=='.ggmodel' or ('ggmodel' in kind and not Path(path).suffix):
             from .model_archive import write_archive
-            write_archive(path if path.lower().endswith('.ggmodel') else path+'.ggmodel',result)
+            self.workbench.activity.run('Экспорт GGModel',write_archive,path if path.lower().endswith('.ggmodel') else path+'.ggmodel',result)
         else:
             from .model_archive import atomic_output
-            with atomic_output(path if path.lower().endswith('.npz') else path+'.npz') as tmp,tmp.open('wb') as out:
-                result.save(out,compressed='без сжатия' not in kind)
+            def write_npz():
+                with atomic_output(path if path.lower().endswith('.npz') else path+'.npz') as tmp,tmp.open('wb') as out:
+                    result.save(out,compressed='без сжатия' not in kind)
+            self.workbench.activity.run('Экспорт NPZ',write_npz)
     def save_fields(self,r=None):
         if r is None: r=self.require_result()
         path,kind=QFileDialog.getSaveFileName(self,'Поля и невязки','inversion-fields.csv','CSV (*.csv);;Рассчитанное поле ZMAP (*.zmap)')
         if path:
             if Path(path).suffix.lower()=='.zmap' or ('ZMAP' in kind and not Path(path).suffix):
-                export_zmap(r,path if path.lower().endswith('.zmap') else path+'.zmap')
+                self.workbench.activity.run('Экспорт ZMAP',export_zmap,r,path if path.lower().endswith('.zmap') else path+'.zmap')
             else:
-                field_table(r).to_csv(path if path.lower().endswith('.csv') else path+'.csv',index=False,encoding='utf-8-sig')
+                self.workbench.activity.run('Экспорт поля CSV',lambda: write_csv(field_table(r),path if path.lower().endswith('.csv') else path+'.csv'))
     def tensor_export_policy(self,r):
         from PyQt5.QtWidgets import QInputDialog
         from .inversion_export import clipped_count
-        count=clipped_count(r.mesh)
+        count=self.workbench.activity.run('Проверка геометрии модели',clipped_count,r.mesh)
         policy='exact'
         if count:
             choices={'Сохранить свойство в полной ячейке':'keep'}
@@ -861,7 +885,7 @@ class InversionTab(QWidget):
         if binary.exists() and QMessageBox.question(self,'Заменить бинарный файл?',str(binary),
                 QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes: return
         policy=self.tensor_export_policy(r)
-        if policy: write_voxet(r,path,policy)
+        if policy: self.workbench.activity.run('Экспорт GOCAD Voxet',write_voxet,r,path,policy)
 
     def save_ubc(self,r=None):
         if r is None: r=self.require_result()
@@ -874,10 +898,10 @@ class InversionTab(QWidget):
         if not policy: return
         if 'oasis' in kind or path.lower().endswith('.oasis'):
             folder=Path(path).with_suffix('.oasis')
-            oasis_package(r,folder,policy)
+            self.workbench.activity.run('Экспорт Oasis montaj',oasis_package,r,folder,policy)
             QMessageBox.information(self,'Комплект Oasis montaj',
                 f'Откройте проект Oasis montaj в папке {folder} и выполните convert.gs. Проверьте СК {r.settings.get("crs","")}.')
-        else: export_ubc(r,path,policy)
+        else: self.workbench.activity.run('Экспорт UBC',export_ubc,r,path,policy)
     def save_vtk(self,r=None):
         if r is None: r=self.require_result()
         ext='.vtu' if r.mesh.bounds is not None or not r.mesh.active.all() else '.vtr'
@@ -886,5 +910,5 @@ class InversionTab(QWidget):
             dest=path if path.lower().endswith(ext) else path+ext
             if ext=='.vtu':
                 from .stream_vtu import write_vtu
-                write_vtu(r,dest)
-            else: vtk_grid(r).save(dest)
+                self.workbench.activity.run('Экспорт VTU',write_vtu,r,dest)
+            else: self.workbench.activity.run('Экспорт VTR',lambda: vtk_grid(r).save(dest))

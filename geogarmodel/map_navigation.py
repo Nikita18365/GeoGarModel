@@ -1,7 +1,7 @@
 """Map navigation and geographic north in display coordinates."""
 import numpy as np
 from pyproj import CRS,Transformer
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
+from .figure_toolbar import FigureToolbar
 from matplotlib.backends.backend_qt import SubplotToolQt
 
 
@@ -23,7 +23,7 @@ class MapSubplotTool(SubplotToolQt):
         self.workbench.remember_map_layout()
 
 
-class MapToolbar(NavigationToolbar2QT):
+class MapToolbar(FigureToolbar):
     def __init__(self,canvas,workbench):
         self.workbench=workbench
         super().__init__(canvas,workbench)
