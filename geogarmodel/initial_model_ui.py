@@ -28,7 +28,7 @@ class InitialModelPanel(QGroupBox):
         layout=QVBoxLayout(dialog)
         note=QLabel('Необязательная подготовка модели. Изменения применяются сразу. Для просмотра результата закройте редактор кнопкой «Готово».')
         note.setWordWrap(True); layout.addWidget(note)
-        for title,actions in [('Свойства',[('Операции со свойствами…',self.operation)]),('Геометрия',[('Обрезать по поверхности…',self.clip),('Обрезка куба по XY с сохранением положения кровли и подошвы…',self.crop_xy),('Обрезать по прямоугольной области…',self.crop),('Перенести на сетку Nx / Ny / Nz…',self.transfer)]),('История и файл',[('Отменить последнюю операцию',self.undo),('Сохранить начальную модель NPZ…',self.save)])]:
+        for title,actions in [('Свойства',[('Операции со свойствами…',self.operation),('Калькулятор вокселей…',self.formula)]),('Геометрия',[('Обрезать по поверхности…',self.clip),('Обрезка куба по XY с сохранением положения кровли и подошвы…',self.crop_xy),('Обрезать по прямоугольной области…',self.crop),('Перенести на сетку Nx / Ny / Nz…',self.transfer)]),('История и файл',[('Отменить последнюю операцию',self.undo),('Сохранить начальную модель NPZ…',self.save)])]:
             group=QGroupBox(title); rows=QVBoxLayout(group)
             for label,callback in actions: self.tab.button(label,callback,rows)
             layout.addWidget(group)
@@ -143,6 +143,46 @@ class InitialModelPanel(QGroupBox):
     def preview(self): self.tab.preview_initial(self.tab.prepared_model(copy=False))
     def preview3d(self):
         self.tab.scene.render(self.tab.prepared_model(copy=False).result()); self.tab.tabs.setCurrentIndex(0)
+
+    def formula(self):
+        from .voxel_formula import Formula, calculate
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Калькулятор вокселей')
+        form = QFormLayout(dialog)
+        hint = QLabel('A — текущий воксель. Если в формуле есть B, после подтверждения выберите файл второго вокселя. X, Y, Z — координаты центра ячейки в метрах, Z направлена вниз.')
+        hint.setWordWrap(True)
+        form.addRow(hint)
+        expression = QComboBox()
+        expression.setEditable(True)
+        expression.addItems(['A + B','A - B','A * B','A * 2','where(B != 0, A / B, 0)',
+                             'where(Z >= 1000 and A > 0, A, 0)','clip(A, -1, 1)'])
+        form.addRow('Формула',expression)
+        form.addRow(QLabel('where(условие, значение если верно, значение иначе)'))
+        error = QLabel()
+        error.setWordWrap(True)
+        form.addRow(error)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
+        form.addRow(buttons)
+        buttons.rejected.connect(dialog.reject)
+        def confirm():
+            try:
+                dialog.formula = Formula(expression.currentText())
+            except (ValueError,OverflowError) as exc:
+                error.setText(str(exc))
+                return
+            dialog.accept()
+        buttons.accepted.connect(confirm)
+        if dialog.exec_()!=QDialog.Accepted: return
+        formula = dialog.formula
+        loader = None
+        if 'B' in formula.names:
+            loader = self.ask_load(self.tab.mode.currentData(),'Выберите воксель B')
+            if loader is None: return
+        previous = self.current(copy=False)
+        result = self.tab.workbench.activity.run('Калькулятор вокселей',
+                    lambda: calculate(previous,formula,loader() if loader else None))
+        self.assign(result,previous=previous)
+        self.preview()
 
     def operation(self):
         model=self.current(copy=False)
