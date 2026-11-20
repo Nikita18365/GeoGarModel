@@ -107,3 +107,29 @@ def test_centers_order_and_missing(tmp_path):
     m=read_centers(path)
     assert m.mesh.shape==(2,2,2); assert m.mesh.active.sum()==4
     assert m.values.reshape(m.mesh.shape)[1,1,1]==.4
+
+
+@pytest.mark.parametrize('mode',['gravity','induced','vector'])
+def test_xy_crop_preserves_individual_top_base_and_property(mode):
+    from geogarmodel.voxel import crop_xy
+    mesh = Mesh([0,10,20,30],[0,10,20],[0,10,20])
+    cells = mesh.cells()
+    cells[:,2] += np.arange(mesh.size)%4
+    cells[:,5] -= np.arange(mesh.size)%3
+    mesh.active[4] = False
+    mesh = Mesh(mesh.east,mesh.north,mesh.depth,mesh.active,cells)
+    shape = (mesh.size,3) if mode=='vector' else (mesh.size,)
+    model = VoxelModel(mesh,np.arange(np.prod(shape)).reshape(shape),mode)
+    out = crop_xy(model,12,24,3,17)
+    assert out.mesh.shape==(2,2,2)
+    active = mesh.active[4:]
+    np.testing.assert_array_equal(out.mesh.active,active)
+    actual = out.mesh.cells()[active]
+    expected = cells[4:][active].copy()
+    expected[:,0] = np.maximum(expected[:,0],12)
+    expected[:,3] = np.minimum(expected[:,3],24)
+    expected[:,1] = np.maximum(expected[:,1],3)
+    expected[:,4] = np.minimum(expected[:,4],17)
+    np.testing.assert_array_equal(actual,expected)
+    np.testing.assert_array_equal(out.values,model.values[4:])
+    np.testing.assert_array_equal(mesh.cells(),cells)

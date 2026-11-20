@@ -1,8 +1,8 @@
 """Initial-model controls kept separate from observation and solver settings."""
 from pathlib import Path
 import numpy as np
-from PyQt5.QtWidgets import (QGroupBox,QVBoxLayout,QComboBox,QLabel,QFileDialog,QInputDialog,QDialog,QDialogButtonBox)
-from .voxel import VoxelModel,load_voxel,combine_components,edit,resample,clip_surface
+from PyQt5.QtWidgets import (QGroupBox,QVBoxLayout,QComboBox,QLabel,QFileDialog,QInputDialog,QDialog,QDialogButtonBox,QFormLayout,QLineEdit)
+from .voxel import VoxelModel,load_voxel,combine_components,edit,resample,clip_surface,crop_xy
 from .grids import load_grid
 from .ui_layout import Disclosure
 
@@ -28,7 +28,7 @@ class InitialModelPanel(QGroupBox):
         layout=QVBoxLayout(dialog)
         note=QLabel('Необязательная подготовка модели. Изменения применяются сразу. Для просмотра результата закройте редактор кнопкой «Готово».')
         note.setWordWrap(True); layout.addWidget(note)
-        for title,actions in [('Свойства',[('Операции со свойствами…',self.operation)]),('Геометрия',[('Обрезать по поверхности…',self.clip),('Обрезать по прямоугольной области…',self.crop),('Перенести на сетку Nx / Ny / Nz…',self.transfer)]),('История и файл',[('Отменить последнюю операцию',self.undo),('Сохранить начальную модель NPZ…',self.save)])]:
+        for title,actions in [('Свойства',[('Операции со свойствами…',self.operation)]),('Геометрия',[('Обрезать по поверхности…',self.clip),('Обрезка куба по XY с сохранением положения кровли и подошвы…',self.crop_xy),('Обрезать по прямоугольной области…',self.crop),('Перенести на сетку Nx / Ny / Nz…',self.transfer)]),('История и файл',[('Отменить последнюю операцию',self.undo),('Сохранить начальную модель NPZ…',self.save)])]:
             group=QGroupBox(title); rows=QVBoxLayout(group)
             for label,callback in actions: self.tab.button(label,callback,rows)
             layout.addWidget(group)
@@ -174,6 +174,31 @@ class InitialModelPanel(QGroupBox):
             from .models import read_table
             t=self.tab.workbench.activity.run('Загрузка поверхности',read_table,path); east,north,z=[t[c].to_numpy(float) for c in ('East','North',vertical)]
         self.assign(self.tab.workbench.activity.run('Обрезка по поверхности',clip_surface,model,east,north,z,'below' if keep.startswith('Ниже') else 'above',vertical),previous=model); self.preview()
+
+    def crop_xy(self):
+        previous = self.current(copy=False)
+        mesh = previous.mesh
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Обрезка куба по XY')
+        form = QFormLayout(dialog)
+        fields = []
+        for label,value in (('X минимум (East), м',mesh.east[0]),('X максимум (East), м',mesh.east[-1]),
+                            ('Y минимум (North), м',mesh.north[0]),('Y максимум (North), м',mesh.north[-1])):
+            field = QLineEdit(str(value))
+            fields.append(field)
+            form.addRow(label,field)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec_() == QDialog.Accepted:
+            try:
+                limits = [float(field.text().strip().replace(',', '.')) for field in fields]
+            except ValueError:
+                raise ValueError('Введите четыре числовые координаты в метрах.') from None
+            result = self.tab.workbench.activity.run('Обрезка куба по XY',crop_xy,previous,*limits)
+            self.assign(result,previous=previous)
+            self.preview()
 
     def crop(self):
         text,ok=QInputDialog.getText(self,'Область (метры)','Emin,Emax,Nmin,Nmax,Dmin,Dmax (сохраняются пересекающиеся части призм):')

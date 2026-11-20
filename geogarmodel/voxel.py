@@ -50,6 +50,48 @@ class VoxelModel:
         return InversionResult(self.mesh,self.values,np.empty((0,3)),np.empty(0),np.empty(0),[],dict(mode=self.mode,crs=self.crs,source_path=self.source_path,source_array=self.source_array,voxel_history=list(self.history)),'initial_model')
 
 
+def crop_xy(model, east_min, east_max, north_min, north_max):
+    """Keep the original vertical extent of each prism intersecting the XY rectangle."""
+    mesh = model.mesh
+    selection = []
+    axes = []
+    partial = False
+    for axis, low, high in ((mesh.east, east_min, east_max), (mesh.north, north_min, north_max)):
+        if not np.isfinite([low, high]).all() or low >= high:
+            raise ValueError('Для каждой оси укажите конечные границы по возрастанию.')
+        first = max(0, axis.searchsorted(low, side='right') - 1)
+        stop = min(len(axis)-1, axis.searchsorted(high, side='left'))
+        if first >= stop:
+            raise ValueError('Прямоугольник не пересекает модель.')
+        selection.append(slice(first, stop))
+        edges = axis[first:stop+1]
+        axes.append(edges.copy())
+        partial |= low > edges[0] or high < edges[-1]
+
+    keep = tuple(selection)
+    cropped = Mesh(*axes, mesh.depth.copy(), mesh.active.reshape(mesh.shape)[keep])
+    if mesh.bounds is not None or partial:
+        cells = (mesh.bounds.reshape(mesh.shape+(6,))[keep].reshape(-1,6).copy()
+                 if mesh.bounds is not None else cropped.cells())
+        for dim, low, high in ((0,east_min,east_max),(1,north_min,north_max)):
+            np.maximum(cells[:,dim],low,out=cells[:,dim])
+            np.minimum(cells[:,dim+3],high,out=cells[:,dim+3])
+            cropped.active &= cells[:,dim+3] > cells[:,dim]
+        # Inactive prisms must still have usable geometry for subsequent editing.
+        ids = np.flatnonzero(~cropped.active)
+        ijk = np.unravel_index(ids,cropped.shape)
+        for dim, (axis,index) in enumerate(zip((*axes,cropped.depth),ijk)):
+            cells[ids,dim] = axis[index]
+            cells[ids,dim+3] = axis[index+1]
+        cropped.bounds = cells
+    if not cropped.active.any():
+        raise ValueError('Прямоугольник не пересекает активные ячейки.')
+    components = model.values.shape[1:]
+    values = model.values.reshape(mesh.shape+components)[keep].reshape((-1,)+components)
+    history = model.history+[dict(operation='XY crop',east=[east_min,east_max],north=[north_min,north_max])]
+    return VoxelModel(cropped,values,model.mode,model.crs,history)
+
+
 def extend_density_model(model, east, north, padding, initial_density):
     """Add full prisms around a regular XY model, preserving interior masks and bounds."""
     from .layer_fft import uniform_step
