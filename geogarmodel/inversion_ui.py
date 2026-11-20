@@ -74,7 +74,7 @@ class InversionTab(QWidget):
         self.method=QComboBox()
         self.method.addItem('Прямой расчёт по призмам','prisms')
         self.method.addItem('Послойная 2D FFT','layer_fft')
-        self.method.setAccessibleName('Метод расчёта плотностной модели')
+        self.method.setAccessibleName('Метод расчёта поля')
         self.hint=QLabel(); self.hint.setWordWrap(True); panel.addWidget(self.hint)
         self.load_button=self.button('Наблюдения XLSX / CSV…',self.load_table,panel)
         self.button('Наблюдённое поле ZMAP…',self.load_field,panel)
@@ -265,7 +265,7 @@ class InversionTab(QWidget):
         from PyQt5.QtWidgets import QMenu
         export_button=QPushButton('Сохранить результат…'); export_menu=QMenu(export_button)
         for title,callback in [('Модель и поле · GeoGarModel / NPZ',self.save),('Модель · UBC / Oasis montaj',self.save_ubc),
-                               ('Модель · GOCAD Voxet',self.save_voxet),('Поля · CSV / ZMAP',self.save_fields),('Модель · VTK',self.save_vtk)]:
+                               ('Индуцированная χ → намагниченность J, А/м…',self.save_magnetization),('Модель · GOCAD Voxet',self.save_voxet),('Поля · CSV / ZMAP',self.save_fields),('Модель · VTK',self.save_vtk)]:
             export_menu.addAction(title,lambda checked=False,fn=callback:self.workbench.guard(fn))
         export_button.setMenu(export_menu); actions.addWidget(export_button)
         root.addWidget(ParameterSplitter(controls,right))
@@ -305,9 +305,6 @@ class InversionTab(QWidget):
 
     def mode_changed(self):
         mode=self.mode.currentData()
-        self.hint.setText({'gravity':'Плотностное моделирование: контраст плотности Δρ в g/cm³ по аномалиям силы тяжести. Поправки, редукция Буге и региональный фон готовятся до импорта.',
-            'induced':'Моделирование магнитной восприимчивости χ в СИ (без множителя 10⁻⁵); индуцированная J=χH направлена вдоль главного поля.',
-            'vector':'Моделирование суммарной векторной намагниченности J=(JE, JN, JD), A/m с возможным остаточным вкладом. Разделить индуцированную и остаточную части по одной карте аномального магнитного поля нельзя.'}[mode])
         self.lower.setValue(0 if mode=='induced' else -1)
         self.upper.setValue(.1 if mode=='induced' else 1)
         for w in (self.field,self.inc,self.dec): w.setEnabled(mode!='gravity')
@@ -315,10 +312,10 @@ class InversionTab(QWidget):
         self.update_fft_inputs()
 
     def is_fft(self):
-        return self.mode.currentData()=='gravity' and self.method.currentData()=='layer_fft'
+        return self.method.currentData()=='layer_fft'
 
     def load_reference(self):
-        loader=self.initial_panel.ask_load('gravity','Опорная модель плотности')
+        loader=self.initial_panel.ask_load(self.mode.currentData(),'Опорная модель')
         if loader is not None: self.model_task(loader,self.set_reference)
 
     def set_reference(self,model):
@@ -345,13 +342,13 @@ class InversionTab(QWidget):
         if selection==1: return initial.values
         ref=self.reference_model
         if ref is None: raise ValueError('Загрузите отдельную опорную модель.')
-        if ref.mode!='gravity' or (ref.crs and initial.crs and ref.crs!=initial.crs):
-            raise ValueError('Проверьте свойство плотности и систему координат опорного вокселя.')
+        if ref.mode!=initial.mode or (ref.crs and initial.crs and ref.crs!=initial.crs):
+            raise ValueError('Проверьте тип свойства и систему координат опорного вокселя.')
         if any(not np.array_equal(getattr(ref.mesh,key),getattr(initial.mesh,key)) for key in ('east','north','depth')):
             raise ValueError('Границы сетки опорной модели должны совпадать с расчётными, включая запас.')
         if np.any(initial.mesh.active & ~ref.mesh.active):
             if not self.freeze_reference.isChecked(): raise ValueError('Опорная модель должна покрывать все активные ячейки.')
-            return np.where(ref.mesh.active,ref.values,initial.values)
+            return np.where(ref.mesh.active[:,None] if ref.values.ndim==2 else ref.mesh.active,ref.values,initial.values)
         return ref.values
 
     def update_memory_controls(self):
@@ -363,7 +360,9 @@ class InversionTab(QWidget):
     def update_fft_inputs(self,*args):
         fft=self.is_fft()
         self.update_memory_controls()
-        self.method.setVisible(self.mode.currentData()=='gravity')
+        unit={'gravity':'г/см³','induced':'СИ','vector':'А/м'}[self.mode.currentData()]
+        for widget,label in ((self.penalty_epsilon,'Масштаб перехода'),(self.boundary_jump,'Порог скачка')):
+            self._prior_form.labelForField(widget).setText(f'{label}, {unit}')
         self.fft_prior_section.setVisible(fft)
         self.update_prior_controls()
         for widget in self._fft_hidden: widget.setVisible(not fft)
@@ -381,7 +380,7 @@ class InversionTab(QWidget):
         show_initial=new_grid or self.extend_fft.isChecked()
         self.initial.setVisible(show_initial)
         self._initial_label.setVisible(show_initial)
-        self._initial_label.setText('Начальная плотность запаса' if fft and not new_grid else 'Начальное значение')
+        self._initial_label.setText('Начальное свойство запаса' if fft and not new_grid else 'Начальное значение')
         self._height_label.setText('Единая высота Up, м' if fft else 'Высота константа')
         for combo,field,label in ((self.height,self.height_constant,self._height_label),
                                   (self.error,self.sigma,self._sigma_label)):
@@ -390,10 +389,12 @@ class InversionTab(QWidget):
             label.setVisible(visible)
         if fft:
             self.hint.setText('Послойная FFT рассчитана на регулярную карту с единой высотой Up. '
-                              'Для новой модели можно выбрать шаг карты или задать Nx и Ny.')
-        elif self.mode.currentData()=='gravity':
-            self.hint.setText('Контраст плотности Δρ в g/cm³ по аномалиям силы тяжести. '
-                              'Поправки, редукция Буге и региональный фон готовятся до импорта.')
+                              'Для новой модели можно выбрать шаг карты или задать Nx и Ny.' + (' Магнитная аномалия рассчитывается в приближении слабого поля: проекция на главное поле.' if self.mode.currentData()!='gravity' else ''))
+        else:
+            mode=self.mode.currentData()
+            self.hint.setText({'gravity':'Плотностное моделирование: контраст плотности Δρ в g/cm³ по аномалиям силы тяжести. Поправки, редукция Буге и региональный фон готовятся до импорта.',
+                'induced':'Моделирование магнитной восприимчивости χ в СИ (без множителя 10⁻⁵); индуцированная J=χH направлена вдоль главного поля.',
+                'vector':'Моделирование суммарной векторной намагниченности J=(JE, JN, JD), A/m с возможным остаточным вкладом. Разделить индуцированную и остаточную части по одной карте аномального магнитного поля нельзя.'}[mode])
 
     def check_fft_height(self):
         if self.is_fft() and self.table is not None and self.height.currentIndex()>0:
@@ -549,7 +550,7 @@ class InversionTab(QWidget):
         settings=dict(sigma=sigma,iterations=self.iterations.value(),lower=self.lower.value(),upper=self.upper.value(),initial=initial_model.values)
         operator_args=dict(device=self.device.currentData(),gpu_id=self.gpu.value(),
                            cache_mb=self.cache.value(),memory_policy=self.memory_policy.currentData())
-        if not fft:
+        if mode!='gravity' or not fft:
             operator_args.update(field_strength=self.field.value(),inclination=self.inc.value(),declination=self.dec.value())
         settings.update(damping=self.damping.value(),smoothness=self.smooth.value(),
                             depth_index=self.depth_index.value(),step_scale=self.step.value(),target_rms=self.target.value(),
@@ -569,7 +570,7 @@ class InversionTab(QWidget):
                 if not settings['fixed_mask'].any(): raise ValueError('В опорном вокселе нет активных ячеек для фиксации.')
         def compute(progress,cancel):
             started=perf_counter()
-            op=(LayerFFT(mesh,observations,**operator_args,cancel_event=cancel) if fft else
+            op=(LayerFFT(mesh,observations,mode=mode,**operator_args,cancel_event=cancel) if fft else
                 FieldOperator(mesh,observations,mode,**operator_args,cancel_event=cancel))
             progress(dict(event='resources',**op.resources))
             result=invert(op,data,**settings,progress=progress,cancel_event=cancel,work_progress=progress)
@@ -886,6 +887,17 @@ class InversionTab(QWidget):
                 QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes: return
         policy=self.tensor_export_policy(r)
         if policy: self.workbench.activity.run('Экспорт GOCAD Voxet',write_voxet,r,path,policy)
+
+    def save_magnetization(self):
+        result=self.require_result()
+        if result.settings.get('mode')!='induced':
+            raise ValueError('Выберите результат моделирования магнитной восприимчивости.')
+        from .model_archive import write_archive
+        path,_=QFileDialog.getSaveFileName(self,'Индуцированная намагниченность','magnetization.ggmodel','GeoGarModel (*.ggmodel)')
+        if path:
+            def export():
+                write_archive(path if path.lower().endswith('.ggmodel') else path+'.ggmodel',result.as_magnetization())
+            self.workbench.activity.run('Пересчёт χ в J и экспорт',export)
 
     def save_ubc(self,r=None):
         if r is None: r=self.require_result()

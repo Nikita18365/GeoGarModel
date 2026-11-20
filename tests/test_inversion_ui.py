@@ -89,13 +89,13 @@ def app_session():
     yield app
 
 
-@pytest.mark.parametrize('mode',[0,1,2])
-def test_inversion_tab_background_workflow(mode,monkeypatch):
+@pytest.mark.parametrize(('mode','method'),[(0,0),(1,0),(2,0),(1,1),(2,1)])
+def test_inversion_tab_background_workflow(mode,method,monkeypatch):
     errors=[]
     monkeypatch.setattr(QMessageBox,'warning',lambda *a: errors.append(a[-1]))
     window=MainWindow(); tab=window.inversion
     assert window.tabs.count()==3
-    tab.mode.setCurrentIndex(mode); tab.demo()
+    tab.mode.setCurrentIndex(mode); tab.method.setCurrentIndex(method); tab.demo()
     tab.iterations.setValue(4); tab.target.setValue(0)
     loop=QEventLoop(); timer=QTimer(); timer.setSingleShot(True); timer.timeout.connect(loop.quit)
     tab.run(); tab.worker.finished.connect(loop.quit); timer.start(30000); loop.exec_()
