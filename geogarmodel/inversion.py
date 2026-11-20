@@ -290,7 +290,9 @@ def regularization(model, mesh, damping, smoothness, xp=np, *, need_value=True, 
         coefficient = smoothness*(min(widths)/xp.asarray(distances).reshape(dims))**2*valid/max(int(xp.sum(valid))*(1 if model.ndim==1 else 3),1)
         if axis==2: coefficient *= vertical_factor
         if boundary_jump is not None:
-            coefficient *= xp.abs(xp.diff(reference.reshape(mesh.shape),axis=axis)) < boundary_jump
+            jump = xp.diff(reference.reshape(shape),axis=axis)
+            contrast = xp.abs(jump) if model.ndim==1 else xp.linalg.norm(jump,axis=-1,keepdims=True)
+            coefficient *= contrast < boundary_jump
         magnitude = xp.hypot(d,epsilon) if norm=='tv' else None
         if need_value:
             term = .5*d*d if magnitude is None else epsilon*d*(d/(magnitude+epsilon))
@@ -314,6 +316,13 @@ class InversionResult:
     history: list
     settings: dict
     status: str
+
+    def as_magnetization(self):
+        from dataclasses import replace
+        if self.settings['mode']!='induced':
+            raise ValueError('Требуется модель восприимчивости.')
+        field=self.settings['field_strength_nT']*np.asarray(self.settings['field_direction_END'])/(400*np.pi)
+        return replace(self,model=self.model[:,None]*field,settings=dict(self.settings,mode='vector',converted_from='induced'))
 
     def save(self, path, compressed=True):
         writer=np.savez_compressed if compressed else np.savez
@@ -390,10 +399,10 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
         fixed_count=int(fixed_mask.sum())
         fixed_values=reference[fixed_mask]
         if bool(xp.any((fixed_values<lower)|(fixed_values>upper))):
-            raise ValueError('Фиксированная плотность вне допустимых границ.')
+            raise ValueError('Фиксированное свойство вне допустимых границ.')
         m[fixed_mask]=fixed_values
-    if boundary_jump is not None and (m.ndim!=1 or reference is None or not np.isfinite(boundary_jump) or boundary_jump<=0):
-        raise ValueError('Для структурных границ нужны опорная плотность и положительный порог скачка.')
+    if boundary_jump is not None and (reference is None or not np.isfinite(boundary_jump) or boundary_jump<=0):
+        raise ValueError('Для структурных границ нужны опорная модель и положительный порог скачка.')
     penalty_weights = 1.
     if weighting=='depth':
         penalty_weights = xp.asarray((zmin/np.maximum(z,zmin))**weight_power)
@@ -494,7 +503,7 @@ def invert(operator, data, *, sigma=1., iterations=100, lower=-1., upper=1.,
                   lower=lower,upper=upper,damping=damping,smoothness=smoothness,depth_index=depth_index,
                   step_scale=step_scale,target_rms=target_rms,iterations=iterations,
                   coordinate_order='East North Down, m',density_unit='g/cm3',magnetization_unit='A/m',
-                  susceptibility_unit='SI',magnetic_anomaly='exact total field magnitude',
+                  susceptibility_unit='SI',magnetic_anomaly=getattr(operator,'magnetic_anomaly','exact total field magnitude'),
                   fit_offset=bool(fit_offset),constant_offset=offset,
                   early_stop=bool(early_stop),early_tolerance=early_tolerance,early_patience=early_patience,
                   selected_iteration=selected_iteration,best_criterion='minimum normalized RMS among completed iterates',

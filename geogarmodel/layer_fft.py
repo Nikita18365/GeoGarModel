@@ -1,4 +1,4 @@
-"""Layerwise linear convolution of analytical density-prism responses (East, North, Down)."""
+"""Layerwise linear convolution of analytical gravity and projected magnetic prism responses (East, North, Down)."""
 from fractions import Fraction
 import math
 
@@ -6,7 +6,7 @@ import numpy as np
 from scipy.fft import next_fast_len
 
 from .compute import check_cancel
-from .inversion import MisfitOperator, backend, prism_kernel
+from .inversion import MisfitOperator, backend, prism_kernel, direction
 from .inversion_resources import MIB, available_memory
 
 
@@ -85,14 +85,19 @@ def spectrum_budget(free, workspace, spectrum_bytes, layers, policy, cache_mib):
 
 
 class LayerFFT(MisfitOperator):
+    magnetic_anomaly = 'linear total field projection'
     mode = 'gravity'
     field_strength = 0.
     f = np.zeros(3)
 
     def __init__(self, mesh, observations, *, device='cpu', gpu_id=0, cancel_event=None,
-                 memory_policy='balanced', cache_mb=512):
+                 memory_policy='balanced', cache_mb=512, mode='gravity', field_strength=50000., inclination=60., declination=0.):
         self.mesh = mesh
-        self.parameter_shape = (mesh.size,)
+        if mode not in ('gravity','induced','vector'):
+            raise ValueError('Неизвестное физическое свойство.')
+        self.mode = mode
+        self.channels = 3 if mode == 'vector' else 1
+        self.parameter_shape = (mesh.size,3) if self.channels == 3 else (mesh.size,)
         self.observations = np.asarray(observations, dtype=float)
         obs = self.observations
         if obs.ndim != 2 or obs.shape[1] != 3 or not len(obs) or not np.isfinite(obs).all():
@@ -104,6 +109,11 @@ class LayerFFT(MisfitOperator):
         self.cancel_event = cancel_event
         self.monitor = None
         self.xp = xp = backend(device, gpu_id)
+        if mode != 'gravity':
+            if not np.isfinite(field_strength) or field_strength <= 0:
+                raise ValueError('Главное поле должно быть положительным.')
+            self.field_strength = field_strength
+            self.f = xp.asarray(direction(inclination,declination))
         free = available_memory(xp)
         self.xy_indices = []
         self.lags = []
@@ -125,7 +135,7 @@ class LayerFFT(MisfitOperator):
         self.fft_shape = tuple(self.fft_shape)
         plane = math.prod(self.fft_shape)
         # Solver vectors, complex transforms and a strip of prism integrals.
-        workspace = 160*mesh.size + 96*plane + len(obs)*96 + 32*MIB
+        workspace = 160*self.channels*mesh.size + 96*plane + len(obs)*96 + 32*MIB
         if workspace > free*.85:
             raise ValueError('Для модели и рабочей FFT-сетки недостаточно свободной памяти. Проверьте шаг и охват координат.')
         spectrum_bytes = 16*self.fft_shape[0]*(self.fft_shape[1]//2+1)
@@ -164,7 +174,7 @@ class LayerFFT(MisfitOperator):
         else:
             self.prism = prism_kernel
         self.cache_limit, budget = spectrum_budget(
-            free, workspace, spectrum_bytes, len(self.layers), memory_policy, cache_mb)
+            free, workspace, spectrum_bytes*self.channels, len(self.layers), memory_policy, cache_mb)
         self.resources = dict(method='layer_fft', layers=len(self.layers), partial_cells=len(self.partial),
                               fft_shape=self.fft_shape, policy=memory_policy, free_mib=free//MIB,
                               cache_mib=budget/MIB, cached_layers=self.cache_limit)
@@ -175,8 +185,20 @@ class LayerFFT(MisfitOperator):
         dx, dy = self.model_strides
         return np.s_[:sx*dx:dx, :sy*dy:dy]
 
-    def spectrum(self,k):
-        if k in self.spectra: return self.spectra[k]
+    def coefficients(self, obs, cells, channel):
+        if self.mode == 'gravity':
+            return self.prism(obs,cells,False)
+        tensor = self.prism(obs,cells,True)
+        indices = ((0,3,4),(3,1,5),(4,5,2))
+        def projection(row):
+            return sum(self.f[j]*tensor[...,index] for j,index in enumerate(row))
+        if self.mode == 'vector':
+            return projection(indices[channel])
+        return sum(self.f[i]*projection(row) for i,row in enumerate(indices))*self.field_strength/(400*np.pi)
+
+    def spectrum(self,k,channel=0):
+        key = (k,channel)
+        if key in self.spectra: return self.spectra[key]
         xp = self.xp
         z = self.mesh.depth
         cell = xp.asarray([[0.,0.,z[k],*self.widths,z[k+1]]])
@@ -187,12 +209,12 @@ class LayerFFT(MisfitOperator):
             idx = xp.arange(start,min(start+65536,flat.size))
             obs = xp.column_stack((self.lags[0][idx//self.fft_shape[1]],self.lags[1][idx%self.fft_shape[1]],
                                    xp.full(len(idx),self.observations[0,2])))
-            flat[start:start+len(idx)] = self.prism(obs,cell,False)[:,0]
+            flat[start:start+len(idx)] = self.coefficients(obs,cell,channel)[:,0]
         spectrum = xp.fft.rfft2(response)
-        if len(self.spectra) < self.cache_limit: self.spectra[k] = spectrum
+        if len(self.spectra) < self.cache_limit*self.channels: self.spectra[key] = spectrum
         return spectrum
 
-    def apply(self, values, transpose):
+    def apply(self, values, transpose, channel=0):
         xp = self.xp
         ix, iy = self.xy_indices
         model_slice = self.model_slice
@@ -210,7 +232,7 @@ class LayerFFT(MisfitOperator):
         if self.monitor: self.monitor.begin_stage('gradient' if transpose else 'field',len(self.layers)+pairs)
         for n,k in enumerate(self.layers,1):
             check_cancel(self.cancel_event)
-            kernel = self.spectrum(k)
+            kernel = self.spectrum(k,channel)
             if transpose:
                 out[:,:,k] = xp.fft.irfft2(spectrum*kernel.conj(),s=self.fft_shape,axes=(0,1))[model_slice]*self.full[:,:,k]
             else:
@@ -227,7 +249,7 @@ class LayerFFT(MisfitOperator):
             for row in range(0,len(obs),128):
                 check_cancel(self.cancel_event)
                 rows = slice(row,row+128)
-                a = self.prism(self.device_obs[rows],cells,False)
+                a = self.coefficients(self.device_obs[rows],cells,channel)
                 if transpose: out[indices] += a.T @ values[rows]
                 else: out[rows] += a @ values[indices]
                 completed += 1
@@ -235,9 +257,15 @@ class LayerFFT(MisfitOperator):
         return out
 
     def field(self, model):
-        return self.apply(self.xp.asarray(model).reshape(-1),False)
+        model = self.xp.asarray(model).reshape(self.mesh.size,self.channels)
+        return sum(self.apply(model[:,i],False,i) for i in range(self.channels))
 
     def sensitivity_norm(self, sigma, fit_offset=False):
+        if self.channels == 1:
+            return self.channel_norm(sigma,fit_offset,0)
+        return self.xp.sqrt(sum(self.channel_norm(sigma,fit_offset,i)**2 for i in range(3)))
+
+    def channel_norm(self, sigma, fit_offset, channel):
         """Column norms of the uncertainty-weighted operator, including repeat observations."""
         xp = self.xp
         weights = 1 / xp.broadcast_to(xp.asarray(sigma), (len(self.observations),))**2
@@ -247,7 +275,7 @@ class LayerFFT(MisfitOperator):
         out = xp.zeros(self.mesh.shape)
         for k in self.layers:
             check_cancel(self.cancel_event)
-            impulse = xp.fft.irfft2(self.spectrum(k), s=self.fft_shape, axes=(0,1))
+            impulse = xp.fft.irfft2(self.spectrum(k,channel), s=self.fft_shape, axes=(0,1))
             squared = xp.fft.rfft2(impulse*impulse)
             correlation = xp.fft.irfft2(sampled*squared.conj(), s=self.fft_shape, axes=(0,1))
             out[:,:,k] = correlation[self.model_slice]*self.full[:,:,k]
@@ -258,10 +286,10 @@ class LayerFFT(MisfitOperator):
             for row in range(0,len(weights),128):
                 check_cancel(self.cancel_event)
                 rows = slice(row,row+128)
-                block = self.prism(self.device_obs[rows],cells,False)
+                block = self.coefficients(self.device_obs[rows],cells,channel)
                 result[indices] += (block*block).T @ weights[rows]
         if fit_offset:
-            weighted_sum = self.apply(weights,transpose=True)
+            weighted_sum = self.apply(weights,True,channel)
             result -= weighted_sum**2 / weights.sum()
         return xp.sqrt(xp.maximum(result,0))
 
@@ -271,4 +299,6 @@ class LayerFFT(MisfitOperator):
         return self.field(model), None
 
     def data_gradient(self, weighted, unit):
-        return self.apply(weighted,True)
+        if self.channels == 1:
+            return self.apply(weighted,True)
+        return self.xp.stack([self.apply(weighted,True,i) for i in range(3)],axis=1)

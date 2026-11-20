@@ -184,3 +184,33 @@ def test_fft_cache_modes():
     assert spectrum_budget(100*MIB,10*MIB,MIB,100,'manual',0)==(0,0)
     with pytest.raises(ValueError,match='кэша FFT'):
         spectrum_budget(100*MIB,10*MIB,MIB,100,'manual',90)
+
+
+@pytest.mark.parametrize('mode',['induced','vector'])
+@pytest.mark.parametrize('device',['cpu','gpu'])
+def test_magnetic_fft_projected_prisms(mode,device):
+    from geogarmodel.inversion import invert
+    if device=='gpu' and not os.environ.get('GEOGARMODEL_GPU_TESTS'):
+        pytest.skip('optional CUDA test')
+    mesh=Mesh(np.arange(5)*120.,np.arange(4)*90.,np.array([20.,60.,150.]))
+    bounds=mesh.cells()
+    bounds[0,2]+=10
+    mesh=Mesh(mesh.east,mesh.north,mesh.depth,mesh.active,bounds)
+    mesh.active[3]=False
+    x,y=np.meshgrid(mesh.east+20,mesh.north+40)
+    obs=np.column_stack((x.ravel(),y.ravel(),np.zeros(x.size)))
+    kwargs=dict(mode=mode,inclination=-35,declination=28)
+    op=LayerFFT(mesh,obs,device=device,**kwargs)
+    direct=FieldOperator(mesh,obs,**kwargs)
+    rng=np.random.default_rng(7)
+    model=rng.uniform(.001,.1,op.parameter_shape)
+    predicted=direct.field(model)@direct.f
+    np.testing.assert_allclose(host(op.field(model)),predicted,atol=1e-9)
+    r=rng.normal(size=len(obs))
+    np.testing.assert_allclose(np.sum(model*host(op.data_gradient(op.xp.asarray(r),None))),predicted@r,atol=1e-9)
+    result=invert(op,predicted,iterations=3,lower=0,upper=.3,weighting='sensitivity',target_rms=.0001)
+    assert result.history[-1]['rmse']<result.history[0]['rmse']
+    if mode=='induced':
+        converted=result.as_magnetization()
+        vec=LayerFFT(mesh,obs,mode='vector',inclination=-35,declination=28)
+        np.testing.assert_allclose(vec.field(converted.model),host(op.field(result.model)),atol=1e-8)

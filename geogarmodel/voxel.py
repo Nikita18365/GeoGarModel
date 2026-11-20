@@ -78,15 +78,16 @@ def extend_density_model(model, east, north, padding, initial_density):
     interior = tuple(slice(left, left + count) for (left, _), count in zip(added, mesh.shape))
     active = np.ones(shape, dtype=bool)
     active[interior] = mesh.active.reshape(mesh.shape)
-    values = np.full(shape, initial_density, dtype=float)
-    values[interior] = model.values.reshape(mesh.shape)
+    components = model.values.shape[1:]
+    values = np.full(shape + components, initial_density, dtype=float)
+    values[interior] = model.values.reshape(mesh.shape + components)
     extended = Mesh(*axes, mesh.depth, active)
     if mesh.bounds is not None:
         bounds = extended.cells().reshape(shape + (6,))
         bounds[interior] = mesh.bounds.reshape(mesh.shape + (6,))
         extended = Mesh(*axes, mesh.depth, active, bounds)
     history = model.history + [dict(operation='fft_padding', east=added[0], north=added[1])]
-    return VoxelModel(extended, values.ravel(), model.mode, model.crs, history)
+    return VoxelModel(extended, values.reshape((-1,) + components), model.mode, model.crs, history)
 
 
 def _numbers(path):
