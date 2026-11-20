@@ -336,11 +336,23 @@ class ModelView(QWidget):
 
     def prepare_lod(self,grid,actor,options,key):
         self._lod_actors=[(100,actor)]
-        if self.full_resolution.isChecked() or grid.n_cells<500: return
+        # Voxel shells can have coincident faces and very thin clipped cells.
+        # Keep the original actor for complex shells instead of passing them to VTK's decimator.
+        if (self.full_resolution.isChecked() or self.result.model.ndim == 2
+                or self.result.mesh.bounds is not None
+                or not 500<=grid.n_cells<=50000):
+            return
         requested={self.moving_detail.value(),self.rest_detail.value()}-{100}
         cache_key=(key,tuple(sorted(requested)))
         if cache_key!=getattr(self,'_lod_cache_key',None):
-            surface=grid.extract_surface().triangulate().cell_data_to_point_data()
+            surface=grid.triangulate().cell_data_to_point_data()
+            faces=surface.regular_faces
+            points=surface.points[faces].astype(float)
+            a,b=points[:,1]-points[:,0],points[:,2]-points[:,0]
+            area2=np.linalg.norm(np.cross(a,b),axis=1)
+            scale=np.linalg.norm(a,axis=1)*np.linalg.norm(b,axis=1)
+            if np.any(area2 <= np.finfo(float).eps*scale):
+                return
             self._lod_cache={level:surface.decimate_pro(1-level/100,preserve_topology=True,splitting=False) for level in requested}
             self._lod_cache_key=cache_key
         for level,mesh in self._lod_cache.items():

@@ -142,3 +142,15 @@ def test_register_scalar_magnetization(qt_application_lifetime,tmp_path,mode,lab
         assert entry.name.endswith(label)
     finally:
         workspace.close()
+
+
+def test_vector_voxel_lod_skips_native_decimator():
+    from types import SimpleNamespace
+    from geogarmodel.inversion_view import ModelView
+    r=model()
+    r.model=np.column_stack([r.model]*3)
+    stub=SimpleNamespace(result=r,full_resolution=SimpleNamespace(isChecked=lambda:False))
+    actor=object()
+    # Passing no geometry catches any attempt to use the decimator for vectors.
+    ModelView.prepare_lod(stub,None,actor,{},None)
+    assert stub._lod_actors==[(100,actor)]
