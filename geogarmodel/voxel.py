@@ -50,6 +50,35 @@ class VoxelModel:
         return InversionResult(self.mesh,self.values,np.empty((0,3)),np.empty(0),np.empty(0),[],dict(mode=self.mode,crs=self.crs,source_path=self.source_path,source_array=self.source_array,voxel_history=list(self.history)),'initial_model')
 
 
+def crop_box(model, xmin, xmax, ymin, ymax, zmin, zmax):
+    """Cut out a solid rectangular volume; newly activated material starts at zero."""
+    mesh = model.mesh
+    axes = []
+    selections = []
+    for axis, low, high in zip((mesh.east, mesh.north, mesh.depth),
+                               (xmin,ymin,zmin), (xmax,ymax,zmax)):
+        if not np.isfinite([low,high]).all() or not axis[0] <= low < high <= axis[-1]:
+            raise ValueError('Задайте минимум и максимум внутри границ исходной сетки.')
+        start = axis.searchsorted(low,side='right')-1
+        stop = axis.searchsorted(high,side='left')
+        selections.append(slice(start,stop))
+        edges = axis[start:stop+1].copy()
+        edges[0],edges[-1] = low,high
+        axes.append(edges)
+    keep = tuple(selections)
+    result_mesh = Mesh(*axes)
+    components = model.values.shape[1:]
+    values = model.values.reshape(mesh.shape+components)[keep].copy()
+    valid = mesh.active.reshape(mesh.shape)[keep].copy()
+    if mesh.bounds is not None:
+        cells = mesh.bounds.reshape(mesh.shape+(6,))[keep]
+        for dim,(low,high) in enumerate(((xmin,xmax),(ymin,ymax),(zmin,zmax))):
+            valid &= (cells[...,dim]<high) & (cells[...,dim+3]>low)
+    values[~valid] = 0
+    history = model.history+[dict(operation='solid box crop',limits=[[xmin,xmax],[ymin,ymax],[zmin,zmax]],fill=0)]
+    return VoxelModel(result_mesh,values.reshape((-1,)+components),model.mode,model.crs,history,own_values=True)
+
+
 def crop_xy(model, east_min, east_max, north_min, north_max):
     """Keep the original vertical extent of each prism intersecting the XY rectangle."""
     mesh = model.mesh

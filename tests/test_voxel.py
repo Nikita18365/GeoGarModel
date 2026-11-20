@@ -133,3 +133,20 @@ def test_xy_crop_preserves_individual_top_base_and_property(mode):
     np.testing.assert_array_equal(actual,expected)
     np.testing.assert_array_equal(out.values,model.values[4:])
     np.testing.assert_array_equal(mesh.cells(),cells)
+
+
+def test_rectangular_crop_replaces_prior_roof_and_base():
+    from geogarmodel.voxel import crop_box, crop_xy
+    mesh=Mesh([0,1,2],[0,1],[0,1,2])
+    cells=mesh.cells()
+    cells[0,2]=.6
+    cells[3,5]=1.3
+    mesh=Mesh(mesh.east,mesh.north,mesh.depth,[1,0,1,1],cells)
+    original=VoxelModel(mesh,[2,0,4,5])
+    solid=crop_box(original,.2,1.8,0,1,.3,1.7)
+    assert solid.mesh.active.all() and solid.mesh.bounds is None
+    np.testing.assert_allclose(solid.mesh.depth,[.3,1,1.7])
+    np.testing.assert_allclose(solid.values,[2,0,4,5])
+    kept=crop_xy(original,.2,1.8,0,1)
+    assert kept.mesh.cells()[0,2]==.6 and kept.mesh.cells()[3,5]==1.3
+    assert not kept.mesh.active[1]

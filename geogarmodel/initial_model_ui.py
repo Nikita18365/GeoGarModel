@@ -2,7 +2,7 @@
 from pathlib import Path
 import numpy as np
 from PyQt5.QtWidgets import (QGroupBox,QVBoxLayout,QComboBox,QLabel,QFileDialog,QInputDialog,QDialog,QDialogButtonBox,QFormLayout,QLineEdit)
-from .voxel import VoxelModel,load_voxel,combine_components,edit,resample,clip_surface,crop_xy
+from .voxel import VoxelModel,load_voxel,combine_components,edit,resample,clip_surface,crop_xy,crop_box
 from .grids import load_grid
 from .ui_layout import Disclosure
 
@@ -175,15 +175,28 @@ class InitialModelPanel(QGroupBox):
             t=self.tab.workbench.activity.run('Загрузка поверхности',read_table,path); east,north,z=[t[c].to_numpy(float) for c in ('East','North',vertical)]
         self.assign(self.tab.workbench.activity.run('Обрезка по поверхности',clip_surface,model,east,north,z,'below' if keep.startswith('Ниже') else 'above',vertical),previous=model); self.preview()
 
+    def crop(self):
+        self.crop_dialog(True)
+
     def crop_xy(self):
+        self.crop_dialog(False)
+
+    def crop_dialog(self, rectangular):
         previous = self.current(copy=False)
         mesh = previous.mesh
         dialog = QDialog(self)
-        dialog.setWindowTitle('Обрезка куба по XY')
+        title = 'Обрезка по прямоугольной области' if rectangular else 'Обрезка куба по XY'
+        dialog.setWindowTitle(title)
         form = QFormLayout(dialog)
         fields = []
-        for label,value in (('X минимум (East), м',mesh.east[0]),('X максимум (East), м',mesh.east[-1]),
-                            ('Y минимум (North), м',mesh.north[0]),('Y максимум (North), м',mesh.north[-1])):
+        coordinates = [('X минимум (East), м',mesh.east[0]),('X максимум (East), м',mesh.east[-1]),
+                            ('Y минимум (North), м',mesh.north[0]),('Y максимум (North), м',mesh.north[-1])]
+        if rectangular:
+            coordinates.extend([('Z минимум (Down), м',mesh.depth[0]),('Z максимум (Down), м',mesh.depth[-1])])
+            note = QLabel('Будет создан сплошной блок между заданными глубинами. Пустые ячейки получат значение 0. Частично заполненные сохранят свойство на весь оставшийся объём.')
+            note.setWordWrap(True)
+            form.addRow(note)
+        for label,value in coordinates:
             field = QLineEdit(str(value))
             fields.append(field)
             form.addRow(label,field)
@@ -195,30 +208,10 @@ class InitialModelPanel(QGroupBox):
             try:
                 limits = [float(field.text().strip().replace(',', '.')) for field in fields]
             except ValueError:
-                raise ValueError('Введите четыре числовые координаты в метрах.') from None
-            result = self.tab.workbench.activity.run('Обрезка куба по XY',crop_xy,previous,*limits)
+                raise ValueError('Введите числовые координаты в метрах.') from None
+            result = self.tab.workbench.activity.run(title,crop_box if rectangular else crop_xy,previous,*limits)
             self.assign(result,previous=previous)
             self.preview()
-
-    def crop(self):
-        text,ok=QInputDialog.getText(self,'Область (метры)','Emin,Emax,Nmin,Nmax,Dmin,Dmax (сохраняются пересекающиеся части призм):')
-        if not ok: return
-        limits=np.asarray([float(v) for v in text.split(',')]).reshape(3,2)
-        if np.any(limits[:,1]<=limits[:,0]): raise ValueError('Максимумы должны быть больше минимумов.')
-        previous=self.current(copy=False)
-        def crop_model():
-            model=previous.copy()
-            cells=model.mesh.cells()
-            cells[:,:3]=np.maximum(cells[:,:3],limits[:,0])
-            cells[:,3:]=np.minimum(cells[:,3:],limits[:,1])
-            active=model.mesh.active&np.all(cells[:,3:]>cells[:,:3],axis=1)
-            if not active.any(): raise ValueError('Область не пересекает активную модель.')
-            cells[~active]=model.mesh.cells()[~active]
-            model.mesh.bounds=cells; model.mesh.active=active; model.values[~active]=0
-            model.history.append(dict(operation='box crop',limits=limits.tolist()))
-            return model
-        self.assign(self.tab.workbench.activity.run('Обрезка по координатам',crop_model),previous=previous)
-        self.preview()
 
     def transfer(self):
         method,ok=QInputDialog.getItem(self,'Перенос на новую сетку','Новая сетка — Nx/Ny/Nz, верх/низ и площадь наблюдений. Ближайшая ячейка сохраняет значения, линейная сглаживает. Масса и поле могут измениться. Вне исходной области ячейки неактивны.',['nearest','linear'],0,False)
