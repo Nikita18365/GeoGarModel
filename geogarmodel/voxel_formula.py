@@ -8,6 +8,8 @@ from .model_archive import regular_cells
 from .work_progress import report
 
 
+MODEL_NAMES = "ABCDEFGHIJKLMNOPQRSTUVW"
+
 BINARY = {ast.Add: np.add, ast.Sub: np.subtract, ast.Mult: np.multiply,
           ast.Div: np.divide, ast.Pow: np.power, ast.Mod: np.remainder,
           ast.BitAnd: np.logical_and, ast.BitOr: np.logical_or}
@@ -34,7 +36,7 @@ class Formula:
         self.evaluate = self.compile(tree.body)
 
     def compile(self, node):
-        if isinstance(node, ast.Name) and node.id in ('A','B','X','Y','Z'):
+        if isinstance(node, ast.Name) and node.id in (*MODEL_NAMES,'X','Y','Z'):
             self.names.add(node.id)
             return lambda env: env[node.id]
         if isinstance(node, ast.Constant) and type(node.value) in (float,int):
@@ -72,13 +74,19 @@ class Formula:
         return lambda env: func(*(arg(env) for arg in args))
 
 
-def calculate(a, formula, b=None):
+def calculate(a, formula, b=None, *, models=None):
     mesh = a.mesh
-    if 'B' in formula.names:
+    available = dict(models or {})
+    if b is not None:
+        available['B'] = b
+    operands = {}
+    for name in sorted(formula.names.intersection(MODEL_NAMES[1:])):
+        b = available.get(name)
+        operands[name] = b
         if b is None or b.mode!=a.mode or (a.crs and b.crs and a.crs!=b.crs):
-            raise ValueError('Для B требуется модель с тем же свойством и совместимой СК.')
+            raise ValueError(f'Для {name} требуется модель с тем же свойством и совместимой СК.')
         if any(not np.array_equal(getattr(mesh,k),getattr(b.mesh,k)) for k in ('east','north','depth')):
-            raise ValueError('Сетки A и B различаются. Перенесите модели на общую сетку.')
+            raise ValueError(f'Сетки A и {name} различаются. Перенесите модели на общую сетку.')
     result = a.copy()
     coords = formula.names.intersection('XYZ')
     for start in range(0,mesh.size,65536):
@@ -89,15 +97,15 @@ def calculate(a, formula, b=None):
             continue
         env = {'A':a.values[ids]}
         cells = None
-        if 'B' in formula.names:
+        for name,b in operands.items():
             if not b.mesh.active[ids].all():
-                raise ValueError('В B отсутствуют активные ячейки, используемые в A.')
+                raise ValueError(f'В {name} отсутствуют активные ячейки, используемые в A.')
             if mesh.bounds is not None or b.mesh.bounds is not None:
                 cells = mesh.bounds[ids] if mesh.bounds is not None else regular_cells(mesh,ids)
                 other = b.mesh.bounds[ids] if b.mesh.bounds is not None else regular_cells(b.mesh,ids)
                 if not np.array_equal(cells,other):
-                    raise ValueError('Обрезанные границы активных ячеек A и B различаются.')
-            env['B'] = b.values[ids]
+                    raise ValueError(f'Обрезанные границы активных ячеек A и {name} различаются.')
+            env[name] = b.values[ids]
         if coords:
             if cells is None:
                 cells = regular_cells(mesh,ids) if mesh.bounds is None else mesh.bounds[ids]
@@ -111,5 +119,5 @@ def calculate(a, formula, b=None):
             raise ValueError('Формула дала неопределённое или бесконечное значение. Проверьте область определения.')
         result.values[ids] = values
         report(end,mesh.size,'Вычисление формулы')
-    result.history.append(dict(operation='formula',expression=formula.text,operand_b=b.source_path if b else ''))
+    result.history.append(dict(operation='formula',expression=formula.text,operands={name:model.source_path for name,model in {'A':a,**operands}.items()}))
     return result

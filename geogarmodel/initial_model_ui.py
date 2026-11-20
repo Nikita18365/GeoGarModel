@@ -116,6 +116,11 @@ class InitialModelPanel(QGroupBox):
             model.source_path=str(Path(path).resolve())
             model.source_array=options.get('array',options.get('model_path',options.get('property_id','')))
             return model
+        loader.path = str(Path(path).resolve())
+        if 'model_path' in options:
+            loader.path += ' · ' + str(options['model_path'])
+        elif 'array' in options or 'property_id' in options:
+            loader.path += ' · ' + str(options.get('array',options.get('property_id')))
         return loader
 
     def load(self):
@@ -145,13 +150,59 @@ class InitialModelPanel(QGroupBox):
         self.tab.scene.render(self.tab.prepared_model(copy=False).result()); self.tab.tabs.setCurrentIndex(0)
 
     def formula(self):
-        from .voxel_formula import Formula, calculate
+        from .voxel_formula import Formula, calculate, MODEL_NAMES
+        from PyQt5.QtWidgets import QScrollArea,QWidget,QPushButton,QSpinBox,QHBoxLayout
         dialog = QDialog(self)
         dialog.setWindowTitle('Калькулятор вокселей')
         form = QFormLayout(dialog)
-        hint = QLabel('A — текущий воксель. Если в формуле есть B, после подтверждения выберите файл второго вокселя. X, Y, Z — координаты центра ячейки в метрах, Z направлена вниз.')
-        hint.setWordWrap(True)
-        form.addRow(hint)
+        count = QSpinBox()
+        count.setRange(1,len(MODEL_NAMES))
+        count.setValue(2)
+        form.addRow('Количество моделей',count)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        rows = QWidget()
+        layout = QFormLayout(rows)
+        scroll.setWidget(rows)
+        form.addRow(scroll)
+        dialog.resize(620,440)
+        loaders = {}
+        controls = []
+        def choose(name,field):
+            loader = self.ask_load(self.tab.mode.currentData(),'Выберите воксель '+name)
+            if loader is not None:
+                loaders[name] = loader
+                field.setText(loader.path)
+                field.setToolTip(loader.path)
+        def reset_a(field):
+            loaders.pop('A',None)
+            field.setText('Текущая модель редактора')
+            field.setToolTip('')
+        for i,name in enumerate(MODEL_NAMES):
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0,0,0,0)
+            field = QLineEdit()
+            field.setReadOnly(True)
+            line.addWidget(field)
+            button = QPushButton('Выбрать…')
+            button.setObjectName('file_'+name)
+            button.clicked.connect(lambda _,n=name,f=field:choose(n,f))
+            line.addWidget(button)
+            if name=='A':
+                reset_a(field)
+                reset = QPushButton('Текущая')
+                reset.clicked.connect(lambda _,f=field:reset_a(f))
+                line.addWidget(reset)
+            layout.addRow(name,row)
+            controls.append((layout.labelForField(row),row))
+        def resize_rows(n):
+            for i,pair in enumerate(controls):
+                for widget in pair:
+                    widget.setVisible(i<n)
+        count.valueChanged.connect(resize_rows)
+        resize_rows(count.value())
+        form.addRow(QLabel('A задаёт сетку результата. X, Y, Z — координаты центра ячейки.'))
         expression = QComboBox()
         expression.setEditable(True)
         expression.addItems(['A + B','A - B','A * B','A * 2','where(B != 0, A / B, 0)',
@@ -167,6 +218,13 @@ class InitialModelPanel(QGroupBox):
         def confirm():
             try:
                 dialog.formula = Formula(expression.currentText())
+                used = dialog.formula.names.intersection(MODEL_NAMES)
+                outside = used.difference(MODEL_NAMES[:count.value()])
+                missing = used.difference(loaders,{'A'})
+                if outside:
+                    raise ValueError('Увеличьте количество моделей для '+', '.join(sorted(outside)))
+                if missing:
+                    raise ValueError('Выберите файл для '+', '.join(sorted(missing)))
             except (ValueError,OverflowError) as exc:
                 error.setText(str(exc))
                 return
@@ -174,13 +232,15 @@ class InitialModelPanel(QGroupBox):
         buttons.accepted.connect(confirm)
         if dialog.exec_()!=QDialog.Accepted: return
         formula = dialog.formula
-        loader = None
-        if 'B' in formula.names:
-            loader = self.ask_load(self.tab.mode.currentData(),'Выберите воксель B')
-            if loader is None: return
-        previous = self.current(copy=False)
-        result = self.tab.workbench.activity.run('Калькулятор вокселей',
-                    lambda: calculate(previous,formula,loader() if loader else None))
+        previous = self.model if 'A' in loaders else self.current(copy=False)
+        def run():
+            base = loaders['A']() if 'A' in loaders else previous
+            if base.mode != mode:
+                raise ValueError('Свойство модели A отличается от выбранного режима.')
+            operands = {n:loaders[n]() for n in MODEL_NAMES[1:] if n in formula.names}
+            return calculate(base,formula,models=operands)
+        mode = self.tab.mode.currentData()
+        result = self.tab.workbench.activity.run('Калькулятор вокселей',run)
         self.assign(result,previous=previous)
         self.preview()
 

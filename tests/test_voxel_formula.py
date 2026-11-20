@@ -37,25 +37,32 @@ def test_bad_formula_and_incompatible_geometry():
     assert calculate(a,Formula('1 <= A < 3')).values[0]==1
 
 
-def test_editor_formula_loads_b_and_supports_undo(qt_application_lifetime,monkeypatch):
+def test_editor_formula_loads_b_and_supports_undo(qt_application_lifetime,monkeypatch,tmp_path):
     from PyQt5.QtCore import QTimer
-    from PyQt5.QtWidgets import QApplication,QDialogButtonBox,QComboBox
+    from PyQt5.QtWidgets import QApplication,QDialogButtonBox,QComboBox,QPushButton,QSpinBox,QFileDialog
     from geogarmodel.app import MainWindow
     window=MainWindow()
     panel=window.inversion.initial_panel
     a=VoxelModel(Mesh([0,1],[0,1],[0,1,2]),[1,3])
     b=VoxelModel(a.mesh,[2,5])
     panel.assign(a)
-    monkeypatch.setattr(panel,'ask_load',lambda *args: lambda:b)
+    c=VoxelModel(a.mesh,[1,2])
+    external_a=VoxelModel(a.mesh,[4,6])
+    for name,model in zip('ABC',(external_a,b,c)):
+        model.save(tmp_path/(name+'.npz'))
+    monkeypatch.setattr(QFileDialog,'getOpenFileName',lambda parent,title,*args:(str(tmp_path/(title[-1]+'.npz')),''))
     monkeypatch.setattr(panel,'preview',lambda:None)
     def submit():
         dialog=QApplication.activeModalWidget()
-        dialog.findChild(QComboBox).setEditText('where(B > 2, A + B, A)')
+        dialog.findChild(QSpinBox).setValue(3)
+        for name in 'ABC':
+            dialog.findChild(QPushButton,'file_'+name).click()
+        dialog.findChild(QComboBox).setEditText('where(B > 2, A + B * C, A)')
         dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok).click()
     try:
         QTimer.singleShot(0,submit)
         panel.formula()
-        np.testing.assert_array_equal(panel.model.values,[1,8])
+        np.testing.assert_array_equal(panel.model.values,[4,16])
         panel.undo()
         np.testing.assert_array_equal(panel.model.values,[1,3])
     finally:
