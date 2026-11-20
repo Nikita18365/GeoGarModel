@@ -136,7 +136,9 @@ class ModelWorkspace(QWidget):
             title=name or (Path(path).name if path else ('Начальная модель' if result.status=='initial_model' else 'Результат моделирования'))
             array=result.settings.get('source_array','')
             if array: title+=' · '+Path(array).name
-            title+=' · '+{'gravity':'Δρ','induced':'χ','vector':'J'}[result.settings['mode']]
+            property_label = {'gravity':'Δρ','induced':'χ','vector':'J',
+                              'J_magnitude':'|J|','J_parallel':'J вдоль заданного направления'}
+            title += ' · ' + property_label[result.settings['mode']]
             if not path: title+=f' {sum(e.path=="" for e in self.registry.values())+1}'
             self.registry[key]=ModelEntry(key,title,path,result); self.refresh_catalogue()
         return self.registry[key]

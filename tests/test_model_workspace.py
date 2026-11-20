@@ -129,3 +129,16 @@ def test_depth_clipping_is_downward_and_expanded_state_matches(qt_application_li
         assert section.n_cells==r.mesh.shape[0]*r.mesh.shape[1]
         assert not view.plotter.renderer.actors['section-2-lower-shell'].prop.show_edges
     finally: view.shutdown(); view.close()
+
+
+@pytest.mark.parametrize(('mode','label'),[('J_magnitude','|J|'),('J_parallel','J вдоль заданного направления')])
+def test_register_scalar_magnetization(qt_application_lifetime,tmp_path,mode,label):
+    from geogarmodel.model_workspace import ModelWorkspace
+    workspace=ModelWorkspace()
+    try:
+        scalar=model()
+        scalar.settings['mode']=mode
+        entry=workspace.register(scalar,path=tmp_path/'mag.vo')
+        assert entry.name.endswith(label)
+    finally:
+        workspace.close()

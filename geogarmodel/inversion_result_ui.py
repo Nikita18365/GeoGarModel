@@ -21,7 +21,8 @@ class ResultWindow(QDialog):
         from .model_archive import ModelArchive
         archived=isinstance(result,ModelArchive)
         self.axes, self.values = result.preview if archived else tab.workbench.activity.run('Обзор результата',preview_volume,result)
-        self.unit = {'gravity': 'г/см³', 'induced': 'ед. СИ', 'vector': 'А/м'}[result.settings['mode']]
+        from .model_slices import property_unit
+        self.unit = property_unit(result)
         self.figure = Figure()
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.ax = self.figure.add_subplot(projection='3d')
