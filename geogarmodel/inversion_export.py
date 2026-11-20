@@ -50,6 +50,31 @@ def clipped_count(mesh):
                for ids,regular in cell_blocks(mesh))
 
 
+def magnetization_product(result, quantity, axis=None, reference=0.):
+    from dataclasses import replace
+    mode = result.settings.get('mode')
+    if mode == 'induced':
+        result = result.as_magnetization()
+    elif mode != 'vector':
+        raise ValueError('Для экспорта намагниченности нужен результат магнитной инверсии.')
+    if quantity == 'components':
+        return result
+    settings = dict(result.settings,mode=quantity,unit='A/m')
+    if quantity == 'J_parallel':
+        axis = np.asarray(axis,dtype=float)
+        if axis.shape != (3,) or not np.isclose(np.linalg.norm(axis),1.) or not np.isfinite(reference):
+            raise ValueError('Проверьте направление проекции и опорную намагниченность.')
+        values = result.model @ axis
+        values -= reference
+        settings.update(projection_END=axis.tolist(),reference_A_m=reference)
+    elif quantity == 'J_magnitude':
+        values = np.sqrt(np.einsum('ij,ij->i',result.model,result.model))
+    else:
+        raise ValueError('Неизвестная величина намагниченности.')
+    values[~result.mesh.active] = 0
+    return replace(result,model=values,settings=settings)
+
+
 def export_ubc(result, path, policy='exact'):
     """Stage the whole bundle before replacing any previous export."""
     import tempfile
@@ -119,6 +144,9 @@ def _write_ubc(result, path, policy):
               density_unit='g/cm3',susceptibility_unit='SI',magnetization_unit='A/m',
               components='JE East, JN North, JD Down',selected_iteration=result.settings.get('selected_iteration'),
               clipped_cells=count,geometry_policy=policy,model_files=files)
+    if result.settings['mode'] in ('J_parallel','J_magnitude'):
+        meta.update(components=result.settings['mode'],unit='A/m')
+        meta.update({k:result.settings[k] for k in ('projection_END','reference_A_m') if k in result.settings})
     path.with_suffix('.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding='utf-8')
 
 

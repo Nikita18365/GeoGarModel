@@ -267,6 +267,8 @@ class InversionTab(QWidget):
         for title,callback in [('Модель и поле · GeoGarModel / NPZ',self.save),('Модель · UBC / Oasis montaj',self.save_ubc),
                                ('Индуцированная χ → намагниченность J, А/м…',self.save_magnetization),('Модель · GOCAD Voxet',self.save_voxet),('Поля · CSV / ZMAP',self.save_fields),('Модель · VTK',self.save_vtk)]:
             export_menu.addAction(title,lambda checked=False,fn=callback:self.workbench.guard(fn))
+        magnetic_menu=self.magnetic_export_menu(export_menu,self.require_result)
+        export_menu.aboutToShow.connect(lambda:magnetic_menu.menuAction().setVisible(self.result is not None and self.result.settings.get('mode') in ('induced','vector')))
         export_button.setMenu(export_menu); actions.addWidget(export_button)
         root.addWidget(ParameterSplitter(controls,right))
         self.mode.currentIndexChanged.connect(self.mode_changed)
@@ -767,6 +769,12 @@ class InversionTab(QWidget):
                                ('Модель GOCAD Voxet…',self.save_voxet),('Модель VTK / VTR / VTU…',self.save_vtk),('Рассчитанное поле ZMAP / поля CSV…',self.save_fields)]:
             button=QPushButton(title); layout.addWidget(button)
             button.clicked.connect(lambda checked=False,fn=callback:self.workbench.guard(fn))
+        if self.result.settings.get('mode') in ('induced','vector'):
+            from PyQt5.QtWidgets import QMenu
+            magnetic=QPushButton('Экспорт намагниченности…')
+            menu=QMenu(magnetic)
+            magnetic.setMenu(self.magnetic_export_menu(menu,self.require_result))
+            layout.addWidget(magnetic)
         done=QPushButton('Показать модель и поля'); done.clicked.connect(dialog.accept); layout.addWidget(done)
         dialog.exec_()
 
@@ -813,7 +821,7 @@ class InversionTab(QWidget):
         from PyQt5.QtWidgets import QInputDialog
         if self.worker or self.workbench.worker: raise ValueError('Дождитесь текущего расчёта.')
         target=self.scene.active_document()
-        labels={'Плотностная модель · г/см³':'gravity','Магнитная восприимчивость · SI':'induced','Векторная намагниченность · А/м':'vector'}
+        labels={'Плотностная модель · г/см³':'gravity','Магнитная восприимчивость · SI':'induced','Векторная намагниченность · А/м':'vector','Эффективная намагниченность · А/м':'J_parallel','Модуль намагниченности · А/м':'J_magnitude'}
         label,ok=QInputDialog.getItem(self,'Свойство 3D-модели','Для VTK, UBC и таблиц выберите свойство. NPZ хранит тип модели внутри файла.',list(labels),0,False)
         if not ok: return
         loader=self.initial_panel.ask_load(labels[label])
@@ -887,6 +895,65 @@ class InversionTab(QWidget):
                 QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes: return
         policy=self.tensor_export_policy(r)
         if policy: self.workbench.activity.run('Экспорт GOCAD Voxet',write_voxet,r,path,policy)
+
+    def magnetic_export_menu(self, menu, get_result):
+        group = menu.addMenu('Намагниченность, А/м')
+        for label, quantity in [('Эффективная (знаковая проекция)','J_parallel'),
+                                ('Модуль |J|','J_magnitude'),('Три компоненты JE, JN, JD','components')]:
+            submenu = group.addMenu(label)
+            for fmt in ('UBC (.msh)','GOCAD Voxet (.vo)'):
+                def export(checked=False, q=quantity, f=fmt):
+                    self.workbench.guard(lambda:self.export_magnetic_product(get_result(),q,f))
+                submenu.addAction(fmt,export)
+        return group
+
+    def export_magnetic_product(self,result,quantity,fmt):
+        from .inversion_export import magnetization_product
+        from .inversion import direction
+        from .gocad_voxet import write_voxet
+        from PyQt5.QtWidgets import QDialogButtonBox,QMessageBox
+        if result.settings.get('mode') not in ('induced','vector'):
+            raise ValueError('Откройте результат магнитной инверсии.')
+        axis = None
+        reference = 0.
+        if quantity == 'J_parallel':
+            dialog = QDialog(self)
+            dialog.setWindowTitle('Эффективная намагниченность')
+            form = QFormLayout(dialog)
+            f = result.settings.get('field_direction_END')
+            if f is None:
+                raise ValueError('В результате отсутствует направление главного поля.')
+            inc = self.number(-90,90,np.degrees(np.arctan2(f[2],np.hypot(f[0],f[1]))),6)
+            dec = self.number(-180,180,np.degrees(np.arctan2(f[0],f[1])),6)
+            base = self.number(-1e9,1e9,0,8)
+            form.addRow('Наклонение вниз, °',inc)
+            form.addRow('Склонение от севера сетки, °',dec)
+            form.addRow('Вычесть опорное значение, А/м',base)
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
+            form.addRow(buttons)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            if dialog.exec_()!=QDialog.Accepted: return
+            axis = direction(inc.value(),dec.value())
+            reference = base.value()
+        ubc = fmt.startswith('UBC')
+        suffix = '.msh' if ubc else '.vo'
+        path,_ = QFileDialog.getSaveFileName(self,'Экспорт намагниченности',quantity+suffix,'Модель (*'+suffix+')')
+        if not path: return
+        dest = Path(path).with_suffix(suffix)
+        if ubc:
+            names = ('_JE','_JN','_JD') if quantity=='components' else ('',)
+            companions = [dest.with_name(dest.stem+name+'.mod') for name in names]
+            companions.append(dest.with_suffix('.json'))
+        else:
+            companions = [dest.with_suffix('.bin')]
+        if any(p.exists() for p in companions) and QMessageBox.question(self,'Заменить файлы?','Перезаписать существующие файлы свойств?',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes: return
+        policy = self.tensor_export_policy(result)
+        if policy:
+            def write():
+                product = magnetization_product(result,quantity,axis,reference)
+                (export_ubc if ubc else write_voxet)(product,dest,policy)
+            self.workbench.activity.run('Экспорт намагниченности',write)
 
     def save_magnetization(self):
         result=self.require_result()

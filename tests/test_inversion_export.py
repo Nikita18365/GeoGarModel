@@ -47,3 +47,21 @@ def test_exports_reject_geometry_loss(tmp_path):
     r.observations[1]=r.observations[0]
     with pytest.raises(ValueError,match='повторяющиеся'):
         export_zmap(r,tmp_path/'bad.zmap')
+
+
+@pytest.mark.parametrize('quantity',['J_parallel','J_magnitude','components'])
+def test_magnetization_products_in_both_formats(tmp_path,quantity):
+    from geogarmodel.inversion_export import magnetization_product
+    from geogarmodel.gocad_voxet import write_voxet,read_voxet
+    r=result('vector')
+    r.mesh=Mesh([0,1,2],[0,1,2,3],[0,1,2],r.mesh.active)
+    product=magnetization_product(r,quantity,[0,-1,0],.25)
+    expected={'J_parallel':-r.model[:,1]-.25,'J_magnitude':np.linalg.norm(r.model,axis=1),'components':r.model}[quantity]
+    export_ubc(product,tmp_path/'mag.msh')
+    write_voxet(product,tmp_path/'mag.vo')
+    loaded=read_voxet(tmp_path/'mag.vo')
+    active=r.mesh.active
+    np.testing.assert_allclose(loaded.values[active],expected[active],rtol=1e-6)
+    for i,suffix in enumerate(['_JE','_JN','_JD'] if quantity=='components' else ['']):
+        loaded=read_ubc(tmp_path/'mag.msh',tmp_path/('mag'+suffix+'.mod'),dummy=-1e32)
+        np.testing.assert_allclose(loaded.values[active],expected[active,i] if quantity=='components' else expected[active])

@@ -121,9 +121,10 @@ def write_voxet(result,path,policy='exact'):
     if count and policy=='exact': raise ValueError('Обрезанные ячейки требуют явного выбора приближения.')
     mode=result.settings['mode']
     if policy not in ('exact','keep','mass') or (policy=='mass' and mode!='gravity'): raise ValueError('Некорректный способ переноса свойств.')
-    props={'gravity':['density_contrast'],'induced':['susceptibility'],'vector':['JE','JN','JD']}[mode]
-    unit={'gravity':'g/cm3','induced':'SI','vector':'A/m'}[mode]
+    props={'gravity':['density_contrast'],'induced':['susceptibility'],'vector':['JE','JN','JD'],'J_parallel':['J_parallel'],'J_magnitude':['J_magnitude']}[mode]
+    unit={'gravity':'g/cm3','induced':'SI','vector':'A/m','J_parallel':'A/m','J_magnitude':'A/m'}[mode]
     meta=dict(mode=mode,crs=result.settings.get('crs',''),geometry_policy=policy,clipped_cells=count)
+    meta.update({k:result.settings[k] for k in ('projection_END','reference_A_m') if k in result.settings})
     origin=[a[0]+w[0]/2 for a,w in zip(axes,widths)]
     origin[2]*=-1
     nx,ny,nz=mesh.shape

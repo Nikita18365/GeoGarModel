@@ -87,6 +87,8 @@ class ResultWindow(QDialog):
                            ('Поле · CSV / ZMAP', tab.save_fields)]:
             menu.addAction(name, lambda checked=False, fn=save: tab.workbench.guard(
                 lambda: fn(self.result if fn==tab.save_fields else full_result())))
+        if result.settings.get('mode') in ('induced','vector'):
+            tab.magnetic_export_menu(menu,full_result)
         export.setMenu(menu)
         footer.addWidget(export)
         layout.addLayout(footer)

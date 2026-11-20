@@ -12,7 +12,7 @@ def property_values(result,component='amplitude'):
 
 
 def property_unit(result):
-    return {'gravity':'г/см³','induced':'SI','vector':'А/м'}[result.settings['mode']]
+    return {'gravity':'г/см³','induced':'SI','vector':'А/м','J_parallel':'А/м','J_magnitude':'А/м'}[result.settings['mode']]
 
 
 def select_depths(mesh,mode='manual',text='',top=None,bottom=None,step=100,every=1):
