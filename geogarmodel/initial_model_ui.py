@@ -115,7 +115,10 @@ class InitialModelPanel(QGroupBox):
             options['array']=array
         elif ext=='.vo':
             from .gocad_voxet import header
-            _,props,meta=header(path)
+            try:
+                _,props,meta=header(path)
+            except PermissionError as exc:
+                raise ValueError('Windows запретила чтение заголовка Voxet. Проверьте права файла или заново экспортируйте куб в доступную папку.') from exc
             replacements={}
             for filename in dict.fromkeys(prop['PROP_FILE'] for prop in props.values()):
                 if not (Path(path).parent/filename).is_file():
@@ -135,7 +138,10 @@ class InitialModelPanel(QGroupBox):
             options['vertical']=vertical
         crs=self.tab.crs.currentText().split('|')[0].strip()
         def loader():
-            model=load_voxel(path,mode,crs,**options)
+            try:
+                model=load_voxel(path,mode,crs,**options)
+            except PermissionError as exc:
+                raise ValueError(f'Windows запретила чтение файла: {exc.filename or path}. Проверьте права файла или заново экспортируйте куб в доступную папку.') from exc
             model.source_path=str(Path(path).resolve())
             model.source_array=options.get('array',options.get('model_path',options.get('property_id','')))
             if 'component_paths' in options:

@@ -2,11 +2,10 @@
 import json
 from pathlib import Path
 import shlex
-import tempfile
 from .work_progress import report
 import numpy as np
 from .inversion import Mesh
-from .inversion_export import clipped_count
+from .inversion_export import clipped_count, install_bundle, stage_export
 from .voxel import VoxelModel
 
 
@@ -146,6 +145,13 @@ def resample_for_voxet(result):
     return replace(result,mesh=uniform,model=values)
 
 
+def voxet_binaries(path,vector):
+    path=Path(path).with_suffix('.vo')
+    if vector:
+        return [path.with_name(f'{path.stem}_{name}.bin') for name in ('JE','JN','JD')]
+    return [path.with_suffix('.bin')]
+
+
 def write_voxet(result,path,policy='exact'):
     path=Path(path).with_suffix('.vo')
     mesh=result.mesh
@@ -170,13 +176,11 @@ def write_voxet(result,path,policy='exact'):
            'AXIS_MIN 0 0 0',f'AXIS_MAX {nx-1} {ny-1} {nz-1}',f'AXIS_N {nx} {ny} {nz}',
            'AXIS_D 1 1 1','AXIS_TYPE even even even','AXIS_UNIT "m" "m" "m"']
     nodata=float(np.finfo('f4').min)
-    binary=path.with_suffix('.bin')
-    with tempfile.TemporaryDirectory(dir=path.parent) as folder:
-        root=Path(folder)
-        with (root/binary.name).open('wb') as stream:
-            for i,name in enumerate(props,1):
+    with stage_export(path.parent) as root:
+        for i,(name,binary) in enumerate(zip(props,voxet_binaries(path,len(props)==3)),1):
+            with (root/binary.name).open('wb') as stream:
                 lines.extend([f'PROPERTY {i} "{name}"',f'PROP_UNIT {i} "{unit}"',f'PROP_ESIZE {i} 4',
-                              f'PROP_ETYPE {i} IEEE',f'PROP_FORMAT {i} RAW',f'PROP_OFFSET {i} {stream.tell()}',
+                              f'PROP_ETYPE {i} IEEE',f'PROP_FORMAT {i} RAW',f'PROP_OFFSET {i} 0',
                               f'PROP_NO_DATA_VALUE {i} {nodata:.17g}',f'PROP_FILE {i} "{binary.name}"'])
                 for k in range(nz):
                     for y in range(0,ny,max(1,65536//nx)):
@@ -194,5 +198,4 @@ def write_voxet(result,path,policy='exact'):
                         stream.write(v.tobytes())
                     report((i-1)*nz+k+1,len(props)*nz,'Запись слоёв Voxet')
         (root/path.name).write_text('\n'.join(lines+['END','']),encoding='utf-8')
-        from .inversion_export import install_bundle
         install_bundle(root,path.parent)

@@ -898,13 +898,13 @@ class InversionTab(QWidget):
             return 'exact',True
 
     def save_voxet(self,r=None):
-        from .gocad_voxet import write_voxet
+        from .gocad_voxet import write_voxet, voxet_binaries
         from PyQt5.QtWidgets import QMessageBox
         if r is None: r=self.require_result()
         path,_=QFileDialog.getSaveFileName(self,'GOCAD Voxet · IEEE float32','inversion.vo','GOCAD Voxet (*.vo)')
         if not path: return
-        binary=Path(path).with_suffix('.bin')
-        if binary.exists() and QMessageBox.question(self,'Заменить бинарный файл?',str(binary),
+        binaries=voxet_binaries(path,r.settings['mode']=='vector')
+        if any(binary.exists() for binary in binaries) and QMessageBox.question(self,'Заменить бинарные файлы?','Перезаписать существующие файлы свойств?',
                 QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes: return
         options=self.voxet_export_policy(r)
         if options:
@@ -927,7 +927,7 @@ class InversionTab(QWidget):
     def export_magnetic_product(self,result,quantity,fmt):
         from .inversion_export import magnetization_product
         from .inversion import direction
-        from .gocad_voxet import write_voxet
+        from .gocad_voxet import write_voxet, voxet_binaries
         from PyQt5.QtWidgets import QDialogButtonBox,QMessageBox
         if result.settings.get('mode') not in ('induced','vector'):
             raise ValueError('Откройте результат магнитной инверсии.')
@@ -963,7 +963,7 @@ class InversionTab(QWidget):
             companions = [dest.with_name(dest.stem+name+'.mod') for name in names]
             companions.append(dest.with_suffix('.json'))
         else:
-            companions = [dest.with_suffix('.bin')]
+            companions = voxet_binaries(dest,quantity=='components')
         if any(p.exists() for p in companions) and QMessageBox.question(self,'Заменить файлы?','Перезаписать существующие файлы свойств?',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes: return
         options = (self.tensor_export_policy(result),False) if ubc else self.voxet_export_policy(result)
         if options and options[0]:

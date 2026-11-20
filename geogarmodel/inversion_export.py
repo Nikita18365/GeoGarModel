@@ -1,5 +1,6 @@
 """Exports preserve observation samples and tensor-cell geometry explicitly."""
 from pathlib import Path
+from contextlib import contextmanager
 import json
 from .work_progress import report
 import numpy as np
@@ -75,12 +76,26 @@ def magnetization_product(result, quantity, axis=None, reference=0.):
     return replace(result,model=values,settings=settings)
 
 
+@contextmanager
+def stage_export(parent):
+    """Stage beside the destination with its inherited access permissions."""
+    from shutil import rmtree
+    from uuid import uuid4
+
+    parent = Path(parent).resolve()
+    folder = parent / ('.geogarmodel-' + uuid4().hex)
+    folder.mkdir()
+    try:
+        yield folder
+    finally:
+        if folder.resolve() == folder and not folder.is_symlink():
+            rmtree(folder)
+
+
 def export_ubc(result, path, policy='exact'):
     """Stage the whole bundle before replacing any previous export."""
-    import tempfile
     path=Path(path).with_suffix('.msh')
-    with tempfile.TemporaryDirectory(dir=path.parent) as folder:
-        root=Path(folder)
+    with stage_export(path.parent) as root:
         _write_ubc(result,root/path.name,policy)
         install_bundle(root,path.parent)
 
@@ -152,12 +167,11 @@ def _write_ubc(result, path, policy):
 
 def oasis_package(result,directory,policy):
     """Portable script uses ASCII relative names and runs inside the user's Oasis project."""
-    import tempfile
     import os
     directory=Path(directory)
     if directory.exists():
         raise ValueError('Выберите новое имя папки комплекта Oasis montaj.')
-    with tempfile.TemporaryDirectory(dir=directory.parent) as staging:
+    with stage_export(directory.parent) as staging:
         folder=Path(staging)/'package'
         folder.mkdir()
         _write_ubc(result,folder/'model.msh',policy)

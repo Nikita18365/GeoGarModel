@@ -27,7 +27,7 @@ def test_gocad_export_import(tmp_path,mode):
     if mode=='gravity': expected[0]*=.5
     expected[-1]=0
     np.testing.assert_allclose(other.values,expected,rtol=1e-7)
-    binary=np.fromfile(path.with_suffix('.bin'),'>f4')
+    binary=np.fromfile(tmp_path/'my result_JE.bin' if mode=='vector' else path.with_suffix('.bin'),'>f4')
     assert binary[1]==pytest.approx(expected[6,0] if mode=='vector' else expected[6])
 
 
@@ -72,7 +72,8 @@ def test_vector_resample_and_rename_voxet_bundle(tmp_path):
     original=tmp_path/'original.vo'
     write_voxet(uniform,original)
     renamed=original.rename(tmp_path/'другое имя.vo')
-    binary=original.with_suffix('.bin').rename(tmp_path/'свойства 123.bin')
-    loaded=load_voxel(renamed,binary_paths={'original.bin':binary})
+    binaries={filename:(tmp_path/filename).rename(tmp_path/f'свойства {i}.bin')
+              for i,filename in enumerate(('original_JE.bin','original_JN.bin','original_JD.bin'))}
+    loaded=load_voxel(renamed,binary_paths=binaries)
     assert loaded.mode=='vector'
     np.testing.assert_array_equal(loaded.values,uniform.model)
