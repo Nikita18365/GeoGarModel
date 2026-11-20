@@ -251,9 +251,61 @@ def read_centers(path,mode='gravity',vertical='Down',crs=''):
     return VoxelModel(mesh,values,mode,crs,[dict(operation='centers import',vertical=vertical)])
 
 
+def _read_prism_grid(grid,mode,array,crs):
+    """Reconstruct a tensor mesh from exported axis-aligned VTK hexahedra."""
+    from .inversion_resources import available_memory
+    if not grid.n_cells or not np.all(grid.celltypes==12):
+        raise ValueError('Импорт VTU поддерживает осевые прямоугольные призмы.')
+    connectivity = grid.cell_connectivity.reshape(-1,8)
+    raw = np.asarray(grid.cell_data[array])
+    shape = (grid.n_cells,3) if mode=='vector' else (grid.n_cells,)
+    if raw.shape!=shape:
+        raise ValueError('Неверное число компонент VTK массива.')
+    bounds = np.empty((grid.n_cells,6))
+    for start in range(0,grid.n_cells,65536):
+        stop = min(start+65536,grid.n_cells)
+        points = grid.points[connectivity[start:stop]].astype(float)
+        points[...,2] *= -1
+        low,high = points.min(axis=1),points.max(axis=1)
+        upper = points==high[:,None,:]
+        corner = upper @ np.array([1,2,4])
+        if (not np.isfinite(points).all() or np.any(high<=low)
+                or not (upper | (points==low[:,None,:])).all()
+                or not (np.sort(corner,axis=1)==np.arange(8)).all()):
+            raise ValueError('Импорт VTU поддерживает осевые прямоугольные призмы.')
+        bounds[start:stop,:3],bounds[start:stop,3:] = low,high
+    axes = [np.unique(bounds[:,[i,i+3]]) for i in range(3)]
+    import math
+    size = math.prod(len(axis)-1 for axis in axes)
+    if size*(8*(3 if mode=='vector' else 1)+4) > .65*available_memory(np):
+        raise ValueError('Для восстановления сетки VTU недостаточно памяти. Откройте исходный результат GGModel или NPZ.')
+    mesh = Mesh(*axes,np.zeros(size,dtype=bool))
+    values=np.zeros((size,)+raw.shape[1:],dtype=float)
+    lo = np.column_stack([axis.searchsorted(bounds[:,i]) for i,axis in enumerate(axes)])
+    hi = np.column_stack([axis.searchsorted(bounds[:,i+3]) for i,axis in enumerate(axes)])
+    whole = (hi==lo+1).all(axis=1)
+    valid = np.isfinite(raw).reshape(len(raw),-1).all(axis=1)
+    ids = np.ravel_multi_index(lo[whole & valid].T,mesh.shape)
+    if len(ids)!=len(np.unique(ids)):
+        raise ValueError('Призмы VTU перекрываются.')
+    values[ids],mesh.active[ids] = raw[whole & valid],True
+    cube = values.reshape(mesh.shape+raw.shape[1:])
+    active = mesh.active.reshape(mesh.shape)
+    for i in np.flatnonzero(~whole & valid):
+        region = tuple(slice(l,h) for l,h in zip(lo[i],hi[i]))
+        if active[region].any():
+            raise ValueError('Призмы VTU перекрываются.')
+        cube[region],active[region] = raw[i],True
+    return VoxelModel(mesh,values,mode,crs,[dict(operation='VTU import',array=array)],own_values=True)
+
+
 def read_vtk(path,mode='gravity',array=None,crs=''):
     import pyvista as pv
     g=pv.read(path)
+    array=array or ('M_END' if mode=='vector' else 'property')
+    if array not in g.cell_data: raise ValueError(f'Нет cell-массива {array}. Доступны: {list(g.cell_data.keys())}')
+    if isinstance(g,pv.UnstructuredGrid):
+        return _read_prism_grid(g,mode,array,crs)
     if not isinstance(g,(pv.RectilinearGrid,pv.ImageData)):
         raise ValueError('Импорт VTK: требуется осевая RectilinearGrid/ImageData. Для обрезанной модели используйте NPZ.')
     if isinstance(g,pv.ImageData):
@@ -262,8 +314,6 @@ def read_vtk(path,mode='gravity',array=None,crs=''):
     else: axes=[np.asarray(g.x),np.asarray(g.y),np.asarray(g.z)]
     if any(np.any(np.diff(a)<=0) for a in axes): raise ValueError('VTK: оси должны возрастать; Z трактуется как высота Up.')
     mesh=Mesh(axes[0],axes[1],-axes[2][::-1])
-    array=array or ('M_END' if mode=='vector' else 'property')
-    if array not in g.cell_data: raise ValueError(f'Нет cell-массива {array}. Доступны: {list(g.cell_data.keys())}')
     raw=np.asarray(g.cell_data[array]); extra=(3,) if mode=='vector' else ()
     if raw.shape != (mesh.size,)+extra: raise ValueError('Неверное число компонент VTK массива.')
     v=raw.reshape(mesh.shape+extra,order='F')[:,:,::-1].reshape((mesh.size,)+extra)
@@ -318,7 +368,7 @@ def load_voxel(path,mode='gravity',crs='',**kwargs):
     ext=Path(path).suffix.lower()
     if ext=='.vo':
         from .gocad_voxet import read_voxet
-        return read_voxet(path,mode,crs,kwargs.get('property_id'))
+        return read_voxet(path,mode,crs,kwargs.get('property_id'),kwargs.get('binary_paths'))
     if ext=='.ggmodel':
         from .model_archive import ModelArchive
         r=ModelArchive(path).load()
@@ -330,8 +380,12 @@ def load_voxel(path,mode='gravity',crs='',**kwargs):
                 return VoxelModel(Mesh(s['east'],s['north'],s['depth'],s['active'],s['bounds'] if s['bounds'].size else None),s['model'],**meta)
         r=InversionResult.load(path)
         return VoxelModel(r.mesh,r.model,r.settings['mode'],r.settings.get('crs',''),[dict(operation='previous result')])
-    if ext in ('.msh','.mesh'): return read_ubc(path,kwargs['model_path'],mode,kwargs.get('dummy'),crs)
-    if ext in ('.vtk','.vtr','.vti'): return read_vtk(path,mode,kwargs.get('array'),crs)
+    if ext in ('.msh','.mesh'):
+        components = kwargs.get('component_paths')
+        if components is not None:
+            return combine_components([read_ubc(path,p,'J_component',kwargs.get('dummy'),crs) for p in components])
+        return read_ubc(path,kwargs['model_path'],mode,kwargs.get('dummy'),crs)
+    if ext in ('.vtk','.vtr','.vti','.vtu'): return read_vtk(path,mode,kwargs.get('array'),crs)
     if ext=='.geosoft_voxel': return read_geosoft(path,mode,crs)
     return read_centers(path,mode,kwargs.get('vertical','Down'),crs)
 

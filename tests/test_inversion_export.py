@@ -65,3 +65,26 @@ def test_magnetization_products_in_both_formats(tmp_path,quantity):
     for i,suffix in enumerate(['_JE','_JN','_JD'] if quantity=='components' else ['']):
         loaded=read_ubc(tmp_path/'mag.msh',tmp_path/('mag'+suffix+'.mod'),dummy=-1e32)
         np.testing.assert_allclose(loaded.values[active],expected[active,i] if quantity=='components' else expected[active])
+
+
+def test_vector_ubc_and_vtu_reload_with_arbitrary_names(tmp_path):
+    from geogarmodel.voxel import load_voxel
+    from geogarmodel.stream_vtu import write_vtu
+    r=result('vector')
+    original=tmp_path/'old.msh'
+    export_ubc(r,original)
+    mesh=original.rename(tmp_path/'сетка.msh')
+    parts=[(tmp_path/('old_'+name+'.mod')).rename(tmp_path/(str(i)+'.mod'))
+           for i,name in enumerate(('JE','JN','JD'))]
+    loaded=load_voxel(mesh,'vector',component_paths=parts,dummy=-1e32)
+    np.testing.assert_array_equal(loaded.values,r.model)
+    np.testing.assert_array_equal(loaded.mesh.active,r.mesh.active)
+    pytest.importorskip('pyvista')
+    r.mesh.bounds=r.mesh.cells()
+    r.mesh.bounds[0,2]+=5
+    path=tmp_path/'магнитный результат.vtu'
+    write_vtu(r,path)
+    restored=load_voxel(path,'vector')
+    np.testing.assert_array_equal(restored.mesh.depth,[10,15,30,80])
+    np.testing.assert_array_equal(restored.values[:3],[np.zeros(3),r.model[0],r.model[1]])
+    assert not restored.mesh.active[0] and restored.mesh.active[1]

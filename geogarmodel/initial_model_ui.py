@@ -69,38 +69,61 @@ class InitialModelPanel(QGroupBox):
         self.tab.status.setText('Начальная модель готова. Проверьте единицы, диапазон свойств и границы ограничения.')
 
     def ask_load(self,mode,title='Начальная модель'):
-        path,_=QFileDialog.getOpenFileName(self,title,'','Voxel (*.geosoft_voxel *.msh *.mesh *.npz *.ggmodel *.vo *.vtr *.vtk *.vti *.csv *.xlsx *.txt);;Все файлы (*)')
+        path,_=QFileDialog.getOpenFileName(self,title,'','Voxel (*.geosoft_voxel *.msh *.mesh *.npz *.ggmodel *.vo *.vtr *.vtk *.vti *.vtu *.csv *.xlsx *.txt);;Все файлы (*)')
         if not path: return None
         options={}; ext=Path(path).suffix.lower()
         if ext in ('.msh','.mesh'):
-            model_path,_=QFileDialog.getOpenFileName(self,'UBC свойства (соответствующий MOD/SUS/DEN)','','Все файлы (*)')
-            if not model_path: return None
-            options['model_path']=model_path
             import json
-            default=''
+            default='-1e32' if mode in ('induced','vector','J_parallel','J_magnitude') else ''
             sidecar=Path(path).with_suffix('.json')
             if sidecar.is_file():
                 try:
                     meta=json.loads(sidecar.read_text(encoding='utf-8-sig'))
-                    if Path(model_path).name in meta.get('model_files',[]):
-                        default=str(float(meta['dummy']))
+                    default=str(float(meta['dummy']))
                 except (OSError,ValueError,TypeError,KeyError,AttributeError):
                     pass
+            if mode=='vector':
+                kind,ok=QInputDialog.getItem(self,'Векторная модель UBC','Файлы свойств',
+                    ['Три файла JE, JN, JD','Один файл с тремя компонентами в каждой строке'],0,False)
+                if not ok: return None
+            else:
+                kind=''
+            if kind.startswith('Три'):
+                components=[]
+                for name in ('JE (East)','JN (North)','JD (Down)'):
+                    component,_=QFileDialog.getOpenFileName(self,'UBC · '+name,str(Path(path).parent),'Все файлы (*)')
+                    if not component: return None
+                    components.append(component)
+                options['component_paths']=components
+            else:
+                model_path,_=QFileDialog.getOpenFileName(self,'UBC свойства (соответствующий MOD/SUS/DEN)',str(Path(path).parent),'Все файлы (*)')
+                if not model_path: return None
+                options['model_path']=model_path
             dummy,ok=QInputDialog.getText(self,'UBC dummy','Неактивное значение (пусто = все конечные активны):',text=default)
             if not ok: return None
             options['dummy']=float(dummy) if dummy.strip() else None
-        elif ext in ('.vtk','.vtr','.vti'):
+        elif ext in ('.vtk','.vtr','.vti','.vtu'):
             import pyvista as pv
             def arrays():
                 reader=pv.get_reader(path)
                 return list(reader.cell_array_names) if hasattr(reader,'cell_array_names') else list(reader.read().cell_data.keys())
             names=self.tab.workbench.activity.run('Чтение структуры VTK',arrays)
-            array,ok=QInputDialog.getItem(self,'Свойство VTK','Выберите cell-массив (Z = Up; вектор East/North/Down):',names,0,False)
+            preferred='M_END' if mode=='vector' else 'property'
+            selected=names.index(preferred) if preferred in names else 0
+            array,ok=QInputDialog.getItem(self,'Свойство VTK','Выберите cell-массив (Z = Up; вектор East/North/Down):',names,selected,False)
             if not ok: return None
             options['array']=array
         elif ext=='.vo':
             from .gocad_voxet import header
             _,props,meta=header(path)
+            replacements={}
+            for filename in dict.fromkeys(prop['PROP_FILE'] for prop in props.values()):
+                if not (Path(path).parent/filename).is_file():
+                    replacement,_=QFileDialog.getOpenFileName(self,'Файл данных Voxet · '+filename,
+                        str(Path(path).parent),'Все файлы (*)')
+                    if not replacement: return None
+                    replacements[filename]=replacement
+            options['binary_paths']=replacements
             if len(props)>1 and mode!='vector' and meta.get('mode')!='vector':
                 labels={f"{k} · {p.get('PROPERTY',k)}":k for k,p in props.items()}
                 label,ok=QInputDialog.getItem(self,'GOCAD Voxet','Свойство',list(labels),0,False)
@@ -115,9 +138,13 @@ class InitialModelPanel(QGroupBox):
             model=load_voxel(path,mode,crs,**options)
             model.source_path=str(Path(path).resolve())
             model.source_array=options.get('array',options.get('model_path',options.get('property_id','')))
+            if 'component_paths' in options:
+                model.source_array=' · '.join(options['component_paths'])
             return model
         loader.path = str(Path(path).resolve())
-        if 'model_path' in options:
+        if 'component_paths' in options:
+            loader.path += ' · ' + ' · '.join(options['component_paths'])
+        elif 'model_path' in options:
             loader.path += ' · ' + str(options['model_path'])
         elif 'array' in options or 'property_id' in options:
             loader.path += ' · ' + str(options.get('array',options.get('property_id')))

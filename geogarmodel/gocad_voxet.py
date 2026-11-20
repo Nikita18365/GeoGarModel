@@ -33,7 +33,7 @@ def header(path):
     return axes,props,meta
 
 
-def read_voxet(path,mode='gravity',crs='',property_id=None):
+def read_voxet(path,mode='gravity',crs='',property_id=None,binary_paths=None):
     path=Path(path)
     a,props,meta=header(path)
     if 'AXIS_N' in a:
@@ -91,7 +91,8 @@ def read_voxet(path,mode='gravity',crs='',property_id=None):
             raise ValueError('Неизвестный порядок байтов Voxet.')
         dtype=np.dtype(('>' if order.startswith('BIG') else '<')+'f'+str(size))
         offset=int(p.get('PROP_OFFSET',0))
-        binary=path.parent/p['PROP_FILE']
+        filename=p['PROP_FILE']
+        binary=Path((binary_paths or {}).get(filename,path.parent/filename))
         if offset<0 or binary.stat().st_size-offset<mesh.size*size:
             raise ValueError('Неверное смещение или неполный бинарный файл Voxet.')
         raw=np.memmap(binary,dtype=dtype,mode='r',offset=offset,shape=n,order='F')
@@ -110,12 +111,47 @@ def read_voxet(path,mode='gravity',crs='',property_id=None):
                       [dict(operation='GOCAD Voxet',properties=selected)],own_values=True)
 
 
+def uniform_voxet_mesh(mesh):
+    return all(np.allclose(widths,widths[0],rtol=1e-9,atol=1e-10)
+               for widths in map(np.diff,(mesh.east,mesh.north,mesh.depth)))
+
+
+def resample_for_voxet(result):
+    from dataclasses import replace
+    from .model_archive import regular_cells
+    from .inversion_resources import available_memory
+    mesh = result.mesh
+    uniform = Mesh(*(np.linspace(axis[0],axis[-1],len(axis))
+                     for axis in (mesh.east,mesh.north,mesh.depth)))
+    if result.model.nbytes+uniform.size > .8*available_memory(np):
+        raise ValueError('Недостаточно памяти для переноса на сетку Voxet.')
+    values=np.zeros_like(result.model)
+    axes=(mesh.east,mesh.north,mesh.depth)
+    for start in range(0,uniform.size,65536):
+        stop=min(start+65536,uniform.size)
+        ids=np.arange(start,stop)
+        cells=regular_cells(uniform,ids)
+        points=(cells[:,:3]+cells[:,3:])/2
+        indexes=[axis.searchsorted(points[:,i],side='right')-1 for i,axis in enumerate(axes)]
+        source=np.ravel_multi_index(tuple(indexes),mesh.shape)
+        active=mesh.active[source].copy()
+        if mesh.bounds is not None:
+            bounds=mesh.bounds[source]
+            active &= ((points>=bounds[:,:3]) & (points<=bounds[:,3:])).all(axis=1)
+        uniform.active[ids]=active
+        values[ids[active]]=result.model[source[active]]
+        report(stop,uniform.size,'Перенос на равномерную сетку')
+    if not uniform.active.any():
+        raise ValueError('Центры равномерной сетки не попали в активный объём.')
+    return replace(result,mesh=uniform,model=values)
+
+
 def write_voxet(result,path,policy='exact'):
     path=Path(path).with_suffix('.vo')
     mesh=result.mesh
     axes=(mesh.east,mesh.north,mesh.depth)
     widths=[np.diff(axis) for axis in axes]
-    if any(not np.allclose(w,w[0],rtol=1e-9,atol=1e-10) for w in widths):
+    if not uniform_voxet_mesh(mesh):
         raise ValueError('Для GOCAD Voxet нужна равномерная сетка по каждой оси. Выполните перенос модели или сохраните GGModel.')
     count=clipped_count(mesh)
     if count and policy=='exact': raise ValueError('Обрезанные ячейки требуют явного выбора приближения.')

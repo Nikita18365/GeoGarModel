@@ -59,3 +59,20 @@ END
     assert not m.mesh.active.reshape(m.mesh.shape)[0,1,0]
     path.write_text(path.read_text().replace('AXIS_W 3 0 0','AXIS_W 3 1 0'))
     with pytest.raises(ValueError,match='Поворот'): read_voxet(path)
+
+
+def test_vector_resample_and_rename_voxet_bundle(tmp_path):
+    from geogarmodel.gocad_voxet import resample_for_voxet
+    mesh=Mesh([0,2,6],[0,3],[10,20,55])
+    values=np.arange(mesh.size*3,dtype=float).reshape(-1,3)
+    r=InversionResult(mesh,values,[],[],[],[],{'mode':'vector'},'test')
+    uniform=resample_for_voxet(r)
+    np.testing.assert_array_equal(uniform.mesh.depth,[10,32.5,55])
+    np.testing.assert_array_equal(uniform.model,values[[1,1,3,3]])
+    original=tmp_path/'original.vo'
+    write_voxet(uniform,original)
+    renamed=original.rename(tmp_path/'другое имя.vo')
+    binary=original.with_suffix('.bin').rename(tmp_path/'свойства 123.bin')
+    loaded=load_voxel(renamed,binary_paths={'original.bin':binary})
+    assert loaded.mode=='vector'
+    np.testing.assert_array_equal(loaded.values,uniform.model)

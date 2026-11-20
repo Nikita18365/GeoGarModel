@@ -884,6 +884,19 @@ class InversionTab(QWidget):
             policy=choices[choice]
         return policy
 
+    def voxet_export_policy(self,result):
+        from .gocad_voxet import uniform_voxet_mesh
+        from PyQt5.QtWidgets import QMessageBox
+        if uniform_voxet_mesh(result.mesh):
+            policy = self.tensor_export_policy(result)
+            return (policy,False) if policy else None
+        answer = QMessageBox.question(self,'Равномерная сетка GOCAD Voxet',
+            'В исходной модели шаг ячеек меняется. Перенести свойства на равномерную сетку с теми же границами и числом ячеек? '
+            'Для каждого нового центра будет взято значение исходной ячейки. Обрезанная поверхность станет ступенчатой.',
+            QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+        if answer==QMessageBox.Yes:
+            return 'exact',True
+
     def save_voxet(self,r=None):
         from .gocad_voxet import write_voxet
         from PyQt5.QtWidgets import QMessageBox
@@ -893,8 +906,12 @@ class InversionTab(QWidget):
         binary=Path(path).with_suffix('.bin')
         if binary.exists() and QMessageBox.question(self,'Заменить бинарный файл?',str(binary),
                 QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes: return
-        policy=self.tensor_export_policy(r)
-        if policy: self.workbench.activity.run('Экспорт GOCAD Voxet',write_voxet,r,path,policy)
+        options=self.voxet_export_policy(r)
+        if options:
+            from .gocad_voxet import resample_for_voxet
+            policy,transfer=options
+            self.workbench.activity.run('Экспорт GOCAD Voxet',
+                lambda: write_voxet(resample_for_voxet(r) if transfer else r,path,policy))
 
     def magnetic_export_menu(self, menu, get_result):
         group = menu.addMenu('Намагниченность, А/м')
@@ -948,10 +965,13 @@ class InversionTab(QWidget):
         else:
             companions = [dest.with_suffix('.bin')]
         if any(p.exists() for p in companions) and QMessageBox.question(self,'Заменить файлы?','Перезаписать существующие файлы свойств?',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes: return
-        policy = self.tensor_export_policy(result)
-        if policy:
+        options = (self.tensor_export_policy(result),False) if ubc else self.voxet_export_policy(result)
+        if options and options[0]:
+            from .gocad_voxet import resample_for_voxet
+            policy,transfer=options
             def write():
-                product = magnetization_product(result,quantity,axis,reference)
+                source=resample_for_voxet(result) if transfer else result
+                product=magnetization_product(source,quantity,axis,reference)
                 (export_ubc if ubc else write_voxet)(product,dest,policy)
             self.workbench.activity.run('Экспорт намагниченности',write)
 
