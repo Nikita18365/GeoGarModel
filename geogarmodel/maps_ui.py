@@ -432,7 +432,7 @@ class MapWorkspace:
         if item is None or item.data(Qt.UserRole)['kind']!='grid': raise ValueError('Выберите карту в списке слоёв.')
         return item.data(Qt.UserRole)['data']
 
-    def add_grid(self,grid):
+    def add_grid(self,grid,xyz=None):
         if self.map_project_crs:
             source=self.source_crs(grid.crs,grid.name)
             if not source: return
@@ -443,7 +443,9 @@ class MapWorkspace:
             else:
                 self.map_project_crs=grid.crs; self.update_project_label()
         style=self.read_map_style(); style.update(vmin='',vmax='')
-        self.add_map_layer(dict(kind='grid',name=grid.name,visible=True,style=style,data=grid))
+        row=dict(kind='grid',name=grid.name,visible=True,style=style,data=grid)
+        if xyz is not None: row['xyz']=xyz
+        self.add_map_layer(row)
 
     def map_reordered(self):
         rows=self.map_layer_rows(); self.grids=[r['data'] for r in rows if r['kind']=='grid']

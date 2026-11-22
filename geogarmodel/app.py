@@ -171,6 +171,17 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         self.layers.setMinimumHeight(100); self.layers.setMaximumHeight(180)
         self.layers.currentRowChanged.connect(lambda _: self.guard(self.redraw))
         panel.addWidget(self.layers)
+        self.xyz_controls=QGroupBox('Столбцы таблицы XYZ')
+        xyz_form=QFormLayout(self.xyz_controls)
+        self.xyz_columns=self.make_xyz_columns(xyz_form)
+        for label,callback in [('Исходная СК таблицы…',self.set_xyz_crs),
+                               ('Построить новую карту',self.build_xyz_layer)]:
+            button=QPushButton(label)
+            button.clicked.connect(lambda _,fn=callback:self.guard(fn))
+            xyz_form.addRow(button)
+        self.xyz_controls.hide()
+        panel.addWidget(self.xyz_controls)
+        self.layers.currentItemChanged.connect(self.update_xyz_controls)
         self.button("СК и параметры слоя…", self.layer_coordinates, panel)
         overlay_group=QWidget(); overlay_layout=QVBoxLayout(overlay_group)
         main_data_panel=panel; panel=overlay_layout
@@ -425,8 +436,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
     def selected_grid(self):
         return MapWorkspace.selected_grid(self)
 
-    def add_grid(self, grid):
-        return MapWorkspace.add_grid(self,grid)
+    def add_grid(self, grid, **kwargs):
+        return MapWorkspace.add_grid(self,grid,**kwargs)
 
     def open_grid(self):
         if not self.ensure_map_project(): return
@@ -456,23 +467,88 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
             grid.crs=source; grid.coordinate_unit='degrees' if CRS(source).is_geographic else 'm'
             self.add_grid(grid)
 
+    @staticmethod
+    def make_xyz_columns(form, names=(), selected=()):
+        boxes=[]
+        for axis, label in zip('XYZ',('X · East / долгота','Y · North / широта','Z · значение поля')):
+            box=QComboBox()
+            box.setAccessibleName(axis)
+            boxes.append(box)
+            form.addRow(label,box)
+        for box,name in zip(boxes,selected):
+            box.addItems(list(names))
+            box.setCurrentText(name)
+        return boxes
+
     def open_xyz(self):
         if not self.ensure_map_project(): return
-        path, _ = QFileDialog.getOpenFileName(self, "Таблица: первые 3 столбца X Y поле", "", "Таблицы (*.xlsx *.csv *.txt)")
-        if path:
-            data = self.activity.run('Загрузка таблицы',read_table,path)
-            # Plain XYZ tables carry no reliable CRS: never borrow ML defaults.
-            from pyproj import CRS
-            crs=self.import_source_crs('',Path(path).stem)
-            if crs is None: return
-            order,ok=QInputDialog.getItem(self,'Координаты таблицы','Первые два столбца:',
-                ['East (X), North (Y)','North (X), East (Y)'],0,False)
-            if not ok: return
-            north_first=order.startswith('North')
-            coordinate_unit='degrees' if CRS.from_user_input(crs).is_geographic else 'm'
-            self.add_grid(self.activity.run("Интерполяция карты",points_to_grid,data.iloc[:, 1 if north_first else 0],
-                                        data.iloc[:, 0 if north_first else 1], data.iloc[:, 2],
-                                        name=Path(path).stem, crs=crs, coordinate_unit=coordinate_unit))
+        path,_=QFileDialog.getOpenFileName(self,'Таблица XYZ','','Таблицы (*.xlsx *.csv *.txt *.xyz *.tsv)')
+        if not path: return
+        from .map_project import read_xyz_table
+        table=self.activity.run('Загрузка таблицы',read_xyz_table,path)
+        if len(table.columns)<3:
+            raise ValueError('В таблице XYZ нужны минимум три столбца.')
+        dialog=QDialog(self)
+        dialog.setWindowTitle('Столбцы таблицы XYZ')
+        form=QFormLayout(dialog)
+        form.addRow(QLabel(Path(path).name))
+        boxes=self.make_xyz_columns(form,table.columns,table.columns[:3])
+        buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec_()!=QDialog.Accepted: return
+        crs=self.import_source_crs('',Path(path).stem)
+        if crs:
+            self.add_xyz_grid(table,Path(path).stem,[b.currentText() for b in boxes],crs)
+
+    def selected_xyz(self):
+        item=self.layers.currentItem()
+        return item.data(Qt.UserRole).get('xyz') if item else None
+
+    def update_xyz_controls(self,*args):
+        source=self.selected_xyz()
+        self.xyz_controls.setVisible(source is not None)
+        if source is None: return
+        self.xyz_crs=source['crs']
+        self.xyz_controls.setTitle('Столбцы XYZ · '+source['stem'])
+        for box,name in zip(self.xyz_columns,source['columns']):
+            box.clear()
+            box.addItems(list(source['table'].columns))
+            box.setCurrentText(name)
+
+    def set_xyz_crs(self):
+        source=self.selected_xyz()
+        if source:
+            crs=self.choose_source_crs(self.xyz_crs,source['stem'])
+            if crs: self.xyz_crs=crs
+
+    def build_xyz_layer(self):
+        source=self.selected_xyz()
+        if source:
+            self.add_xyz_grid(source['table'],source['stem'],[b.currentText() for b in self.xyz_columns],self.xyz_crs)
+
+    def add_xyz_grid(self,table,stem,columns,crs):
+        from pyproj import CRS
+        import pandas as pd
+        if columns[0]==columns[1]:
+            raise ValueError('Выберите разные столбцы для X и Y.')
+        title=f'TXT_{stem} · {columns[2]}'
+        names={self.layers.item(i).text() for i in range(self.layers.count())}
+        name=title
+        number=2
+        while name in names:
+            name=f'{title} ({number})'
+            number+=1
+        def build():
+            try:
+                values=[pd.to_numeric(table[key],errors='raise') for key in columns]
+            except ValueError as exc:
+                raise ValueError('Столбцы X, Y и Z должны содержать числа.') from exc
+            unit='degrees' if CRS.from_user_input(crs).is_geographic else 'm'
+            return points_to_grid(*values,name=name,crs=crs,coordinate_unit=unit)
+        grid=self.activity.run('Интерполяция карты',build)
+        self.add_grid(grid,xyz=dict(table=table,stem=stem,columns=columns,crs=crs))
 
     def metadata(self):
         grid = self.selected_grid()

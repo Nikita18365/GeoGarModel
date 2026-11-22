@@ -124,8 +124,36 @@ def read_vector(path,source_crs=None):
     return Vector(features,crs)
 
 
+def read_xyz_table(path):
+    """Read named columns or number the columns of a raw XYZ point file."""
+    import csv
+    import re
+    import pandas as pd
+    if Path(path).suffix.lower()=='.xlsx':
+        table=pd.read_excel(path)
+    else:
+        with Path(path).open(encoding='utf-8-sig') as stream:
+            line=next((row.strip() for row in stream if row.strip() and not row.lstrip().startswith('#')),'')
+        if not line:
+            raise ValueError('Таблица XYZ пуста.')
+        dialect=next((separator for separator in ('\t',';',',') if separator in line),None)
+        first=next(csv.reader([line],delimiter=dialect)) if dialect else re.split(r'\s+',line)
+        try:
+            for value in first:
+                if value.strip(): float(value)
+            header=None
+        except ValueError:
+            header=0
+        table=pd.read_csv(path,sep=dialect or r'\s+',header=header,comment='#',
+                          encoding='utf-8-sig',float_precision='round_trip')
+        if header is None:
+            table.columns=[f'Столбец {i+1}' for i in range(len(table.columns))]
+    table.columns=table.columns.map(str)
+    return table
+
+
 def save_project(path,name,layers,view,scale,crs='',presentation=None):
-    arrays={}; rows=[]
+    arrays={}; rows=[]; tables={}
     for i,layer in enumerate(layers):
         row={k:layer[k] for k in ('name','visible','style','kind')}
         value=layer['data']
@@ -133,6 +161,15 @@ def save_project(path,name,layers,view,scale,crs='',presentation=None):
             for key in ('x','y','values'): arrays[f'{i}_{key}']=getattr(value,key)
             row['metadata']={k:getattr(value,k) for k in ('name','unit','crs','coordinate_unit','history')}
         else: row.update(features=value.features,crs=value.crs)
+        if 'xyz' in layer:
+            source=layer['xyz']
+            table=source['table']
+            key=tables.get(id(table))
+            if key is None:
+                key=f'xyz_{len(tables)}'
+                tables[id(table)]=key
+                arrays[key]=np.frombuffer(table.to_csv(index=False).encode('utf-8'),dtype=np.uint8)
+            row['xyz']={**{k:source[k] for k in ('stem','columns','crs')},'table_key':key}
         rows.append(row)
     arrays['manifest']=json.dumps(dict(version=1,name=name,layers=rows,view=view,scale=scale,crs=crs,presentation=presentation or {}),ensure_ascii=False)
     if hasattr(path,'write'):
@@ -153,12 +190,21 @@ def load_project(path):
     with ZipFile(path) as archive:
         if 'manifest.json' in archive.namelist(): return load_project(BytesIO(archive.read('maps.npz')))
     if hasattr(path,'seek'): path.seek(0)
-    layers=[]
+    from io import StringIO
+    import pandas as pd
+    layers=[]; tables={}
     with np.load(path,allow_pickle=False) as data:
         manifest=json.loads(str(data['manifest']))
         if manifest['version']!=1: raise ValueError('Неподдерживаемая версия проекта карт.')
         for i,row in enumerate(manifest['layers']):
             value=(Grid(*(data[f'{i}_{k}'].copy() for k in ('x','y','values')),**row['metadata'])
                    if row['kind']=='grid' else Vector(row['features'],row['crs']))
-            layers.append({**{k:row[k] for k in ('name','visible','style','kind')},'data':value})
+            layer={**{k:row[k] for k in ('name','visible','style','kind')},'data':value}
+            if 'xyz' in row:
+                source=dict(row['xyz'])
+                key=source.pop('table_key')
+                if key not in tables:
+                    tables[key]=pd.read_csv(StringIO(data[key].tobytes().decode('utf-8')),float_precision='round_trip')
+                layer['xyz']=dict(source,table=tables[key])
+            layers.append(layer)
     return manifest,layers

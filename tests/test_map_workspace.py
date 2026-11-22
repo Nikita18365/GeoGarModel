@@ -206,18 +206,48 @@ def test_cancel_crs_change_is_atomic(monkeypatch,qt_application_lifetime):
 
 
 def test_xyz_import_uses_project_crs_independently_of_ml(tmp_path,monkeypatch,qt_application_lifetime):
-    from PyQt5.QtWidgets import QInputDialog
-    path=tmp_path/'wgs.csv'
-    path.write_text('East,North,Field\n18500000,7800000,1\n18501000,7800000,2\n18500000,7801000,3\n18501000,7801000,4\n')
+    from PyQt5.QtWidgets import QComboBox,QDialog
+    path=tmp_path/'survey.xyz'
+    path.write_text('Signal East North Other East2\n1 18500000 7800000 4 18502000\n2 18501000 7800000 5 18503000\n3 18500000 7801000 6 18502000\n4 18501000 7801000 7 18503000\n')
     window=MainWindow(); window.apply_project_crs('EPSG:20918')
     asked=[]
     monkeypatch.setattr(window,'source_crs',lambda known,name:known or asked.append(name) or 'EPSG:4326')
     monkeypatch.setattr(QFileDialog,'getOpenFileName',lambda *a:(str(path),''))
-    monkeypatch.setattr(QInputDialog,'getItem',lambda *a:('East (X), North (Y)',True))
+    def select(dialog):
+        assert dialog.windowTitle()=='Столбцы таблицы XYZ'
+        for box in dialog.findChildren(QComboBox):
+            box.setCurrentText(dict(X='East',Y='North',Z='Signal')[box.accessibleName()])
+        return QDialog.Accepted
+    monkeypatch.setattr(QDialog,'exec_',select)
     window.open_xyz()
     assert asked==[] and window.selected_grid().crs=='EPSG:20918'
-    assert window.selected_grid().x.min()>18000000
+    assert window.layers.currentItem().text()=='TXT_survey · Signal'
+    assert not window.xyz_controls.isHidden()
+    window.xyz_columns[0].setCurrentText('East2')
+    window.xyz_columns[2].setCurrentText('Other')
+    window.build_xyz_layer()
+    assert window.layers.count()==2 and window.selected_grid().x.min()==18502000
+    np.testing.assert_allclose(window.selected_grid().values[0,0],4)
+    project=tmp_path/'source.ggproject'
+    window.save_project_to(project)
+    path.unlink()
+    assert window.open_project_from(project)
+    assert window.layers.count()==2
+    window.layers.setCurrentRow(1)
+    assert [box.currentText() for box in window.xyz_columns]==['East','North','Signal']
+    window.xyz_columns[2].setCurrentText('Other')
+    window.build_xyz_layer()
+    assert window.layers.count()==3 and window.selected_grid().x.min()==18500000
     window.close()
+
+
+def test_xyz_without_header_keeps_first_point(tmp_path):
+    from geogarmodel.map_project import read_xyz_table
+    path=tmp_path/'source.txt'
+    path.write_text('# raw XYZ\n10 20 4 8\n11 21 5 9\n',encoding='utf-8')
+    table=read_xyz_table(path)
+    assert list(table.columns)==['Столбец 1','Столбец 2','Столбец 3','Столбец 4']
+    np.testing.assert_array_equal(table.values,[[10,20,4,8],[11,21,5,9]])
 
 
 def test_shared_title_layout_persistence_and_export(tmp_path,monkeypatch,qt_application_lifetime):
