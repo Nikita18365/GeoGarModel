@@ -166,6 +166,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         root_panel = QVBoxLayout(controls)
         data_group=QGroupBox('Открыть карту'); panel=QVBoxLayout(data_group); root_panel.addWidget(data_group)
         self.button("Открыть GRD / ZMAP / DAT / NPZ / FLT", self.open_grid, panel)
+        self.button("Импортировать растр…", self.open_raster, panel)
         self.button("Таблица XYZ → регулярная сетка", self.open_xyz, panel)
         self.layers = LayerList()
         self.layers.setMinimumHeight(100); self.layers.setMaximumHeight(180)
@@ -438,6 +439,33 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
 
     def add_grid(self, grid, **kwargs):
         return MapWorkspace.add_grid(self,grid,**kwargs)
+
+    def open_raster(self):
+        from pyproj import CRS
+        from .raster_map import read_raster,place_raster
+        from .raster_points_ui import RasterPoints
+
+        if not self.ensure_map_project(): return
+        path,_ = QFileDialog.getOpenFileName(self,'Импорт растра','',
+            'Изображения (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.webp *.jp2);;Все файлы (*)')
+        if not path: return
+        image,transform,known = self.activity.run('Чтение растра',read_raster,path)
+        answer = QMessageBox.question(self,'Привязка растра','У растра уже есть пространственная привязка?',
+            QMessageBox.Yes|QMessageBox.No|QMessageBox.Cancel,
+            QMessageBox.Yes if transform is not None else QMessageBox.No)
+        if answer==QMessageBox.Cancel: return
+        if answer==QMessageBox.Yes and transform is None:
+            raise ValueError('Не найдена привязка. Добавьте файл привязки рядом с изображением или выберите «Нет» для ручной привязки.')
+        crs = self.choose_source_crs(known or self.map_project_crs,Path(path).name)
+        if not crs: return
+        points = None
+        if answer==QMessageBox.No:
+            dialog = RasterPoints(image,CRS.from_user_input(crs),self)
+            if dialog.exec_()!=QDialog.Accepted: return
+            transform,points = dialog.transform,dialog.points
+        raster = self.activity.run('Привязка растра',place_raster,image,transform,crs,self.map_project_crs,points)
+        self._map_fit = True
+        self.add_map_layer(dict(kind='raster',name=Path(path).stem,visible=True,style={},data=raster))
 
     def open_grid(self):
         if not self.ensure_map_project(): return

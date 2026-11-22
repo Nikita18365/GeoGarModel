@@ -156,6 +156,13 @@ class FastMap(pg.PlotWidget):
                         shadow.setAutoDownsample(True); shadow.setRect(image.boundingRect())
                         shadow.setRect(QRectF(value.x[0]-value.dx/2,value.y[0]-value.dy/2,len(value.x)*value.dx,len(value.y)*value.dy))
                         shadow.setOpacity(style.get('sun_intensity',.25)*style.get('alpha',1)); shadow.setZValue(index*10+1); self.addItem(shadow)
+                elif row['kind']=='raster':
+                    west,south,east,north=value.bounds
+                    image=MapImage(np.ascontiguousarray(value.image[::-1]),axisOrder='row-major',
+                                   autoLevels=False,levels=None)
+                    image.setRect(QRectF(west,south,east-west,north-south))
+                    image.setZValue(index*10)
+                    self.addItem(image)
                 else:
                     def geometry(g):
                         if not g: return

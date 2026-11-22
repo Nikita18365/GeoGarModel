@@ -161,6 +161,9 @@ def save_project(path,name,layers,view,scale,crs='',presentation=None):
         if row['kind']=='grid':
             for key in ('x','y','values'): arrays[f'{i}_{key}']=getattr(value,key)
             row['metadata']={k:getattr(value,k) for k in ('name','unit','crs','coordinate_unit','history')}
+        elif row['kind']=='raster':
+            arrays[f'{i}_image']=value.image
+            row.update(bounds=value.bounds,crs=value.crs,control_points=value.control_points)
         else: row.update(features=value.features,crs=value.crs)
         if 'xyz' in layer:
             source=layer['xyz']
@@ -198,8 +201,13 @@ def load_project(path):
         manifest=json.loads(str(data['manifest']))
         if manifest['version']!=1: raise ValueError('Неподдерживаемая версия проекта карт.')
         for i,row in enumerate(manifest['layers']):
-            value=(Grid(*(data[f'{i}_{k}'].copy() for k in ('x','y','values')),**row['metadata'])
-                   if row['kind']=='grid' else Vector(row['features'],row['crs']))
+            if row['kind']=='grid':
+                value=Grid(*(data[f'{i}_{k}'] for k in ('x','y','values')),**row['metadata'])
+            elif row['kind']=='raster':
+                from .raster_map import RasterLayer
+                value=RasterLayer(data[f'{i}_image'],tuple(row['bounds']),row['crs'],row.get('control_points'))
+            else:
+                value=Vector(row['features'],row['crs'])
             layer={**{k:row[k] for k in ('name','visible','style','kind')},'data':value}
             if 'xyz' in row:
                 source=dict(row['xyz'])

@@ -322,9 +322,13 @@ class MapWorkspace:
         if row['kind']=='grid': return self.metadata()
         source=self.choose_source_crs(row['data'].crs,item.text()+' (текущие координаты слоя)')
         if source is None: return
-        from .map_project import Vector
-        revised=Vector(row['data'].features,source)
-        row['data']=self.activity.run('Пересчёт векторного слоя',revised.reproject,self.map_project_crs) if self.map_project_crs else revised
+        if row['kind']=='raster':
+            from dataclasses import replace
+            revised=replace(row['data'],crs=source)
+        else:
+            from .map_project import Vector
+            revised=Vector(row['data'].features,source)
+        row['data']=self.activity.run('Пересчёт слоя',revised.reproject,self.map_project_crs) if self.map_project_crs else revised
         self._map_fit=True; self.map_reordered()
 
     def apply_project_crs(self,crs):
@@ -337,7 +341,7 @@ class MapWorkspace:
         for row in self.map_layer_rows():
             source=self.source_crs(row['data'].crs,row['name'])
             if source is None: return False
-            converted.append(self.activity.run('Пересчёт карты',reproject_grid,row['data'],target,source) if row['kind']=='grid' else self.activity.run('Пересчёт векторного слоя',row['data'].reproject,target))
+            converted.append(self.activity.run('Пересчёт карты',reproject_grid,row['data'],target,source) if row['kind']=='grid' else self.activity.run('Пересчёт слоя',row['data'].reproject,target))
         # Commit only after every layer has been transformed successfully.
         for i,value in enumerate(converted): self.layers.item(i).data(Qt.UserRole)['data']=value
         self.map_project_crs=target.to_string(); self.update_project_label()
@@ -569,27 +573,40 @@ class MapWorkspace:
             # The one colourbar describes the frontmost visible map.
             self.figure.axes[1]._colorbar.update_normal([im for im in ax.images if im.get_gid()=='map-field'][-1])
             self.figure.axes[1]._colorbar.set_label(grids[0]['data'].unit)
-            for row in rows:
-                if row['visible'] and row['kind']=='vector':
-                    before=set(ax.get_children()); row['data'].draw(ax,crs,row['style'])
-                    order=(len(rows)-next(i for i,r in enumerate(rows) if r is row))*10
-                    for artist in set(ax.get_children())-before: artist.set_zorder(order+1 if isinstance(artist,Rectangle) or artist in ax.patches else order+2)
+        else:
+            ax=self.figure.add_subplot(111)
+            ax.set_xlabel('X, м'); ax.set_ylabel('Y, м')
+            ax.set_aspect('equal',adjustable='box')
+            ax.set_title(self.map_title.text().strip() or self.map_project_name)
+            from .theme import style_map_figure
+            style_map_figure(self.figure)
+        visible=[r for r in rows if r['visible']]
+        crs=grids[0]['data'].crs if grids else self.map_project_crs
+        for i,row in enumerate(rows):
+            if not row['visible']: continue
+            order=(len(rows)-i)*10
+            if row['kind']=='vector':
+                before=set(ax.get_children())
+                row['data'].draw(ax,crs,row['style'])
+                for artist in set(ax.get_children())-before:
+                    artist.set_zorder(order+1 if isinstance(artist,Rectangle) or artist in ax.patches else order+2)
+            elif row['kind']=='raster':
+                west,south,east,north=row['data'].bounds
+                ax.imshow(row['data'].image,origin='upper',extent=(west,east,south,north),
+                          zorder=order,interpolation='nearest')
+        if visible:
             ax.relim(); ax.autoscale_view()
             self._map_home=(ax.get_xlim(),ax.get_ylim())
             if view: ax.set_xlim(view[0]); ax.set_ylim(view[1])
             self._geo_key=None; self.refresh_map_geography(update_fast=False)
             if self._map_layout and not self.auto_map_layout.isChecked(): self.figure.subplots_adjust(**self._map_layout)
             else: self.figure.subplots_adjust(left=.14,right=.9,bottom=(.23 if self.scale_crs.isChecked() else .20) if self.scale_on.isChecked() else .13,top=.84)
-            self.draw_north(ax,self.figure.axes[1],crs)
+            if grids: self.draw_north(ax,self.figure.axes[1],crs)
             if self.scale_on.isChecked():
-                if grids[0]['data'].coordinate_unit=='degrees': raise ValueError('Масштабная линейка в метрах требует метрических координат.')
+                if grids and grids[0]['data'].coordinate_unit=='degrees': raise ValueError('Масштабная линейка в метрах требует метрических координат.')
                 self.draw_scale(ax)
-        else:
-            ax=self.figure.add_subplot(111); ax.set_xlabel('X, м'); ax.set_ylabel('Y, м')
-            from .theme import style_map_figure
-            style_map_figure(self.figure)
         self._map_fit=False; self.map_dirty=True; self.canvas.draw_idle()
-        if hasattr(self,'fast_map'): self.fast_map.show_layers(rows,(ax.get_xlim(),ax.get_ylim()) if grids else None)
+        if hasattr(self,'fast_map'): self.fast_map.show_layers(rows,(ax.get_xlim(),ax.get_ylim()) if ax.images else None)
 
     def color_icon(self):
         from PyQt5.QtGui import QPixmap,QIcon
