@@ -31,12 +31,13 @@ def _load_pyshp():
 
 def reproject_grid(grid,target_crs,source_crs=None):
     source=CRS.from_user_input(source_crs or grid.crs); target=CRS.from_user_input(target_crs)
-    if source.equals(target):
+    forward=None if source.equals(target) else Transformer.from_crs(source,target,always_xy=True)
+    # An ArcGIS WKT and the project EPSG can describe the same XY transform.
+    if forward is None or forward.definition.split()[:1]==['proj=noop']:
         return Grid(grid.x.copy(),grid.y.copy(),grid.values.copy(),grid.name,grid.unit,target.to_string(),
                     'degrees' if target.is_geographic else 'm',list(grid.history))
     if not target.is_projected or any(abs(a.unit_conversion_factor-1)>1e-9 for a in target.axis_info[:2]):
         raise ValueError('Для проекта выберите плоскую СК в метрах.')
-    forward=Transformer.from_crs(source,target,always_xy=True)
     inverse=Transformer.from_crs(target,source,always_xy=True)
     bounds=forward.transform_bounds(grid.x[0],grid.y[0],grid.x[-1],grid.y[-1],densify_pts=64,errcheck=True)
     if not np.isfinite(bounds).all() or bounds[2]<=bounds[0] or bounds[3]<=bounds[1]:

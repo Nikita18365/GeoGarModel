@@ -63,6 +63,8 @@ def save_grid(grid, path):
 
 def load_grid(path):
     path = Path(path)
+    if path.suffix.lower()=='.flt':
+        return read_arcgis_float(path)
     if path.suffix.lower()=='.grd':
         from .binary_grid import read_binary_grid
         return read_binary_grid(path)
@@ -70,6 +72,47 @@ def load_grid(path):
         with np.load(path, allow_pickle=False) as data:
             return Grid(data["x"], data["y"], data["values"], **json.loads(str(data["metadata"])))
     return read_zmap(path)
+
+
+def read_arcgis_float(path):
+    """Read an ArcGIS Float Grid and place samples at cell centres."""
+    path = Path(path)
+    header = path.with_suffix('.hdr')
+    if not header.is_file():
+        header = path.with_suffix('.HDR')
+    if not header.is_file():
+        raise ValueError(f'Для {path.name} нужен файл {path.stem}.hdr в той же папке.')
+
+    fields = {}
+    for line in header.read_text(encoding='utf-8-sig').splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts)==2:
+            fields[parts[0].upper()] = parts[1].strip()
+
+    try:
+        nx, ny = int(fields['NCOLS']), int(fields['NROWS'])
+        step = float(fields['CELLSIZE'])
+        dtype = {'LSBFIRST':'<f4','MSBFIRST':'>f4'}[fields['BYTEORDER'].upper()]
+        origin = []
+        for axis in 'XY':
+            center = axis+'LLCENTER'
+            origin.append(float(fields[center]) if center in fields
+                          else float(fields[axis+'LLCORNER']) + step/2)
+        nodata = np.float32(float(fields.get('NODATA_VALUE','-9999')))
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f'Некорректный заголовок ArcGIS Float Grid: {header.name}.') from exc
+    if min(nx,ny)<2 or step<=0 or not np.isfinite([step,*origin]).all():
+        raise ValueError('FLT требует сетку минимум 2×2, конечные координаты и положительный шаг.')
+    expected = nx * ny * 4
+    if path.stat().st_size != expected:
+        raise ValueError(f'Размер FLT не соответствует заголовку HDR. Ожидается {expected} байт.')
+    raw = np.fromfile(path,dtype=dtype,count=nx*ny)
+    if raw.size != nx*ny:
+        raise ValueError('Файл FLT прочитан не полностью.')
+    # The first stored row is the northern edge, while Grid indexes Y upwards.
+    values = raw.reshape(ny,nx)[::-1].astype(float)
+    values[(values==nodata) | ~np.isfinite(values)] = np.nan
+    return Grid(origin[0]+step*np.arange(nx),origin[1]+step*np.arange(ny),values,path.stem)
 
 
 def read_zmap(path):

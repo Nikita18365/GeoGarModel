@@ -241,6 +241,32 @@ def test_xyz_import_uses_project_crs_independently_of_ml(tmp_path,monkeypatch,qt
     window.close()
 
 
+@pytest.mark.parametrize(('order','dtype','origin'),[
+    ('LSBFIRST','<f4','XLLCORNER 18500000\nYLLCORNER 7800000'),
+    ('MSBFIRST','>f4','XLLCENTER 18500005\nYLLCENTER 7800005'),
+])
+def test_open_arcgis_float_map(tmp_path,monkeypatch,order,dtype,origin):
+    from pyproj import CRS
+    path=tmp_path/'поле.flt'
+    np.array([[7,-9999,5],[2,3,4]],dtype=dtype).tofile(path)
+    path.with_suffix('.hdr').write_text(
+        f'NCOLS 3\nNROWS 2\n{origin}\nCELLSIZE 10\nNODATA_VALUE -9999\nBYTEORDER {order}\n',
+        encoding='ascii')
+    path.with_suffix('.prj').write_text(CRS('EPSG:20918').to_wkt('WKT1_ESRI'),encoding='utf-8')
+    window=MainWindow()
+    window.apply_project_crs('EPSG:20918')
+    monkeypatch.setattr(QFileDialog,'getOpenFileNames',lambda *args:([str(path)],''))
+    try:
+        window.open_grid()
+        raster=window.selected_grid()
+        assert CRS(raster.crs)==CRS('EPSG:20918')
+        np.testing.assert_array_equal(raster.x,[18500005,18500015,18500025])
+        np.testing.assert_array_equal(raster.y,[7800005,7800015])
+        np.testing.assert_array_equal(raster.values,[[2,3,4],[7,np.nan,5]])
+    finally:
+        window.close()
+
+
 def test_xyz_without_header_keeps_first_point(tmp_path):
     from geogarmodel.map_project import read_xyz_table
     path=tmp_path/'source.txt'

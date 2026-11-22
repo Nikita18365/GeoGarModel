@@ -165,7 +165,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         controls = QWidget()
         root_panel = QVBoxLayout(controls)
         data_group=QGroupBox('Открыть карту'); panel=QVBoxLayout(data_group); root_panel.addWidget(data_group)
-        self.button("Открыть GRD / ZMAP / DAT / NPZ", self.open_grid, panel)
+        self.button("Открыть GRD / ZMAP / DAT / NPZ / FLT", self.open_grid, panel)
         self.button("Таблица XYZ → регулярная сетка", self.open_xyz, panel)
         self.layers = LayerList()
         self.layers.setMinimumHeight(100); self.layers.setMaximumHeight(180)
@@ -441,7 +441,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
 
     def open_grid(self):
         if not self.ensure_map_project(): return
-        paths, _ = QFileDialog.getOpenFileNames(self, "Сетки", "", "Grid (*.grd *.zmap *.dat *.npz);;Все файлы (*)")
+        paths, _ = QFileDialog.getOpenFileNames(self, "Сетки", "",
+            "Сетки (*.grd *.zmap *.dat *.npz *.flt *.FLT);;ArcGIS Float Grid (*.flt *.FLT);;Все файлы (*)")
         if not paths: return
         def read_maps():
             maps = []
@@ -458,6 +459,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         for path,grid in loaded:
             if not grid.crs:
                 companion=Path(path).with_suffix('.prj')
+                if not companion.is_file():
+                    companion=Path(path).with_suffix('.PRJ')
                 if companion.exists():
                     from .crs_editor import read_prj
                     grid.crs=read_prj(companion)
