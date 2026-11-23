@@ -26,7 +26,9 @@ def test_windows_key_survives_reopen_in_encrypted_form(tmp_path, monkeypatch):
     assert not reopened.settings.contains(SAVED_KEY)
 
 
-def test_dialog_checks_key_before_connecting_and_allows_retry(tmp_path, qt_application_lifetime, monkeypatch):
+@pytest.mark.parametrize('code, message', [(401, 'отклонила ключ'), (402, 'по условиям оплаты')])
+def test_dialog_checks_key_before_connecting_and_allows_retry(tmp_path, qt_application_lifetime, monkeypatch,
+                                                              code, message):
     monkeypatch.delenv('OLLAMA_API_KEY', raising=False)
     settings = QSettings(str(tmp_path / 'ollama.ini'), QSettings.IniFormat)
     credential = OllamaWebCredential(settings)
@@ -35,7 +37,7 @@ def test_dialog_checks_key_before_connecting_and_allows_retry(tmp_path, qt_appli
     def verify(query, key):
         calls.append(query)
         if key != 'valid-example':
-            raise HTTPError('https://ollama.com/api/web_search', 401, 'unauthorized', {}, None)
+            raise HTTPError('https://ollama.com/api/web_search', code, 'rejected', {}, None)
         return ()
 
     monkeypatch.setattr(ollama_web_ui, 'search_ollama', verify)
@@ -47,7 +49,8 @@ def test_dialog_checks_key_before_connecting_and_allows_retry(tmp_path, qt_appli
         dialog.verify()
         assert QThreadPool.globalInstance().waitForDone(3000)
         qt_application_lifetime.processEvents()
-        assert 'отклонила ключ' in dialog.status.text()
+        assert message in dialog.status.text()
+        assert dialog.billing_link.isHidden() == (code != 402)
         assert credential.current() == ''
         dialog.key.setText('valid-example')
         dialog.verify()
@@ -59,3 +62,17 @@ def test_dialog_checks_key_before_connecting_and_allows_retry(tmp_path, qt_appli
         assert calls == ['geophysical forward modelling'] * 2
     finally:
         dialog.close()
+
+
+def test_web_search_402_preserves_public_fallback(monkeypatch):
+    from geogarmodel import manual_assistant
+
+    def payment_required(*args):
+        raise HTTPError('https://ollama.com/api/web_search', 402, 'payment required', {}, None)
+
+    source = manual_assistant.Passage('Википедия', 'Гравиразведка', 'Описание', 'https://ru.wikipedia.org/')
+    monkeypatch.setattr(manual_assistant, 'search_ollama', payment_required)
+    monkeypatch.setattr(manual_assistant, 'search_web', lambda topic: (source,))
+    sources, notice = manual_assistant.external_sources('Как рассчитывается сила тяжести?', {'грави'}, [],
+                                                       web_key='test-key')
+    assert sources == (source,) and 'HTTP 402' in notice and 'Использованы открытые источники' in notice

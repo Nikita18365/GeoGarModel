@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QVBoxLayout,
 )
 
-from .manual_assistant import search_ollama
+from .manual_assistant import OLLAMA_BILLING_REQUIRED, search_ollama
 from .ollama_credentials import CAN_REMEMBER_KEY, valid_web_key
 
 
@@ -26,6 +26,7 @@ class KeyCheck(QRunnable):
         except HTTPError as error:
             message = {
                 401: 'Ollama отклонила ключ. Проверьте, что он скопирован полностью.',
+                402: OLLAMA_BILLING_REQUIRED,
                 403: 'Ollama запретила доступ. Проверьте ключ и доступ к веб-поиску в аккаунте.',
                 429: 'Превышен лимит запросов Ollama. Повторите проверку позже.',
             }.get(error.code, f'Ollama вернула ошибку HTTP {error.code}.')
@@ -72,6 +73,10 @@ class OllamaWebDialog(QDialog):
         self.status.setWordWrap(True)
         self.status.setTextFormat(Qt.PlainText)
         layout.addWidget(self.status)
+        self.billing_link = QLabel('<a href="https://ollama.com/settings/billing">Открыть настройки оплаты Ollama</a>')
+        self.billing_link.setOpenExternalLinks(True)
+        self.billing_link.hide()
+        layout.addWidget(self.billing_link)
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         self.verify_button = buttons.addButton('Проверить и подключить', QDialogButtonBox.ActionRole)
         self.disconnect_button = buttons.addButton('Отключить', QDialogButtonBox.ActionRole)
@@ -96,6 +101,7 @@ class OllamaWebDialog(QDialog):
         self.remember.setEnabled(False)
         self.verify_button.setEnabled(False)
         self.disconnect_button.setEnabled(False)
+        self.billing_link.hide()
         self.status.setText('Проверяю ключ…')
         self.request = KeyCheck(key)
         self.request.signal.done.connect(self.checked)
@@ -107,6 +113,7 @@ class OllamaWebDialog(QDialog):
             return
         if error:
             self.status.setText(error)
+            self.billing_link.setVisible(error == OLLAMA_BILLING_REQUIRED)
             self.key.setEnabled(True)
             self.remember.setEnabled(True)
             self.verify_button.setEnabled(True)

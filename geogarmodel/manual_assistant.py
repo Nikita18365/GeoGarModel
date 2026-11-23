@@ -19,6 +19,8 @@ MANUALS = ('INTERFACE.md','MODERNIZATION.md','MAP_PROJECTS.md','PROJECTS.md',
            'INITIAL_MODEL.md','INVERSION.md','OPTUNA.md','TELEGRAM.md')
 OFF_TOPIC = 'Задайте вопрос по функционалу GeoGarModel.'
 NO_ANSWER = 'В документации GeoGarModel не найден ответ. Уточните название команды или текст ошибки.'
+OLLAMA_BILLING_REQUIRED = ('Ollama отклонила веб-поиск по условиям оплаты (HTTP 402). '
+                           'Проверьте баланс, способ оплаты и доступ к поиску в аккаунте Ollama.')
 LOCAL, INTERNET, HYBRID = 'local', 'internet', 'hybrid'
 SOURCE_MODES = {
     INTERNET: 'Поиск в интернете',
@@ -235,9 +237,16 @@ def external_sources(question, query, manual, web_key=None):
         providers.append(('Википедия', search_wikipedia, (keywords,)))
 
     unavailable = []
+    billing_notice = ''
     for name, search, args in providers:
         try:
             results = search(*args)
+        except HTTPError as error:
+            if search is search_ollama and error.code == 402:
+                billing_notice = OLLAMA_BILLING_REQUIRED
+            else:
+                unavailable.append(name)
+            continue
         except (URLError, OSError, ValueError, KeyError, TypeError, AttributeError):
             unavailable.append(name)
             continue
@@ -246,7 +255,9 @@ def external_sources(question, query, manual, web_key=None):
             results = tuple(source for source in results
                             if len(keywords & terms(source.heading + ' ' + source.text)) >= 2)
         if results:
-            return results, ''
+            return results, f'{billing_notice} Использованы открытые источники.' if billing_notice else ''
+    if billing_notice:
+        return (), f'{billing_notice} В открытых источниках подходящие материалы не найдены.'
     if not providers:
         return (), 'Для этого вопроса не удалось выделить тему для поиска. Поиск по сайтам доступен с ключом OLLAMA_API_KEY.'
     if unavailable:
