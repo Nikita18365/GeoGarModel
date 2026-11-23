@@ -4,7 +4,7 @@ from html import escape
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal, QSettings
 from PyQt5.QtGui import QColor, QFontDatabase, QTextCursor, QTextLength, QTextOption, QTextTableFormat
 from PyQt5.QtWidgets import (QComboBox, QDockWidget, QDialog, QHBoxLayout, QLabel,
-    QPlainTextEdit, QPushButton, QTextBrowser, QTextEdit, QVBoxLayout, QWidget)
+    QPlainTextEdit, QPushButton, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
 from .manual_assistant import choose_passages, find_passages, OFF_TOPIC, NO_ANSWER, terms
 
@@ -166,6 +166,8 @@ class ManualChat(QDockWidget):
 
 
 def add_manual_assistant(window, header):
+    from .assistant_pet import AssistantPet
+
     settings=QSettings('GeoGarModel','GeoGarModel')
     device=QComboBox()
     device.setAccessibleName('Устройство справочного помощника')
@@ -183,4 +185,11 @@ def add_manual_assistant(window, header):
         if not chat.isHidden():
             chat.input.setFocus()
     button.clicked.connect(toggle)
+    chat.pet = AssistantPet(window,settings,toggle)
+    pet_menu = QToolButton()
+    pet_menu.setText('Питомец')
+    pet_menu.setToolTip('Выбрать или показать питомца')
+    pet_menu.setMenu(chat.pet.menu)
+    pet_menu.setPopupMode(QToolButton.InstantPopup)
+    header.addWidget(pet_menu)
     return chat

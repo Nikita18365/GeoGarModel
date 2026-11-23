@@ -64,3 +64,42 @@ def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lif
         assert '<'+('a'*160)+'>' in chat.history.toPlainText()
     finally:
         window.close()
+
+
+def test_pet_click_drag_and_visibility(qt_application_lifetime,tmp_path):
+    from PyQt5.QtCore import QPoint,QPointF,QSettings,Qt
+    from PyQt5.QtGui import QMouseEvent
+    from PyQt5.QtCore import QEvent
+    from PyQt5.QtWidgets import QApplication,QWidget
+    from geogarmodel.assistant_pet import AssistantPet
+
+    host=QWidget()
+    host.resize(600,500)
+    settings=QSettings(str(tmp_path/'pet.ini'),QSettings.IniFormat)
+    clicks=[]
+    pet=AssistantPet(host,settings,lambda:clicks.append(True))
+    try:
+        host.show()
+        QApplication.processEvents()
+        assert pet.isVisible() and pet.timer.isActive()
+        center=QPoint(46,49)
+        start=pet.mapToGlobal(center)
+        for movement in (QPoint(),QPoint(-45,-25)):
+            origin=pet.pos()
+            pet.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress,QPointF(center),QPointF(start),
+                                           Qt.LeftButton,Qt.LeftButton,Qt.NoModifier))
+            pet.mouseReleaseEvent(QMouseEvent(QEvent.MouseButtonRelease,QPointF(center+movement),
+                                             QPointF(start+movement),Qt.LeftButton,Qt.NoButton,Qt.NoModifier))
+        assert clicks==[True]
+        assert pet.pos()==pet.on_screen(origin+movement)
+        assert settings.value('assistant/petPosition')==pet.pos()
+        for choice in pet.characters.actions():
+            choice.trigger()
+            assert not pet.grab().isNull()
+        assert settings.value('assistant/pet')=='robot'
+        pet.dismiss.click()
+        assert pet.isHidden() and not pet.timer.isActive()
+        pet.visibility_action.trigger()
+        assert pet.isVisible()
+    finally:
+        host.close()
