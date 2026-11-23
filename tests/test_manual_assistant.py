@@ -66,17 +66,23 @@ def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lif
         window.close()
 
 
-def test_pet_click_drag_and_visibility(qt_application_lifetime,tmp_path):
+def test_pet_click_drag_and_visibility(qt_application_lifetime,tmp_path,monkeypatch):
     from PyQt5.QtCore import QPoint,QPointF,QSettings,Qt
     from PyQt5.QtGui import QMouseEvent
     from PyQt5.QtCore import QEvent
-    from PyQt5.QtWidgets import QApplication,QWidget
-    from geogarmodel.assistant_pet import AssistantPet
+    from PyQt5.QtWidgets import QApplication,QToolTip,QWidget
+    from geogarmodel.assistant_pet import AssistantPet,PETS
 
     host=QWidget()
     host.resize(600,500)
     settings=QSettings(str(tmp_path/'pet.ini'),QSettings.IniFormat)
     clicks=[]
+    greetings=[]
+    show_text=QToolTip.showText
+    def say(point,text,*args,**kwargs):
+        greetings.append(text)
+        show_text(point,text,*args,**kwargs)
+    monkeypatch.setattr(QToolTip,'showText',say)
     pet=AssistantPet(host,settings,lambda:clicks.append(True))
     try:
         host.show()
@@ -91,12 +97,22 @@ def test_pet_click_drag_and_visibility(qt_application_lifetime,tmp_path):
             pet.mouseReleaseEvent(QMouseEvent(QEvent.MouseButtonRelease,QPointF(center+movement),
                                              QPointF(start+movement),Qt.LeftButton,Qt.NoButton,Qt.NoModifier))
         assert clicks==[True]
+        assert greetings==['Лиса · '+PETS['fox'][1]]
         assert pet.pos()==pet.on_screen(origin+movement)
         assert settings.value('assistant/petPosition')==pet.pos()
-        for choice in pet.characters.actions():
+        assert len(pet.characters.actions())==6
+        for choice,(key,(_,greeting)) in zip(pet.characters.actions(),PETS.items()):
             choice.trigger()
             assert not pet.grab().isNull()
-        assert settings.value('assistant/pet')=='robot'
+            assert settings.value('assistant/pet')==key
+            point=pet.mapToGlobal(center)
+            pet.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress,QPointF(center),QPointF(point),
+                                           Qt.LeftButton,Qt.LeftButton,Qt.NoModifier))
+            pet.mouseReleaseEvent(QMouseEvent(QEvent.MouseButtonRelease,QPointF(center),QPointF(point),
+                                             Qt.LeftButton,Qt.NoButton,Qt.NoModifier))
+            assert greetings[-1]==f'{choice.text()} · {greeting}'
+            assert pet.reaction>0
+        assert len(set(greetings))==6
         pet.dismiss.click()
         assert pet.isHidden() and not pet.timer.isActive()
         pet.visibility_action.trigger()

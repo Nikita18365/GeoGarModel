@@ -1,12 +1,19 @@
 """A floating GeoGarModel mascot that opens the manual chat."""
 from math import sin
 
-from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
-from PyQt5.QtGui import QColor, QPainter, QPen, QPolygonF
-from PyQt5.QtWidgets import QActionGroup, QApplication, QMenu, QToolButton, QWidget
+from PyQt5.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer
+from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
+from PyQt5.QtWidgets import QActionGroup, QApplication, QMenu, QToolButton, QToolTip, QWidget
 
 
-PETS = {'fox': 'Лиса', 'owl': 'Сова', 'robot': 'Робот'}
+PETS = {
+    'fox': ('Лиса', 'Шур-шур! Какой след найдём в руководстве?'),
+    'owl': ('Сова', 'Угу! Что в GeoGarModel разберём по шагам?'),
+    'robot': ('Робот', 'Бип-бип! Готов искать нужную команду.'),
+    'cat': ('Кот', 'Мяу, что сегодня изучим?'),
+    'paperclip': ('Скрепка', 'Щёлк! Какой раздел руководства открыть?'),
+    'seal': ('Тюлень', 'Плюх! В какую тему нырнём?'),
+}
 
 
 class AssistantPet(QWidget):
@@ -22,6 +29,7 @@ class AssistantPet(QWidget):
         self.press_position = None
         self.dragging = False
         self.frame = 0
+        self.reaction = 0
         self.setObjectName('assistantPet')
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -44,7 +52,7 @@ class AssistantPet(QWidget):
         self.menu = QMenu(window)
         self.characters = QActionGroup(self.menu)
         self.characters.setExclusive(True)
-        for key,label in PETS.items():
+        for key,(label,_) in PETS.items():
             choice = self.menu.addAction(label)
             choice.setCheckable(True)
             choice.setChecked(key==self.character)
@@ -63,6 +71,7 @@ class AssistantPet(QWidget):
     def choose(self,character):
         self.character = character
         self.settings.setValue('assistant/pet',character)
+        self.reaction = 0
         self.update()
 
     def set_pet_visible(self,visible):
@@ -103,6 +112,7 @@ class AssistantPet(QWidget):
 
     def hideEvent(self,event):
         self.timer.stop()
+        self.reaction = 0
         self.press_position = None
         self.dragging = False
         self.setCursor(Qt.OpenHandCursor)
@@ -110,6 +120,7 @@ class AssistantPet(QWidget):
 
     def animate(self):
         self.frame = (self.frame+1)%80
+        self.reaction = max(0,self.reaction-1)
         self.update()
 
     def mousePressEvent(self,event):
@@ -141,6 +152,10 @@ class AssistantPet(QWidget):
             self.settings.setValue('assistant/petPosition',self.pos())
         else:
             self.toggle_chat()
+            self.reaction = 10
+            label,line = PETS[self.character]
+            self.setAccessibleDescription(line)
+            QToolTip.showText(self.mapToGlobal(QPoint(12,-8)),f'{label} · {line}',self,QRect(),3500)
         self.dragging = False
 
     def contextMenuEvent(self,event):
@@ -153,14 +168,13 @@ class AssistantPet(QWidget):
         painter.setBrush(QColor(0,0,0,110))
         painter.drawEllipse(17,79,58,10)
         painter.translate(0,2.4*sin(self.frame*0.157))
+        if self.reaction:
+            painter.translate(0,-5*sin(self.reaction*.65))
         artist = PetDrawing(painter)
-        if self.character=='fox':
-            artist.fox()
-        elif self.character=='owl':
-            artist.owl()
-        else:
-            artist.robot()
-        artist.eyes(self.frame in (36,37,38))
+        drawings = {'fox':artist.fox,'owl':artist.owl,'robot':artist.robot,'cat':artist.cat,
+                    'paperclip':artist.paperclip,'seal':artist.seal}
+        drawings[self.character]()
+        artist.eyes(self.frame in (36,37,38) or self.reaction==9)
 
 
 class PetDrawing:
@@ -214,3 +228,37 @@ class PetDrawing:
         self.painter.drawRoundedRect(18,31,56,46,14,14)
         self.oval('#dcf7ed',24,39,44,23)
         self.oval('#325464',34,65,24,4)
+
+    def cat(self):
+        self.oval('#a36c9e',22,57,54,26)
+        self.poly('#a36c9e',(17,51),(18,16),(41,35),(54,35),(73,16),(76,53))
+        self.poly('#efb9d0',(23,34),(23,24),(34,36))
+        self.poly('#efb9d0',(59,36),(69,24),(69,34))
+        self.oval('#c68eba',16,31,60,44)
+        self.oval('#f6e1ed',32,54,28,16)
+        self.poly('#933f6f',(41,57),(51,57),(46,62))
+        self.painter.setPen(QPen(QColor('#693154'),1.5))
+        for start,end in (((29,55),(15,51)),((28,59),(14,60)),((63,55),(77,51)),((64,59),(78,60))):
+            self.painter.drawLine(QPointF(*start),QPointF(*end))
+
+    def paperclip(self):
+        path = QPainterPath(QPointF(59,26))
+        path.cubicTo(59,16,49,13,41,17)
+        path.cubicTo(34,20,34,27,34,34)
+        path.lineTo(34,68)
+        path.cubicTo(34,88,65,87,65,68)
+        path.lineTo(65,41)
+        path.cubicTo(65,29,47,29,47,41)
+        path.lineTo(47,67)
+        self.painter.setPen(QPen(QColor('#97bce8'),5,Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin))
+        self.painter.drawPath(path)
+        self.oval('#d6edff',20,41,47,21)
+        self.oval('#3383bc',42,64,9,4)
+
+    def seal(self):
+        self.poly('#579497',(29,67),(4,77),(21,83),(43,77),(66,77),(88,74),(75,66))
+        self.oval('#6bafad',13,32,68,48)
+        self.oval('#d9f0e7',31,53,31,19)
+        self.oval('#224a56',42,55,9,6)
+        self.oval('#f7b8ad',22,55,9,5)
+        self.oval('#f7b8ad',62,55,9,5)
