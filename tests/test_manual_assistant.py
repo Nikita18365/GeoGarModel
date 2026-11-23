@@ -43,8 +43,11 @@ def test_sigma_looks_up_explanation_and_supplies_web_source(monkeypatch):
     sources=helpdesk.find_passages(question)
     assert 'Что означает «σ константа»' in sources[0].heading
     assert '1 мГал' in sources[0].text and '1 нТл' in sources[0].text
+    follow_up = helpdesk.find_passages('А в каких единицах она задаётся?', question)
+    assert follow_up[0].heading == sources[0].heading
     web=helpdesk.Passage('Википедия','Взвешенный МНК','Вес данных','https://ru.wikipedia.org/?curid=1')
     queries=[]
+    monkeypatch.delenv('OLLAMA_API_KEY', raising=False)
     monkeypatch.setattr(helpdesk,'search_web',lambda topic:queries.append(topic) or (web,))
 
     class Local:
@@ -58,7 +61,7 @@ def test_sigma_looks_up_explanation_and_supplies_web_source(monkeypatch):
                 {'text':'Ожидаемая погрешность наблюдений','sources':ids,'outside':False})}}).encode())
 
     monkeypatch.setattr(helpdesk,'build_opener',lambda *_:Local())
-    answer=helpdesk.choose_passages(question,sources,'CPU',use_web=True)
+    answer=helpdesk.answer_question(question,'CPU',helpdesk.HYBRID,helpdesk.DEFAULT_MODEL)
     assert answer.sources==(sources[0],web)
     assert queries==['Метод наименьших квадратов взвешенный']
 
@@ -78,6 +81,111 @@ def test_cloud_model_uses_selected_tag_without_schema(monkeypatch):
     monkeypatch.setattr(helpdesk,'build_opener',lambda *_:Local())
     answer=helpdesk.choose_passages('Вопрос',[source],'CPU',model=model)
     assert answer==helpdesk.Answer('Ответ',(source,),False)
+
+
+def test_source_modes_and_web_fallback(monkeypatch):
+    question = 'Зачем задавать сигму при моделировании плотности?'
+    web = helpdesk.Passage('example.org', 'Weights', 'Measurement weights', 'https://example.org/weights')
+    searches = []
+    picked = []
+    monkeypatch.setenv('OLLAMA_API_KEY', 'test-key')
+    monkeypatch.setattr(helpdesk, 'search_ollama', lambda query, key: searches.append((query, key)) or (web,))
+
+    def reply(question, sources, device, previous, **kwargs):
+        picked.append(sources)
+        return helpdesk.Answer('Ответ с источниками', tuple(sources), False)
+
+    monkeypatch.setattr(helpdesk, 'choose_passages', reply)
+    for mode in (helpdesk.LOCAL, helpdesk.INTERNET, helpdesk.HYBRID):
+        helpdesk.answer_question(question, 'CPU', mode, helpdesk.DEFAULT_MODEL)
+    assert all(not passage.url for passage in picked[0])
+    assert picked[1] == [web]
+    assert picked[2][-1] == web and any(not passage.url for passage in picked[2])
+    assert searches == [(question, 'test-key')] * 2
+    monkeypatch.setattr(helpdesk, 'choose_passages', lambda question, sources, *args, **kwargs:
+                        helpdesk.Answer('Ответ по руководству', (sources[0],), False))
+    mixed = helpdesk.answer_question(question, 'CPU', helpdesk.HYBRID, helpdesk.DEFAULT_MODEL)
+    assert mixed.supplement == (web,)
+
+    def offline(*args):
+        raise URLError('offline')
+
+    monkeypatch.setattr(helpdesk, 'search_ollama', offline)
+    monkeypatch.setattr(helpdesk, 'search_web', offline)
+    answer = helpdesk.answer_question(question, 'CPU', helpdesk.INTERNET, helpdesk.DEFAULT_MODEL)
+    assert not answer.sources and 'Внешние источники не получены' in answer.notice
+    answer = helpdesk.answer_question(question, 'CPU', helpdesk.HYBRID, helpdesk.DEFAULT_MODEL)
+    assert answer.sources and all(not passage.url for passage in answer.sources)
+
+
+def test_long_chat_recalls_relevant_turns_and_excludes_fallbacks():
+    from geogarmodel.assistant_history import Message, conversation_context
+
+    source = helpdesk.Passage('INVERSION.md', 'Сигма', 'Погрешность наблюдений')
+    messages = [
+        Message('user', 'Сигма в плотностном моделировании', helpdesk.LOCAL),
+        Message('assistant', 'Сигма — погрешность', helpdesk.LOCAL, (source,)),
+        *(Message('user', f'Как оформить карту {i}?', helpdesk.LOCAL) for i in range(40)),
+        Message('assistant', 'Не удалось ответить', helpdesk.LOCAL, (source,), excerpt=True),
+    ]
+    context = conversation_context(messages, 'Как задать сигму?', helpdesk.LOCAL)
+    assert len(context) == 3
+    assert context[0]['answer'] == 'Сигма — погрешность'
+    assert 'answer' not in context[-1]
+    context = conversation_context(messages, 'Как задать сигму?', helpdesk.INTERNET)
+    assert 'answer' not in context[0]
+
+
+def test_chat_history_reopens_and_keeps_replies_in_origin_chat(qt_application_lifetime, monkeypatch):
+    from PyQt5.QtCore import QThreadPool
+    from PyQt5.QtWidgets import QInputDialog, QMessageBox
+    from geogarmodel.app import MainWindow
+    from geogarmodel import manual_assistant_ui
+
+    contexts = []
+    source = helpdesk.Passage('INVERSION.md', 'Сигма', 'Сигма — погрешность наблюдений.')
+
+    def respond(question, device, mode, model, context):
+        contexts.append(context)
+        return helpdesk.Answer('Погрешность наблюдений.', (source,), False)
+
+    monkeypatch.setattr(manual_assistant_ui, 'answer_question', respond)
+    window = MainWindow()
+    try:
+        chat = window.manual_assistant
+        chat.mode.setCurrentIndex(chat.mode.findData(helpdesk.LOCAL))
+        first = chat.chats.currentData()
+        chat.input.setPlainText('Что такое сигма?')
+        chat.ask()
+        chat.new_chat()
+        second = chat.chats.currentData()
+        assert first != second
+        assert QThreadPool.globalInstance().waitForDone(3000)
+        qt_application_lifetime.processEvents()
+        assert 'Погрешность наблюдений.' not in chat.history.toPlainText()
+        chat.chats.setCurrentIndex(chat.chats.findData(first))
+        monkeypatch.setattr(QInputDialog, 'getText', lambda *args, **kwargs: ('Параметры инверсии', True))
+        chat.rename_chat()
+    finally:
+        window.close()
+
+    window = MainWindow()
+    try:
+        chat = window.manual_assistant
+        assert chat.chats.currentText() == 'Параметры инверсии'
+        assert chat.mode.currentData() == helpdesk.LOCAL
+        assert 'Погрешность наблюдений.' in chat.history.toPlainText()
+        assert chat.sources == [source]
+        chat.input.setPlainText('А в каких единицах она задаётся?')
+        chat.ask()
+        assert QThreadPool.globalInstance().waitForDone(3000)
+        qt_application_lifetime.processEvents()
+        assert contexts == [[], [{'question': 'Что такое сигма?', 'answer': 'Погрешность наблюдений.'}]]
+        monkeypatch.setattr(QMessageBox, 'question', lambda *args, **kwargs: QMessageBox.Yes)
+        chat.delete_chat()
+        assert chat.chats.currentData() == second and chat.store.messages(first) == []
+    finally:
+        window.close()
 
 
 def test_model_picker_displays_model_specific_commands(qt_application_lifetime,monkeypatch):
@@ -103,7 +211,7 @@ def test_model_picker_displays_model_specific_commands(qt_application_lifetime,m
 
 
 def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lifetime):
-    from PyQt5.QtCore import Qt
+    from PyQt5.QtCore import Qt, QThreadPool
     from PyQt5.QtGui import QTextOption
     from PyQt5.QtTest import QTest
     from PyQt5.QtWidgets import QPushButton
@@ -125,6 +233,8 @@ def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lif
         QTest.keyClick(chat.input,Qt.Key_Return,Qt.ShiftModifier)
         chat.input.insertPlainText('<'+('a'*160)+'>')
         QTest.keyClick(chat.input,Qt.Key_Return)
+        assert QThreadPool.globalInstance().waitForDone(3000)
+        qt_application_lifetime.processEvents()
         assert not chat.input.toPlainText()
         assert helpdesk.OFF_TOPIC in chat.history.toPlainText()
         assert USER_MESSAGE_COLOR in chat.history.toHtml()
@@ -134,18 +244,21 @@ def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lif
 
 
 def test_variable_height_question_gets_direct_answer_in_chat(qt_application_lifetime,monkeypatch):
+    from PyQt5.QtCore import QThreadPool
     from geogarmodel.app import MainWindow
-    from geogarmodel import manual_assistant_ui
 
     def unexpected_request(*args,**kwargs):
         pytest.fail('Вопрос о переменной высоте должен обрабатываться без вызова Ollama.')
-    monkeypatch.setattr(manual_assistant_ui,'ManualRequest',unexpected_request)
+    monkeypatch.setattr(helpdesk,'choose_passages',unexpected_request)
     question='Возможно ли 3D-моделирование плотности в данной программе, если наблюдения выполнялись на переменной высоте, не на константе'
     window=MainWindow()
     try:
         chat=window.manual_assistant
+        chat.mode.setCurrentIndex(chat.mode.findData(helpdesk.LOCAL))
         chat.input.setPlainText(question)
         chat.ask()
+        assert QThreadPool.globalInstance().waitForDone(3000)
+        qt_application_lifetime.processEvents()
         transcript=chat.history.toPlainText()
         assert transcript.count(question)==1
         assert 'Да. Для наблюдений на разных высотах' in transcript

@@ -2,14 +2,17 @@
 from html import escape
 from pathlib import Path
 import re
+import sqlite3
 
-from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal, QSettings, QUrl
+from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal, QSettings, QStandardPaths, QUrl
 from PyQt5.QtGui import (QColor, QDesktopServices, QFontDatabase, QTextCursor,
     QTextDocument, QTextDocumentFragment, QTextLength, QTextOption, QTextTableFormat)
-from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDialog, QHBoxLayout, QLabel,
-    QPlainTextEdit, QPushButton, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget)
+from PyQt5.QtWidgets import (QComboBox, QDockWidget, QDialog, QHBoxLayout, QInputDialog,
+    QLabel, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QTextBrowser, QTextEdit,
+    QToolButton, QVBoxLayout, QWidget)
 
-from .manual_assistant import AnswerFailure, choose_passages, find_passages, verified_answer, OFF_TOPIC, NO_ANSWER, terms
+from .assistant_history import ChatStore, Message, conversation_context
+from .manual_assistant import HYBRID, INTERNET, LOCAL, SOURCE_MODES, OFF_TOPIC, NO_ANSWER, answer_question
 from .ollama_catalog import DEFAULT_MODEL, is_cloud, valid_model
 
 
@@ -83,13 +86,18 @@ class ReplySignal(QObject):
 
 
 class ManualRequest(QRunnable):
-    def __init__(self, question, sources, device, previous, use_web, model):
+    def __init__(self, question, device, mode, model, context):
         super().__init__()
-        self.args = question,sources,device,previous,use_web,model
+        self.args = question, device, mode, model, context
         self.signal = ReplySignal()
 
     def run(self):
-        self.signal.done.emit(choose_passages(*self.args))
+        self.signal.done.emit(answer_question(*self.args))
+
+
+def chat_store():
+    folder = Path(QStandardPaths.writableLocation(QStandardPaths.GenericDataLocation))
+    return ChatStore(folder / 'GeoGarModel' / 'assistant.sqlite3')
 
 
 class ManualChat(QDockWidget):
@@ -100,12 +108,36 @@ class ManualChat(QDockWidget):
         self.settings = QSettings('GeoGarModel','GeoGarModel')
         configured_model = self.settings.value('assistant/model',DEFAULT_MODEL,type=str)
         self.model = configured_model if valid_model(configured_model) else DEFAULT_MODEL
-        self.previous = ''
+        try:
+            self.store = chat_store()
+        except (OSError, sqlite3.Error):
+            self.store = ChatStore(None)
+        self.pending = None
         self.sources = []
         font=chat_font()
         self.chat_font=font
         body = QWidget()
         column = QVBoxLayout(body)
+        toolbar = QHBoxLayout()
+        column.addLayout(toolbar)
+        self.chats = QComboBox()
+        self.chats.setMinimumContentsLength(14)
+        self.chats.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.chats.setAccessibleName('История чатов')
+        self.chats.currentIndexChanged.connect(self.load_chat)
+        toolbar.addWidget(self.chats, 1)
+        new_button = QPushButton('+ Новый чат')
+        new_button.clicked.connect(self.new_chat)
+        toolbar.addWidget(new_button)
+        actions = QToolButton()
+        actions.setText('⋯')
+        actions.setAccessibleName('Действия с чатом')
+        actions.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(actions)
+        menu.addAction('Переименовать чат…', self.rename_chat)
+        menu.addAction('Удалить чат…', self.delete_chat)
+        actions.setMenu(menu)
+        toolbar.addWidget(actions)
         self.history = QTextBrowser()
         self.history.setFont(font)
         self.history.document().setDefaultFont(font)
@@ -116,7 +148,6 @@ class ManualChat(QDockWidget):
         self.history.setOpenLinks(False)
         self.history.anchorClicked.connect(self.show_source)
         self.history.setMinimumWidth(340)
-        self.history.append('Задайте вопрос о GeoGarModel или о методе, который используется в программе.')
         column.addWidget(self.history,1)
         self.model_button = QPushButton()
         self.model_button.clicked.connect(self.choose_model)
@@ -137,17 +168,79 @@ class ManualChat(QDockWidget):
         self.send = QPushButton('Спросить')
         self.send.clicked.connect(self.ask)
         row.addWidget(self.send,0,Qt.AlignBottom)
-        self.web = QCheckBox('Дополнять ответ интернет-источниками')
-        self.web.setChecked(self.settings.value('assistant/web',True,type=bool))
-        self.web.setToolTip('В Википедию отправляется название темы. При выборе облачной модели текст вопроса получает Ollama Cloud.')
-        self.web.toggled.connect(lambda value:self.settings.setValue('assistant/web',value))
-        column.addWidget(self.web)
+        self.mode = QComboBox()
+        self.mode.setAccessibleName('Источники ответа')
+        for key, label in SOURCE_MODES.items():
+            self.mode.addItem(label, key)
+        default_mode = HYBRID if self.settings.value('assistant/web', True, type=bool) else LOCAL
+        saved_mode = self.settings.value('assistant/sourceMode', default_mode, type=str)
+        self.mode.setCurrentIndex(self.mode.findData(saved_mode if saved_mode in SOURCE_MODES else default_mode))
+        self.mode.setToolTip('Википедия получает название темы. Если настроен ключ поиска Ollama, '
+                             'его сервис получает текущий вопрос. Облачная модель получает также контекст чата.')
+        self.mode.currentIndexChanged.connect(
+            lambda: self.settings.setValue('assistant/sourceMode', self.mode.currentData()))
+        column.addWidget(self.mode)
         self.status = QLabel()
         self.status.setWordWrap(True)
         column.addWidget(self.status)
+        if self.store.path is None:
+            warning = QLabel('Хранилище чатов недоступно. Переписка сохранится только до закрытия программы.')
+            warning.setWordWrap(True)
+            column.addWidget(warning)
         self.setWidget(body)
         window.addDockWidget(Qt.RightDockWidgetArea,self)
+        self.refresh_chats(self.settings.value('assistant/activeChat', 0, type=int))
         self.hide()
+
+    def refresh_chats(self, selected=None):
+        rows = self.store.chats()
+        if not rows:
+            selected = self.store.create()
+            rows = self.store.chats()
+        self.chats.blockSignals(True)
+        self.chats.clear()
+        for chat_id, title in rows:
+            self.chats.addItem(title, chat_id)
+        self.chats.setCurrentIndex(max(0, self.chats.findData(selected)))
+        self.chats.blockSignals(False)
+        self.load_chat()
+
+    def load_chat(self):
+        chat_id = self.chats.currentData()
+        if self.store.path is not None:
+            self.settings.setValue('assistant/activeChat', chat_id)
+        self.chats.setToolTip(self.chats.currentText())
+        self.history.clear()
+        self.sources.clear()
+        messages = self.store.messages(chat_id)
+        if not messages:
+            self.history.append('Задайте вопрос о GeoGarModel или о методе, который используется в программе.')
+        for message in messages:
+            self.render_message(message)
+        self.status.setText('Готовлю ответ по источникам…' if self.pending and self.pending[0] == chat_id else '')
+
+    def new_chat(self):
+        self.input.clear()
+        self.refresh_chats(self.store.create())
+        self.input.setFocus()
+
+    def rename_chat(self):
+        title, accepted = QInputDialog.getText(self, 'Переименовать чат', 'Название',
+                                               text=self.chats.currentText())
+        if accepted and title.strip():
+            title = title.strip()[:120]
+            self.store.rename(self.chats.currentData(), title)
+            self.chats.setItemText(self.chats.currentIndex(), title)
+            self.chats.setToolTip(title)
+
+    def delete_chat(self):
+        chat_id = self.chats.currentData()
+        title = self.chats.currentText()
+        if QMessageBox.question(self, 'Удалить чат', f'Удалить «{title}» и всю его переписку?',
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+            self.store.delete(chat_id)
+            self.input.clear()
+            self.refresh_chats()
 
     def update_model_label(self):
         cloud = is_cloud(self.model)
@@ -172,24 +265,35 @@ class ManualChat(QDockWidget):
             return
         self.status.clear()
         self.input.clear()
-        self.append_question(question)
-        previous=self.previous
-        answer=verified_answer(question)
-        if answer is not None:
-            self.pending=(question,answer.sources)
-            self.received(answer)
-            return
-        candidates=find_passages(question,previous)
-        if not candidates:
-            in_scope='geogarmodel' in question.casefold() or 'програм' in question.casefold()
-            self.history.append(NO_ANSWER if in_scope else OFF_TOPIC)
-            return
+        chat_id = self.chats.currentData()
+        mode = self.mode.currentData()
+        messages = self.store.messages(chat_id)
+        context = conversation_context(messages, question, mode)
+        message = Message('user', question, mode)
+        self.store.append(chat_id, message)
+        self.render_message(message)
+        if not messages and self.chats.currentText() == 'Новый чат':
+            title = ' '.join(question.split())
+            if len(title) > 56:
+                title = title[:55].rstrip() + '…'
+            self.store.rename(chat_id, title)
+            self.chats.setItemText(self.chats.currentIndex(), title)
+            self.chats.setToolTip(title)
         self.send.setEnabled(False)
         self.status.setText('Готовлю ответ по источникам…')
-        self.request=ManualRequest(question,candidates,self.device.currentText(),previous,self.web.isChecked(),self.model)
+        self.request=ManualRequest(question,self.device.currentText(),mode,self.model,context)
         self.request.signal.done.connect(self.received)
-        self.pending=(question,candidates)
+        self.pending=(chat_id, mode)
         QThreadPool.globalInstance().start(self.request)
+
+    def render_message(self, message):
+        if message.role == 'user':
+            self.append_question(message.text)
+            return
+        if message.text:
+            self.append_markdown(message.text)
+        for passage in message.sources:
+            self.append_source(passage, excerpt=message.excerpt)
 
     def append_question(self,question):
         cursor=QTextCursor(self.history.document())
@@ -212,30 +316,30 @@ class ManualChat(QDockWidget):
         self.history.ensureCursorVisible()
 
     def received(self,answer):
-        question,candidates=self.pending
+        chat_id, mode = self.pending
+        self.pending = None
         self.send.setEnabled(True)
-        self.status.clear()
-        if answer is None or isinstance(answer, AnswerFailure):
-            self.status.setText(answer.message if answer else f'Не удалось получить ответ от {self.model}.')
-            if terms(question):
-                self.previous=question
-            for passage in candidates[:1 if 'sigma' in terms(question) else 2]:
-                self.append_source(passage,excerpt=True)
+        if self.chats.findData(chat_id) < 0:
             return
+        text = answer.text if answer.sources else ''
         if answer.outside:
-            self.history.append(OFF_TOPIC)
-            return
-        if not answer.text or not answer.sources:
-            self.history.append(NO_ANSWER)
-            if answer.sources:
-                for passage in answer.sources[:2]:
-                    self.append_source(passage,excerpt=True)
-            return
-        if terms(question):
-            self.previous=question
-        self.append_markdown(answer.text)
-        for passage in answer.sources:
-            self.append_source(passage)
+            text = OFF_TOPIC
+        elif not text and not (answer.excerpt and answer.sources):
+            text = ('По найденным веб-источникам ответ подтвердить не удалось.'
+                    if mode == INTERNET else NO_ANSWER)
+        if answer.notice:
+            self.save_reply(chat_id, Message('notice', answer.notice, mode))
+        self.save_reply(chat_id, Message('assistant', text, mode, answer.sources, answer.excerpt))
+        if answer.supplement:
+            self.save_reply(chat_id, Message('reference', '**Дополнительные выдержки**', mode,
+                                             answer.supplement, excerpt=True))
+        if self.chats.currentData() == chat_id:
+            self.status.clear()
+
+    def save_reply(self, chat_id, message):
+        self.store.append(chat_id, message)
+        if self.chats.currentData() == chat_id:
+            self.render_message(message)
 
     def append_source(self,passage,excerpt=False):
         self.sources.append(passage)
