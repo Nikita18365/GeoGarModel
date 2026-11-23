@@ -221,10 +221,10 @@ def wikipedia_keywords(question, manual):
     return ' '.join(query[:6]) if len(query) >= 2 else ''
 
 
-def external_sources(question, query, manual):
+def external_sources(question, query, manual, web_key=None):
     topic = next((label for keys, label in WEB_TOPICS if keys & query), None)
     keywords = wikipedia_keywords(question, manual)
-    key = os.environ.get('OLLAMA_API_KEY', '').strip()
+    key = os.environ.get('OLLAMA_API_KEY', '').strip() if web_key is None else web_key
     providers = []
     if key:
         providers.append(('Ollama Web Search', search_ollama, (question, key)))
@@ -257,7 +257,8 @@ def external_sources(question, query, manual):
 def search_ollama(question, key):
     data = json.dumps({'query': question, 'max_results': 3}).encode('utf-8')
     request = Request('https://ollama.com/api/web_search', data,
-                      {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'})
+                      {'Content-Type': 'application/json'})
+    request.add_unredirected_header('Authorization', f'Bearer {key}')
     with build_opener().open(request, timeout=10) as response:
         results = json.load(response)['results']
     sources = []
@@ -268,7 +269,7 @@ def search_ollama(question, key):
     return tuple(sources)
 
 
-def answer_question(question, device, mode, model, context=()):
+def answer_question(question, device, mode, model, context=(), *, web_key=None):
     previous = context[-1]['question'] if context else ''
     manual = find_passages(question, previous)
     direct = verified_answer(question) if mode != INTERNET else None
@@ -283,7 +284,7 @@ def answer_question(question, device, mode, model, context=()):
         if not (manual or direct or any(keys & query for keys, _ in WEB_TOPICS)
                 or 'geogarmodel' in question.casefold()):
             return Answer('', (), True)
-        web, notice = external_sources(question, query, manual)
+        web, notice = external_sources(question, query, manual, web_key)
 
     if direct and not web:
         return replace(direct, notice=notice)

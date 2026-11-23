@@ -102,6 +102,11 @@ def test_source_modes_and_web_fallback(monkeypatch):
     assert picked[1] == [web]
     assert picked[2][-1] == web and any(not passage.url for passage in picked[2])
     assert searches == [(question, 'test-key')] * 2
+    helpdesk.answer_question(question, 'CPU', helpdesk.INTERNET, helpdesk.DEFAULT_MODEL, web_key='dialog-key')
+    assert searches[-1] == (question, 'dialog-key')
+    monkeypatch.setattr(helpdesk, 'search_web', lambda topic: (web,))
+    helpdesk.answer_question(question, 'CPU', helpdesk.INTERNET, helpdesk.DEFAULT_MODEL, web_key='')
+    assert len(searches) == 3
     monkeypatch.setattr(helpdesk, 'choose_passages', lambda question, sources, *args, **kwargs:
                         helpdesk.Answer('Ответ по руководству', (sources[0],), False))
     mixed = helpdesk.answer_question(question, 'CPU', helpdesk.HYBRID, helpdesk.DEFAULT_MODEL)
@@ -177,7 +182,8 @@ def test_chat_history_reopens_and_keeps_replies_in_origin_chat(qt_application_li
     contexts = []
     source = helpdesk.Passage('INVERSION.md', 'Сигма', 'Сигма — погрешность наблюдений.')
 
-    def respond(question, device, mode, model, context):
+    def respond(question, device, mode, model, context, *, web_key):
+        assert web_key == ''
         contexts.append(context)
         return helpdesk.Answer('Погрешность наблюдений.', (source,), False)
 

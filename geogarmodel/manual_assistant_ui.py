@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (QComboBox, QDockWidget, QDialog, QHBoxLayout, QInpu
 from .assistant_history import ChatStore, Message, conversation_context
 from .manual_assistant import HYBRID, INTERNET, LOCAL, SOURCE_MODES, OFF_TOPIC, NO_ANSWER, answer_question
 from .ollama_catalog import DEFAULT_MODEL, is_cloud, valid_model
+from .ollama_credentials import OllamaWebCredential
 
 
 USER_MESSAGE_COLOR = '#203b54'
@@ -86,13 +87,18 @@ class ReplySignal(QObject):
 
 
 class ManualRequest(QRunnable):
-    def __init__(self, question, device, mode, model, context):
+    def __init__(self, question, device, mode, model, context, web_key):
         super().__init__()
         self.args = question, device, mode, model, context
+        self.web_key = web_key
         self.signal = ReplySignal()
 
     def run(self):
-        self.signal.done.emit(answer_question(*self.args))
+        try:
+            answer = answer_question(*self.args, web_key=self.web_key)
+        finally:
+            self.web_key = ''
+        self.signal.done.emit(answer)
 
 
 def chat_store():
@@ -106,6 +112,7 @@ class ManualChat(QDockWidget):
         self.setObjectName('manualAssistant')
         self.device = device
         self.settings = QSettings('GeoGarModel','GeoGarModel')
+        self.web_credential = OllamaWebCredential(self.settings)
         configured_model = self.settings.value('assistant/model',DEFAULT_MODEL,type=str)
         self.model = configured_model if valid_model(configured_model) else DEFAULT_MODEL
         try:
@@ -179,7 +186,14 @@ class ManualChat(QDockWidget):
                              'его сервис получает текущий вопрос. Облачная модель получает также контекст чата.')
         self.mode.currentIndexChanged.connect(
             lambda: self.settings.setValue('assistant/sourceMode', self.mode.currentData()))
-        column.addWidget(self.mode)
+        sources_row = QHBoxLayout()
+        sources_row.addWidget(self.mode, 1)
+        self.web_button = QPushButton()
+        self.web_button.setAccessibleName('Настроить ключ веб-поиска Ollama')
+        self.web_button.clicked.connect(self.configure_web_search)
+        sources_row.addWidget(self.web_button)
+        column.addLayout(sources_row)
+        self.update_web_label()
         self.status = QLabel()
         self.status.setWordWrap(True)
         column.addWidget(self.status)
@@ -191,6 +205,23 @@ class ManualChat(QDockWidget):
         window.addDockWidget(Qt.RightDockWidgetArea,self)
         self.refresh_chats(self.settings.value('assistant/activeChat', 0, type=int))
         self.hide()
+
+    def update_web_label(self):
+        connected = bool(self.web_credential.current())
+        self.web_button.setText('Веб-поиск ✓' if connected else 'Подключить поиск…')
+        self.web_button.setToolTip('Ключ Ollama подключён. Нажмите для настройки.' if connected else
+                                   'Подключить ключ Ollama для поиска по сайтам.')
+
+    def configure_web_search(self):
+        from .ollama_web_ui import OllamaWebDialog
+
+        dialog = OllamaWebDialog(self, self.web_credential)
+        try:
+            if dialog.exec_() == QDialog.Accepted:
+                self.update_web_label()
+                self.status.setText(dialog.result_message)
+        finally:
+            dialog.deleteLater()
 
     def refresh_chats(self, selected=None):
         rows = self.store.chats()
@@ -281,7 +312,8 @@ class ManualChat(QDockWidget):
             self.chats.setToolTip(title)
         self.send.setEnabled(False)
         self.status.setText('Готовлю ответ по источникам…')
-        self.request=ManualRequest(question,self.device.currentText(),mode,self.model,context)
+        web_key = self.web_credential.current() if mode != LOCAL else ''
+        self.request=ManualRequest(question,self.device.currentText(),mode,self.model,context,web_key)
         self.request.signal.done.connect(self.received)
         self.pending=(chat_id, mode)
         QThreadPool.globalInstance().start(self.request)
