@@ -110,6 +110,36 @@ def find_passages(question, previous=''):
     return [passage for value,_,passage in ranked[:5] if value>=score*.45]
 
 
+def verified_answer(question):
+    """Use the documented method comparison for questions about variable flight height."""
+    query = question.casefold()
+    height = re.search(r'высот[а-я]*|\bheight\b|\belevation\b',query)
+    varying = re.search(r'переменн|разн[а-я]*\s+высот|высот[а-я]*\s+разн|непостоян|не\s+(?:на\s+)?констант|не\s+одинаков',query)
+    scope = re.search(r'моделир|инверси|плотност|магнит|3[дd]|\bfft\b|призм|наблюден|съемк|съёмк',query)
+    if not (height and varying and scope):
+        return None
+    sections=tuple(p for p in passages() if p.file=='INVERSION.md'
+                   and p.heading.startswith('Можно ли выполнить 3D-моделирование при переменной высоте'))
+    if not sections:
+        return None
+    text='\n\n'.join(p.text for p in sections)
+    if re.search(r'\bfft\b|послой',query) and 'призм' not in query:
+        text='**Для послойной 2D FFT — нет.** '+text.replace('**Да. ', '**',1)
+    return Answer(text,sections[:1],False)
+
+
+def strip_question_echo(message,question):
+    def normalize(text):
+        return ' '.join(re.findall(r'\w+',text.casefold()))
+    expected=normalize(question)
+    while message:
+        line,_,remaining=message.partition('\n')
+        if normalize(line)!=expected:
+            break
+        message=remaining.lstrip()
+    return message
+
+
 @lru_cache(maxsize=1)
 def search_index():
     rows = [(p,terms(p.heading),terms(p.text)) for p in passages()]
@@ -149,6 +179,7 @@ def choose_passages(question, sources, device, previous='', use_web=False):
                    messages=[
                        {'role':'system','content':'Ты помощник GeoGarModel. Ответь по-русски своими словами, начиная с прямого ответа. '
                         'Для вопроса о параметре объясни смысл, единицы и пример, если это подтверждают источники. '
+                        'Не повторяй вопрос. Если спрашивают о возможности, начни с ответа и укажи необходимые условия. '
                         'Устройство программы описывай только по её руководству. Интернет-источники используй для общего контекста. '
                         'Верни только номера источников, на которые опирался. Для посторонней темы верни outside=true и пустые text и sources. '
                         'Если ответ не подтверждён источниками, верни outside=false и пустые text и sources. '
@@ -172,4 +203,4 @@ def choose_passages(question, sources, device, previous='', use_web=False):
             raise ValueError('Invalid answer')
     except (URLError,OSError,ValueError,KeyError,TypeError):
         return None
-    return Answer(message.strip(),tuple(sources[i-1] for i in dict.fromkeys(selected)),outside)
+    return Answer(strip_question_echo(message.strip(),question),tuple(sources[i-1] for i in dict.fromkeys(selected)),outside)

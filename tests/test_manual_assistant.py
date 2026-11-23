@@ -92,6 +92,34 @@ def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lif
         window.close()
 
 
+def test_variable_height_question_gets_direct_answer_in_chat(qt_application_lifetime,monkeypatch):
+    from geogarmodel.app import MainWindow
+    from geogarmodel import manual_assistant_ui
+
+    def unexpected_request(*args,**kwargs):
+        pytest.fail('Вопрос о переменной высоте должен обрабатываться без вызова Ollama.')
+    monkeypatch.setattr(manual_assistant_ui,'ManualRequest',unexpected_request)
+    question='Возможно ли 3D-моделирование плотности в данной программе, если наблюдения выполнялись на переменной высоте, не на константе'
+    window=MainWindow()
+    try:
+        chat=window.manual_assistant
+        chat.input.setPlainText(question)
+        chat.ask()
+        transcript=chat.history.toPlainText()
+        assert transcript.count(question)==1
+        assert 'Да. Для наблюдений на разных высотах' in transcript
+        assert 'Прямой расчёт по призмам' in transcript
+        assert 'Высота Up, м' in transcript
+        assert 'требует, чтобы все наблюдения лежали на одной высоте' in transcript
+        assert chat.sources[0].file=='INVERSION.md'
+        fft=helpdesk.verified_answer('Можно ли выполнить 2D FFT, если высоты разные?')
+        assert fft.text.startswith('**Для послойной 2D FFT — нет.**')
+        assert helpdesk.strip_question_echo('**'+question+'**\n\nДа, методом призм.',question)=='Да, методом призм.'
+        assert helpdesk.strip_question_echo(question,question)==''
+    finally:
+        window.close()
+
+
 def test_assistant_markdown_preserves_styles_and_numbered_steps(qt_application_lifetime):
     from PyQt5.QtGui import QFont,QTextCursor
     from geogarmodel.app import MainWindow

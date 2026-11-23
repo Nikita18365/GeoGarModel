@@ -9,7 +9,7 @@ from PyQt5.QtGui import (QColor, QDesktopServices, QFontDatabase, QTextCursor,
 from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDialog, QHBoxLayout, QLabel,
     QPlainTextEdit, QPushButton, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
-from .manual_assistant import choose_passages, find_passages, OFF_TOPIC, NO_ANSWER, terms
+from .manual_assistant import choose_passages, find_passages, verified_answer, OFF_TOPIC, NO_ANSWER, terms
 
 
 USER_MESSAGE_COLOR = '#203b54'
@@ -153,6 +153,11 @@ class ManualChat(QDockWidget):
         self.input.clear()
         self.append_question(question)
         previous=self.previous
+        answer=verified_answer(question)
+        if answer is not None:
+            self.pending=(question,answer.sources)
+            self.received(answer)
+            return
         candidates=find_passages(question,previous)
         if not candidates:
             in_scope='geogarmodel' in question.casefold() or 'програм' in question.casefold()
@@ -201,6 +206,9 @@ class ManualChat(QDockWidget):
             return
         if not answer.text or not answer.sources:
             self.history.append(NO_ANSWER)
+            if answer.sources:
+                for passage in answer.sources[:2]:
+                    self.append_source(passage,excerpt=True)
             return
         if terms(question):
             self.previous=question
