@@ -254,8 +254,10 @@ def test_workflow_and_separate_editor(monkeypatch):
 
 def test_running_job_keeps_navigation_but_freezes_inputs(monkeypatch):
     from threading import Event
+    from PyQt5 import sip
     from PyQt5.QtTest import QTest
     from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QDialog,QSpinBox
     import geogarmodel.inversion_ui as ui
     gate=Event(); original=ui.invert
     def delayed(*args,**kwargs):
@@ -263,6 +265,9 @@ def test_running_job_keeps_navigation_but_freezes_inputs(monkeypatch):
         return original(*args,**kwargs)
     monkeypatch.setattr(ui,'invert',delayed)
     window=MainWindow(); tab=window.inversion; tab.demo(); tab.iterations.setValue(1)
+    dialog=QDialog(tab.parameter_panel)
+    dialog_spin=QSpinBox(dialog)
+    temporary=QSpinBox(tab.parameter_panel)
     tab.workflow.setCurrentIndex(2); tab.run()
     try:
         for i,button in enumerate(tab.workflow.buttons):
@@ -270,6 +275,10 @@ def test_running_job_keeps_navigation_but_freezes_inputs(monkeypatch):
             button.click(); assert tab.workflow.currentIndex()==i
         assert tab.parameter_panel.isEnabled()
         assert tab.nx.isReadOnly() and tab.initial.isReadOnly()
+        assert not dialog_spin.isReadOnly()
+        assert temporary.isReadOnly()
+        sip.delete(temporary)
+        sip.delete(dialog)
         value=tab.nx.value(); QTest.keyClick(tab.nx,Qt.Key_Up)
         assert tab.nx.value()==value
         assert not tab.east.isEnabled() and not tab.mode.isEnabled()

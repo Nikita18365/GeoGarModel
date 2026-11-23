@@ -4,6 +4,7 @@ import json
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
+from PyQt5 import sip
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from time import perf_counter
 from PyQt5.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QGroupBox,
@@ -283,6 +284,9 @@ class InversionTab(QWidget):
         """Freeze settings, retaining enabled page navigation and scroll areas."""
         self._locked_inputs=[]
         for widget in self.parameter_panel.findChildren(QWidget):
+            # Dialogs may be owned by the panel, but their controls are temporary.
+            if widget.window() is not self.window():
+                continue
             if isinstance(widget,QAbstractSpinBox):
                 self._locked_inputs.append((widget,'readonly',widget.isReadOnly()))
             elif isinstance(widget,QLineEdit) and not isinstance(widget.parent(),QAbstractSpinBox):
@@ -294,10 +298,12 @@ class InversionTab(QWidget):
             else: widget.setEnabled(False)
 
     def unlock_inputs(self):
-        for widget,kind,value in self._locked_inputs:
+        locked,self._locked_inputs=self._locked_inputs,[]
+        for widget,kind,value in locked:
+            if sip.isdeleted(widget):
+                continue
             if kind=='readonly': widget.setReadOnly(value)
             else: widget.setEnabled(value)
-        self._locked_inputs=[]
     @staticmethod
     def number(lo,hi,val,decimals=2):
         w=QDoubleSpinBox(); w.setDecimals(decimals); w.setRange(lo,hi); w.setValue(val); return w
