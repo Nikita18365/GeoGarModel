@@ -1,9 +1,9 @@
 """A floating GeoGarModel mascot that opens the manual chat."""
 from math import sin
 
-from PyQt5.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer
+from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
 from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
-from PyQt5.QtWidgets import QActionGroup, QApplication, QMenu, QToolButton, QToolTip, QWidget
+from PyQt5.QtWidgets import QActionGroup, QApplication, QLabel, QMenu, QToolButton, QWidget
 
 
 PETS = {
@@ -49,6 +49,18 @@ class AssistantPet(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(75)
         self.timer.timeout.connect(self.animate)
+        self.greeting = QLabel('',self,Qt.Tool|Qt.FramelessWindowHint|Qt.WindowDoesNotAcceptFocus)
+        self.greeting.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.greeting.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.greeting.setWordWrap(True)
+        self.greeting.setFixedWidth(270)
+        self.greeting.setStyleSheet('QLabel {color: #f1f7ff; background: #182b43; '
+                                    'border: 1px solid #34506b; border-radius: 7px; padding: 8px;}')
+        self.greeting_timer = QTimer(self)
+        self.greeting_timer.setSingleShot(True)
+        self.greeting_timer.setTimerType(Qt.PreciseTimer)
+        self.greeting_timer.setInterval(7000)
+        self.greeting_timer.timeout.connect(self.greeting.hide)
         self.menu = QMenu(window)
         self.characters = QActionGroup(self.menu)
         self.characters.setExclusive(True)
@@ -72,6 +84,8 @@ class AssistantPet(QWidget):
         self.character = character
         self.settings.setValue('assistant/pet',character)
         self.reaction = 0
+        self.greeting_timer.stop()
+        self.greeting.hide()
         self.update()
 
     def set_pet_visible(self,visible):
@@ -112,11 +126,27 @@ class AssistantPet(QWidget):
 
     def hideEvent(self,event):
         self.timer.stop()
+        self.greeting_timer.stop()
+        self.greeting.hide()
         self.reaction = 0
         self.press_position = None
         self.dragging = False
         self.setCursor(Qt.OpenHandCursor)
         super().hideEvent(event)
+
+    def position_greeting(self):
+        area = (QApplication.screenAt(self.mapToGlobal(self.rect().center())) or self.host.screen()).availableGeometry()
+        x = self.x()+(self.width()-self.greeting.width())//2
+        x = max(area.left(),min(x,area.right()-self.greeting.width()+1))
+        y = self.y()-self.greeting.height()-6
+        if y<area.top():
+            y = self.y()+self.height()+6
+        self.greeting.move(x,y)
+
+    def moveEvent(self,event):
+        super().moveEvent(event)
+        if self.greeting.isVisible():
+            self.position_greeting()
 
     def animate(self):
         self.frame = (self.frame+1)%80
@@ -155,7 +185,11 @@ class AssistantPet(QWidget):
             self.reaction = 10
             label,line = PETS[self.character]
             self.setAccessibleDescription(line)
-            QToolTip.showText(self.mapToGlobal(QPoint(12,-8)),f'{label} · {line}',self,QRect(),3500)
+            self.greeting.setText(f'{label} · {line}')
+            self.greeting.adjustSize()
+            self.position_greeting()
+            self.greeting.show()
+            self.greeting_timer.start()
         self.dragging = False
 
     def contextMenuEvent(self,event):
