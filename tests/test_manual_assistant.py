@@ -15,21 +15,23 @@ def test_docs_find_raster_and_reject_unrelated():
     assert any('FLT' in p.text for p in helpdesk.find_passages('Почему не открывается FLT?'))
 
 
-@pytest.mark.parametrize(('device','layers'),[('CPU',0),('GPU',-1)])
-def test_ollama_only_selects_local_passages(monkeypatch,device,layers):
+@pytest.mark.parametrize(('device','layers','model'),[('CPU',0,'qwen3:4b'),('GPU',-1,'qwen3.8:27b')])
+def test_ollama_only_selects_local_passages(monkeypatch,device,layers,model):
     sources=[helpdesk.Passage('guide.md','Title','Document text')]
 
     class Local:
         def open(self,request,timeout):
             assert request.full_url=='http://127.0.0.1:11434/api/chat'
             params=json.loads(request.data)
+            assert params['model']==model and params['think'] is False
+            assert timeout==120
             assert params['options']['num_gpu']==layers
             assert params['options']['num_ctx']==4096 and params['keep_alive']==0
             return BytesIO(json.dumps({'message':{'content':json.dumps(
                 {'text':'Ответ по руководству','sources':[1],'outside':False})}}).encode())
 
     monkeypatch.setattr(helpdesk,'build_opener',lambda *_:Local())
-    assert helpdesk.choose_passages('question',sources,device)==helpdesk.Answer('Ответ по руководству',tuple(sources),False)
+    assert helpdesk.choose_passages('question',sources,device,model=model)==helpdesk.Answer('Ответ по руководству',tuple(sources),False)
     def offline(*args):
         raise URLError('offline')
     monkeypatch.setattr(helpdesk,'build_opener',offline)

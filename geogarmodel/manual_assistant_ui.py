@@ -9,7 +9,7 @@ from PyQt5.QtGui import (QColor, QDesktopServices, QFontDatabase, QTextCursor,
 from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDialog, QHBoxLayout, QLabel,
     QPlainTextEdit, QPushButton, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
-from .manual_assistant import choose_passages, find_passages, verified_answer, OFF_TOPIC, NO_ANSWER, terms
+from .manual_assistant import AnswerFailure, choose_passages, find_passages, verified_answer, OFF_TOPIC, NO_ANSWER, terms
 from .ollama_catalog import DEFAULT_MODEL, is_cloud, valid_model
 
 
@@ -215,8 +215,8 @@ class ManualChat(QDockWidget):
         question,candidates=self.pending
         self.send.setEnabled(True)
         self.status.clear()
-        if answer is None:
-            self.status.setText(f'Нет ответа от {self.model}. Откройте настройки модели и проверьте подключение Ollama.')
+        if answer is None or isinstance(answer, AnswerFailure):
+            self.status.setText(answer.message if answer else f'Не удалось получить ответ от {self.model}.')
             if terms(question):
                 self.previous=question
             for passage in candidates[:1 if 'sigma' in terms(question) else 2]:

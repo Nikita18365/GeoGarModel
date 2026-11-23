@@ -8,7 +8,7 @@ import re
 import site
 import sysconfig
 from urllib.request import Request, build_opener, ProxyHandler
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from .ollama_catalog import DEFAULT_MODEL, is_cloud
 
@@ -36,6 +36,11 @@ class Answer:
     text: str
     sources: tuple
     outside: bool
+
+
+@dataclass(frozen=True)
+class AnswerFailure:
+    message: str
 
 
 # Search queries are fixed by subject. Raw questions, paths and project data stay local.
@@ -189,16 +194,17 @@ def choose_passages(question, sources, device, previous='', use_web=False, model
                            excerpts=[dict(id=i,heading=p.heading,text=p.text,kind='Интернет' if p.url else 'Руководство')
                                      for i,p in enumerate(sources,1)]),
                            ensure_ascii=False)}])
-    if model==DEFAULT_MODEL:
+    cloud = is_cloud(model)
+    if not cloud and model.rsplit('/', 1)[-1].casefold().startswith('qwen3'):
         payload['think']=False
-    if is_cloud(model):
+    if cloud:
         # Ollama Cloud does not currently support the structured-output option.
         for key in ('format','options','keep_alive'):
             payload.pop(key,None)
     request = Request('http://127.0.0.1:11434/api/chat',json.dumps(payload).encode('utf-8'),
                       {'Content-Type':'application/json'})
     try:
-        with build_opener(ProxyHandler({})).open(request,timeout=45) as response:
+        with build_opener(ProxyHandler({})).open(request,timeout=120) as response:
             reply = json.load(response)
         content=reply['message']['content'].strip()
         fenced=re.fullmatch(r'```(?:json)?\s*(.*?)\s*```',content,re.DOTALL|re.IGNORECASE)
@@ -210,6 +216,12 @@ def choose_passages(question, sources, device, previous='', use_web=False, model
         outside = answer['outside']
         if not isinstance(message,str) or type(outside) is not bool:
             raise ValueError('Invalid answer')
+    except TimeoutError:
+        return AnswerFailure(f'{model} не успела ответить за 120 секунд. Попробуйте менее тяжёлую модель.')
+    except HTTPError as exc:
+        if exc.code == 404:
+            return AnswerFailure(f'Ollama не нашла модель {model}. Проверьте статус модели в настройках.')
+        return AnswerFailure(f'Ollama вернула ошибку HTTP {exc.code} для {model}.')
     except (URLError,OSError,ValueError,KeyError,TypeError,AttributeError):
         return None
     return Answer(strip_question_echo(message.strip(),question),tuple(sources[i-1] for i in dict.fromkeys(selected)),outside)
