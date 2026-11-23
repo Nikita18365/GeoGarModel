@@ -52,4 +52,3 @@ def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lif
         assert helpdesk.OFF_TOPIC in chat.history.toPlainText()
     finally:
         window.close()
-

@@ -117,4 +117,3 @@ def choose_passages(question, sources, device, previous=''):
     except (URLError,OSError,ValueError,KeyError,TypeError):
         return None
     return OFF_TOPIC if answer.get('outside') is True else [sources[i-1] for i in dict.fromkeys(selected)]
-
