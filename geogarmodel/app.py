@@ -96,6 +96,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         root_layout.addWidget(header)
         root_layout.addWidget(self.tabs)
         self.setCentralWidget(root)
+        from .manual_assistant_ui import add_manual_assistant
+        self.manual_assistant = add_manual_assistant(self,header_layout)
         self.activity = Activities(self)
         self.make_maps()
         self.make_training()

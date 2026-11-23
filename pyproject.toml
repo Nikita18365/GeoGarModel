@@ -27,5 +27,8 @@ include = ["geogarmodel*"]
 [tool.setuptools.package-data]
 geogarmodel = ["assets/*.zip", "assets/*.TBL"]
 
+[tool.setuptools.data-files]
+"share/geogarmodel/docs" = ["docs/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
