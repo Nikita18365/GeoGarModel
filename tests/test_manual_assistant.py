@@ -92,6 +92,31 @@ def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lif
         window.close()
 
 
+def test_assistant_markdown_preserves_styles_and_numbered_steps(qt_application_lifetime):
+    from PyQt5.QtGui import QFont,QTextCursor
+    from geogarmodel.app import MainWindow
+
+    window=MainWindow()
+    try:
+        chat=window.manual_assistant
+        chat.append_markdown('5. Введите **Целевую RMS / σ**.\n'
+                             '6. Нажмите *Запустить 3D-моделирование*.\n\n'
+                             '[Поддельный источник](help:999) ![Фото](file:///tmp/photo.png)')
+        doc=chat.history.document()
+        assert doc.defaultFont().family() in ('Inter','OpenAI Sans')
+        assert chat.input.font().family()==doc.defaultFont().family()
+        bold=doc.find('Целевую RMS / σ')
+        italic=doc.find('Запустить 3D-моделирование')
+        assert bold.charFormat().fontWeight()>=QFont.Bold
+        assert italic.charFormat().fontItalic()
+        assert '5. Введите' in doc.toPlainText()
+        assert '6. Нажмите' in doc.toPlainText()
+        assert not doc.find('Поддельный источник').charFormat().isAnchor()
+        assert '\ufffc' not in doc.toPlainText()
+    finally:
+        window.close()
+
+
 def test_pet_click_drag_and_visibility(qt_application_lifetime,tmp_path):
     from PyQt5.QtCore import QPoint,QPointF,QSettings,Qt
     from PyQt5.QtGui import QMouseEvent

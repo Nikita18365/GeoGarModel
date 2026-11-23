@@ -25,7 +25,7 @@ geogarmodel = "geogarmodel.app:main"
 include = ["geogarmodel*"]
 
 [tool.setuptools.package-data]
-geogarmodel = ["assets/*.zip", "assets/*.TBL"]
+geogarmodel = ["assets/*.zip", "assets/*.TBL", "assets/Inter-*.ttf", "assets/Inter-LICENSE.txt"]
 
 [tool.setuptools.data-files]
 "share/geogarmodel/docs" = ["docs/*.md"]

@@ -1,8 +1,11 @@
 """Desktop help chat with a local CPU/GPU switch."""
 from html import escape
+from pathlib import Path
+import re
 
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal, QSettings, QUrl
-from PyQt5.QtGui import QColor, QDesktopServices, QFontDatabase, QTextCursor, QTextLength, QTextOption, QTextTableFormat
+from PyQt5.QtGui import (QColor, QDesktopServices, QFontDatabase, QTextCursor,
+    QTextDocument, QTextDocumentFragment, QTextLength, QTextOption, QTextTableFormat)
 from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDialog, QHBoxLayout, QLabel,
     QPlainTextEdit, QPushButton, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
@@ -10,6 +13,58 @@ from .manual_assistant import choose_passages, find_passages, OFF_TOPIC, NO_ANSW
 
 
 USER_MESSAGE_COLOR = '#203b54'
+CONTINUED_STEPS = re.compile(r'(?m)^(?!1\. )\d+\. [^\n]*(?:\n\d+\. [^\n]*)+')
+
+
+def chat_font():
+    font = QFontDatabase.systemFont(QFontDatabase.GeneralFont)
+    if 'OpenAI Sans' in QFontDatabase().families():
+        font.setFamily('OpenAI Sans')
+    elif 'Inter' not in QFontDatabase().families():
+        directory = Path(__file__).with_name('assets')
+        for path in directory.glob('Inter-*.ttf'):
+            QFontDatabase.addApplicationFont(str(path))
+    if font.family()!='OpenAI Sans' and 'Inter' in QFontDatabase().families():
+        font.setFamily('Inter')
+    font.setPixelSize(15)
+    return font
+
+
+class ChatMarkdown(QTextDocument):
+    def loadResource(self,resource_type,url):
+        # Responses and external excerpts cannot ask Qt to fetch resources.
+        return None
+
+    def __init__(self,text,font):
+        super().__init__()
+        self.setDefaultFont(font)
+        # Qt 5 renumbers ordered lists from one. Keep step numbers in excerpts.
+        text = CONTINUED_STEPS.sub(
+            lambda match: '  \n'.join(line.replace('. ',r'\. ',1) for line in match[0].splitlines()),
+            text)
+        features=QTextDocument.MarkdownFeatures(QTextDocument.MarkdownDialectGitHub|QTextDocument.MarkdownNoHTML)
+        self.setMarkdown(text,features)
+        changes = []
+        block = self.begin()
+        while block.isValid():
+            fragments = block.begin()
+            while not fragments.atEnd():
+                fragment = fragments.fragment()
+                fmt = fragment.charFormat()
+                if fmt.isAnchor() or fmt.isImageFormat():
+                    changes.append((fragment.position(),fragment.length(),fmt))
+                fragments += 1
+            block = block.next()
+        for start,length,fmt in reversed(changes):
+            cursor = QTextCursor(self)
+            cursor.setPosition(start)
+            cursor.setPosition(start+length,QTextCursor.KeepAnchor)
+            if fmt.isImageFormat():
+                cursor.removeSelectedText()
+            else:
+                fmt.setAnchor(False)
+                fmt.setAnchorHref('')
+                cursor.setCharFormat(fmt)
 
 
 class ChatInput(QPlainTextEdit):
@@ -43,10 +98,7 @@ class ManualChat(QDockWidget):
         self.device = device
         self.previous = ''
         self.sources = []
-        font=QFontDatabase.systemFont(QFontDatabase.GeneralFont)
-        if 'OpenAI Sans' in QFontDatabase().families():
-            font.setFamily('OpenAI Sans')
-        font.setPixelSize(15)
+        font=chat_font()
         self.chat_font=font
         body = QWidget()
         column = QVBoxLayout(body)
@@ -152,21 +204,33 @@ class ManualChat(QDockWidget):
             return
         if terms(question):
             self.previous=question
-        self.history.append(escape(answer.text).replace('\n','<br>'))
+        self.append_markdown(answer.text)
         for passage in answer.sources:
             self.append_source(passage)
 
     def append_source(self,passage,excerpt=False):
         self.sources.append(passage)
         source=f'<a href="help:{len(self.sources)-1}">{escape(passage.file)} · {escape(passage.heading)}</a>'
-        if excerpt:
-            source += '<br>'+escape(passage.text).replace('\n','<br>')
         self.history.append(source)
+        if excerpt:
+            self.append_markdown(passage.text)
+
+    def append_markdown(self,text):
+        document=ChatMarkdown(text,self.chat_font)
+        cursor=QTextCursor(self.history.document())
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertBlock()
+        cursor.insertFragment(QTextDocumentFragment(document))
+        self.history.moveCursor(QTextCursor.End)
+        self.history.ensureCursorVisible()
 
     def show_source(self,url):
-        if url.scheme()!='help':
+        if url.scheme()!='help' or not url.path().isascii() or not url.path().isdigit():
             return
-        passage=self.sources[int(url.path())]
+        index=int(url.path())
+        if index>=len(self.sources):
+            return
+        passage=self.sources[index]
         if passage.url:
             QDesktopServices.openUrl(QUrl(passage.url))
             return
@@ -177,9 +241,11 @@ class ManualChat(QDockWidget):
         dialog.resize(750,500)
         layout=QVBoxLayout(dialog)
         view=QTextBrowser()
-        view.document().setDefaultFont(self.chat_font)
+        view.setOpenLinks(False)
         view.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
-        view.setPlainText(line)
+        document=ChatMarkdown(line,self.chat_font)
+        document.setParent(view)
+        view.setDocument(document)
         layout.addWidget(view)
         dialog.exec_()
 
