@@ -25,14 +25,40 @@ def test_ollama_only_selects_local_passages(monkeypatch,device,layers):
             params=json.loads(request.data)
             assert params['options']['num_gpu']==layers
             assert params['options']['num_ctx']==4096 and params['keep_alive']==0
-            return BytesIO(b'{"message":{"content":"{\\"sources\\":[1],\\"outside\\":false}"}}')
+            return BytesIO(json.dumps({'message':{'content':json.dumps(
+                {'text':'Ответ по руководству','sources':[1],'outside':False})}}).encode())
 
     monkeypatch.setattr(helpdesk,'build_opener',lambda *_:Local())
-    assert helpdesk.choose_passages('question',sources,device)==sources
+    assert helpdesk.choose_passages('question',sources,device)==helpdesk.Answer('Ответ по руководству',tuple(sources),False)
     def offline(*args):
         raise URLError('offline')
     monkeypatch.setattr(helpdesk,'build_opener',offline)
     assert helpdesk.choose_passages('question',sources,device) is None
+
+
+def test_sigma_looks_up_explanation_and_supplies_web_source(monkeypatch):
+    question='Что такое «сигма константа» в 3Д моделировании «1. Поле»? Сейчас она равна 1.00.'
+    sources=helpdesk.find_passages(question)
+    assert 'Что означает «σ константа»' in sources[0].heading
+    assert '1 мГал' in sources[0].text and '1 нТл' in sources[0].text
+    web=helpdesk.Passage('Википедия','Взвешенный МНК','Вес данных','https://ru.wikipedia.org/?curid=1')
+    queries=[]
+    monkeypatch.setattr(helpdesk,'search_web',lambda topic:queries.append(topic) or (web,))
+
+    class Local:
+        def open(self,request,timeout):
+            params=json.loads(request.data)
+            context=json.loads(params['messages'][-1]['content'])
+            assert context['question']==question
+            assert context['excerpts'][-1]['kind']=='Интернет'
+            ids=[1,context['excerpts'][-1]['id']]
+            return BytesIO(json.dumps({'message':{'content':json.dumps(
+                {'text':'Ожидаемая погрешность наблюдений','sources':ids,'outside':False})}}).encode())
+
+    monkeypatch.setattr(helpdesk,'build_opener',lambda *_:Local())
+    answer=helpdesk.choose_passages(question,sources,'CPU',use_web=True)
+    assert answer.sources==(sources[0],web)
+    assert queries==['Метод наименьших квадратов взвешенный']
 
 
 def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lifetime):

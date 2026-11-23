@@ -1,9 +1,9 @@
 """Desktop help chat with a local CPU/GPU switch."""
 from html import escape
 
-from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal, QSettings
-from PyQt5.QtGui import QColor, QFontDatabase, QTextCursor, QTextLength, QTextOption, QTextTableFormat
-from PyQt5.QtWidgets import (QComboBox, QDockWidget, QDialog, QHBoxLayout, QLabel,
+from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal, QSettings, QUrl
+from PyQt5.QtGui import QColor, QDesktopServices, QFontDatabase, QTextCursor, QTextLength, QTextOption, QTextTableFormat
+from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDialog, QHBoxLayout, QLabel,
     QPlainTextEdit, QPushButton, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
 from .manual_assistant import choose_passages, find_passages, OFF_TOPIC, NO_ANSWER, terms
@@ -27,9 +27,9 @@ class ReplySignal(QObject):
 
 
 class ManualRequest(QRunnable):
-    def __init__(self, question, sources, device, previous):
+    def __init__(self, question, sources, device, previous, use_web):
         super().__init__()
-        self.args = question,sources,device,previous
+        self.args = question,sources,device,previous,use_web
         self.signal = ReplySignal()
 
     def run(self):
@@ -60,7 +60,7 @@ class ManualChat(QDockWidget):
         self.history.setOpenLinks(False)
         self.history.anchorClicked.connect(self.show_source)
         self.history.setMinimumWidth(340)
-        self.history.append('Задайте вопрос по документации GeoGarModel.')
+        self.history.append('Задайте вопрос о GeoGarModel или о методе, который используется в программе.')
         column.addWidget(self.history,1)
         row = QHBoxLayout()
         column.addLayout(row)
@@ -77,6 +77,12 @@ class ManualChat(QDockWidget):
         self.send = QPushButton('Спросить')
         self.send.clicked.connect(self.ask)
         row.addWidget(self.send,0,Qt.AlignBottom)
+        settings = QSettings('GeoGarModel','GeoGarModel')
+        self.web = QCheckBox('Дополнять ответ интернет-источниками')
+        self.web.setChecked(settings.value('assistant/web',True,type=bool))
+        self.web.setToolTip('Поиск по теме в Википедии. В поиск отправляется название темы, а текст вопроса остаётся в локальной Ollama.')
+        self.web.toggled.connect(lambda value:settings.setValue('assistant/web',value))
+        column.addWidget(self.web)
         self.status = QLabel()
         self.status.setWordWrap(True)
         column.addWidget(self.status)
@@ -101,8 +107,8 @@ class ManualChat(QDockWidget):
             self.history.append(NO_ANSWER if in_scope else OFF_TOPIC)
             return
         self.send.setEnabled(False)
-        self.status.setText('Ищу ответ в руководстве…')
-        self.request=ManualRequest(question,candidates,self.device.currentText(),previous)
+        self.status.setText('Готовлю ответ по источникам…')
+        self.request=ManualRequest(question,candidates,self.device.currentText(),previous,self.web.isChecked())
         self.request.signal.done.connect(self.received)
         self.pending=(question,candidates)
         QThreadPool.globalInstance().start(self.request)
@@ -127,30 +133,43 @@ class ManualChat(QDockWidget):
         self.history.moveCursor(QTextCursor.End)
         self.history.ensureCursorVisible()
 
-    def received(self,selected):
+    def received(self,answer):
         question,candidates=self.pending
         self.send.setEnabled(True)
         self.status.clear()
-        if selected is None:
+        if answer is None:
             self.status.setText('Ollama недоступна. Поиск по руководству работает.')
-            selected=candidates[:2]
-        if selected==OFF_TOPIC:
+            if terms(question):
+                self.previous=question
+            for passage in candidates[:1 if 'sigma' in terms(question) else 2]:
+                self.append_source(passage,excerpt=True)
+            return
+        if answer.outside:
             self.history.append(OFF_TOPIC)
             return
-        if not selected:
+        if not answer.text or not answer.sources:
             self.history.append(NO_ANSWER)
             return
         if terms(question):
             self.previous=question
-        for passage in selected:
-            self.sources.append(passage)
-            source=f'<a href="help:{len(self.sources)-1}">{escape(passage.file)} · {escape(passage.heading)}</a>'
-            self.history.append(source+'<br>'+escape(passage.text).replace('\n','<br>'))
+        self.history.append(escape(answer.text).replace('\n','<br>'))
+        for passage in answer.sources:
+            self.append_source(passage)
+
+    def append_source(self,passage,excerpt=False):
+        self.sources.append(passage)
+        source=f'<a href="help:{len(self.sources)-1}">{escape(passage.file)} · {escape(passage.heading)}</a>'
+        if excerpt:
+            source += '<br>'+escape(passage.text).replace('\n','<br>')
+        self.history.append(source)
 
     def show_source(self,url):
         if url.scheme()!='help':
             return
         passage=self.sources[int(url.path())]
+        if passage.url:
+            QDesktopServices.openUrl(QUrl(passage.url))
+            return
         from .manual_assistant import passages
         line='\n\n'.join(p.text for p in passages() if (p.file,p.heading)==(passage.file,passage.heading))
         dialog=QDialog(self)
