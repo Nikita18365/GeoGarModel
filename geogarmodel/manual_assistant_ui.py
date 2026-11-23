@@ -175,7 +175,7 @@ class ManualChat(QDockWidget):
         default_mode = HYBRID if self.settings.value('assistant/web', True, type=bool) else LOCAL
         saved_mode = self.settings.value('assistant/sourceMode', default_mode, type=str)
         self.mode.setCurrentIndex(self.mode.findData(saved_mode if saved_mode in SOURCE_MODES else default_mode))
-        self.mode.setToolTip('Википедия получает название темы. Если настроен ключ поиска Ollama, '
+        self.mode.setToolTip('Википедия получает название темы или ключевые слова. Если настроен ключ поиска Ollama, '
                              'его сервис получает текущий вопрос. Облачная модель получает также контекст чата.')
         self.mode.currentIndexChanged.connect(
             lambda: self.settings.setValue('assistant/sourceMode', self.mode.currentData()))
@@ -329,6 +329,10 @@ class ManualChat(QDockWidget):
                     if mode == INTERNET else NO_ANSWER)
         if answer.notice:
             self.save_reply(chat_id, Message('notice', answer.notice, mode))
+            if mode == INTERNET and not answer.sources:
+                if self.chats.currentData() == chat_id:
+                    self.status.clear()
+                return
         self.save_reply(chat_id, Message('assistant', text, mode, answer.sources, answer.excerpt))
         if answer.supplement:
             self.save_reply(chat_id, Message('reference', '**Дополнительные выдержки**', mode,

@@ -112,10 +112,42 @@ def test_source_modes_and_web_fallback(monkeypatch):
 
     monkeypatch.setattr(helpdesk, 'search_ollama', offline)
     monkeypatch.setattr(helpdesk, 'search_web', offline)
+    monkeypatch.setattr(helpdesk, 'search_wikipedia', offline)
     answer = helpdesk.answer_question(question, 'CPU', helpdesk.INTERNET, helpdesk.DEFAULT_MODEL)
-    assert not answer.sources and 'Внешние источники не получены' in answer.notice
+    assert not answer.sources and 'Сбой при обращении' in answer.notice
     answer = helpdesk.answer_question(question, 'CPU', helpdesk.HYBRID, helpdesk.DEFAULT_MODEL)
     assert answer.sources and all(not passage.url for passage in answer.sources)
+
+
+def test_prism_question_retrieves_algorithm_and_external_reference(monkeypatch):
+    question = 'Как производится расчёт по призмам в данной программе?'
+    manual = helpdesk.find_passages(question)
+    assert manual[0].file == 'INVERSION.md' and 'восьми вершинам' in manual[0].text
+    assert any('магнитным тензором' in source.text for source in manual)
+    monkeypatch.delenv('OLLAMA_API_KEY', raising=False)
+    web = helpdesk.Passage('Fatiando a Terra', 'Rectangular prisms', 'Prism fields', 'https://www.fatiando.org/')
+    monkeypatch.setattr(helpdesk, 'search_prism_reference', lambda: (web,))
+    helpdesk.search_web.cache_clear()
+    monkeypatch.setattr(helpdesk, 'choose_passages',
+                        lambda question, sources, *args, **kwargs: helpdesk.Answer('Поля призм', tuple(sources), False))
+    try:
+        internet = helpdesk.answer_question(question, 'CPU', helpdesk.INTERNET, helpdesk.DEFAULT_MODEL)
+        hybrid = helpdesk.answer_question(question, 'CPU', helpdesk.HYBRID, helpdesk.DEFAULT_MODEL)
+        assert internet.sources == (web,)
+        assert hybrid.sources[0] == manual[0] and hybrid.sources[-1] == web
+    finally:
+        helpdesk.search_web.cache_clear()
+
+
+def test_wikipedia_search_uses_manual_terms_for_other_topics(monkeypatch):
+    monkeypatch.delenv('OLLAMA_API_KEY', raising=False)
+    question = 'Как вычисляется аналитический сигнал? Пример участка BYR-151.'
+    manuals = [helpdesk.Passage('MAP_PROJECTS.md', 'Аналитический сигнал', 'Градиенты поля')]
+    web = helpdesk.Passage('Википедия', 'Аналитический сигнал', 'Сигнал', 'https://ru.wikipedia.org/')
+    queries = []
+    monkeypatch.setattr(helpdesk, 'search_wikipedia', lambda query: queries.append(query) or (web,))
+    assert helpdesk.external_sources(question, helpdesk.terms(question), manuals) == ((web,), '')
+    assert queries == ['аналитический сигнал']
 
 
 def test_long_chat_recalls_relevant_turns_and_excludes_fallbacks():

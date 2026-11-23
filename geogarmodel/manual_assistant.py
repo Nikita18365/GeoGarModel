@@ -2,6 +2,7 @@
 from collections import Counter
 from dataclasses import dataclass, replace
 from functools import lru_cache
+from html import unescape
 import json
 import os
 from pathlib import Path
@@ -26,7 +27,8 @@ SOURCE_MODES = {
 }
 STOP = set('как где что чем чтобы зачем какой какая можно делать сделать нужно меня мне или для это '
            'этой этот вот какие geogarmodel программа программах программы программе ошибку '
-           'ошибка подскажи пожалуйста почему работает меня можно если чего хочу при после свои кнопка кнопку'.split())
+           'ошибка подскажи пожалуйста почему работает меня можно если чего хочу при после свои кнопка кнопку '
+           'данной данного производится происходит есть такое'.split())
 FOLLOWUP = set('это эта этот эту этого там такой тогда этим ещё еще дальше он она они неё ней него них'.split())
 
 
@@ -53,9 +55,10 @@ class AnswerFailure:
     message: str
 
 
-# The no-key search sends only a fixed subject to Wikipedia.
+# Specific topics prefer focused sources over broad searches.
 WEB_TOPICS = (
     ({'sigma','погре','невяз','rmse','rms'},'Метод наименьших квадратов взвешенный'),
+    ({'призм','prism','prisms'},'Прямоугольные призмы'),
     ({'fft','фурье'},'Быстрое преобразование Фурье'),
     ({'инвер','обрат'},'Обратная задача геофизика'),
     ({'коорд','проек','epsg','crs','ск'},'Картографическая проекция'),
@@ -167,12 +170,20 @@ def search_index():
 
 @lru_cache(maxsize=32)
 def search_web(topic):
+    if topic == 'Прямоугольные призмы':
+        return search_prism_reference()
     if topic == WEB_TOPICS[0][1]:
-        base = 'https://en.wikipedia.org'
-        selection = dict(titles='Weighted least squares', redirects=1)
-    else:
-        base = 'https://ru.wikipedia.org'
-        selection = dict(generator='search', gsrsearch=topic, gsrnamespace=0, gsrlimit=2)
+        return wikipedia('en', titles='Weighted least squares', redirects=1)
+    return search_wikipedia(topic)
+
+
+@lru_cache(maxsize=32)
+def search_wikipedia(query):
+    return wikipedia('ru', generator='search', gsrsearch=query, gsrnamespace=0, gsrlimit=2)
+
+
+def wikipedia(language, **selection):
+    base = f'https://{language}.wikipedia.org'
     params = urlencode(dict(action='query', prop='extracts', exintro=1, explaintext=1,
                             exchars=900, format='json', formatversion=2, **selection))
     request = Request(base+'/w/api.php?'+params,
@@ -183,6 +194,64 @@ def search_web(topic):
     return tuple(Passage('Википедия', p['title'], p['extract'][:900],
                          f"{base}/?curid={int(p['pageid'])}")
                  for p in pages if p.get('extract') and p.get('pageid'))
+
+
+def search_prism_reference():
+    url = 'https://www.fatiando.org/harmonica/latest/user_guide/forward_modelling/prism.html'
+    with build_opener().open(url, timeout=5) as response:
+        html = response.read(256_000).decode('utf-8', errors='replace')
+    paragraphs = [unescape(re.sub(r'<[^>]*>', '', match))
+                  for match in re.findall(r'<p>(.*?)</p>', html, flags=re.DOTALL)]
+    matches = [re.sub(r'\s+', ' ', paragraph).strip() for paragraph in paragraphs
+               if 'prism' in paragraph.lower() and re.search(r'gravit|magnet|boundar', paragraph, re.I)]
+    lead = next((line for line in matches if 'gravitational fields' in line.lower()), '')
+    total = next((line for line in matches if 'whole set of prisms' in line.lower()), '')
+    magnetic = next((line for line in matches if 'magnetic fields generated' in line.lower()), '')
+    text = ' '.join(filter(None, (lead, total, magnetic)))
+    return (Passage('Fatiando a Terra', 'Rectangular prisms', text[:650], url),) if text else ()
+
+
+def wikipedia_keywords(question, manual):
+    """Build a bounded search query from terms corroborated by the manual."""
+    vocabulary = set().union(*(terms(source.heading + ' ' + source.text) for source in manual))
+    query = []
+    for word in re.findall(r'[a-zа-яё]{3,}', question.casefold()):
+        if word not in query and terms(word) & vocabulary:
+            query.append(word)
+    return ' '.join(query[:6]) if len(query) >= 2 else ''
+
+
+def external_sources(question, query, manual):
+    topic = next((label for keys, label in WEB_TOPICS if keys & query), None)
+    keywords = wikipedia_keywords(question, manual)
+    key = os.environ.get('OLLAMA_API_KEY', '').strip()
+    providers = []
+    if key:
+        providers.append(('Ollama Web Search', search_ollama, (question, key)))
+    if topic:
+        name = 'Fatiando a Terra' if topic == 'Прямоугольные призмы' else 'Википедия'
+        providers.append((name, search_web, (topic,)))
+    if keywords and keywords != topic:
+        providers.append(('Википедия', search_wikipedia, (keywords,)))
+
+    unavailable = []
+    for name, search, args in providers:
+        try:
+            results = search(*args)
+        except (URLError, OSError, ValueError, KeyError, TypeError, AttributeError):
+            unavailable.append(name)
+            continue
+        if search is search_wikipedia:
+            keywords = terms(args[0])
+            results = tuple(source for source in results
+                            if len(keywords & terms(source.heading + ' ' + source.text)) >= 2)
+        if results:
+            return results, ''
+    if not providers:
+        return (), 'Для этого вопроса не удалось выделить тему для поиска. Поиск по сайтам доступен с ключом OLLAMA_API_KEY.'
+    if unavailable:
+        return (), f'Не удалось получить внешние источники. Сбой при обращении: {", ".join(dict.fromkeys(unavailable))}.'
+    return (), 'Поиск выполнен, подходящие внешние источники не найдены.'
 
 
 def search_ollama(question, key):
@@ -211,22 +280,10 @@ def answer_question(question, device, mode, model, context=()):
         query = terms(question)
         if not query or FOLLOWUP.intersection(re.findall(r'\w+', question.casefold())):
             query |= terms(previous)
-        topic = next((label for keys, label in WEB_TOPICS if keys & query), None)
-        if not (manual or direct or topic or 'geogarmodel' in question.casefold()):
+        if not (manual or direct or any(keys & query for keys, _ in WEB_TOPICS)
+                or 'geogarmodel' in question.casefold()):
             return Answer('', (), True)
-        key = os.environ.get('OLLAMA_API_KEY', '').strip()
-        if key:
-            try:
-                web = search_ollama(question, key)
-            except (URLError, OSError, ValueError, KeyError, TypeError, AttributeError):
-                notice = 'Поиск Ollama недоступен. Проверьте интернет и ключ OLLAMA_API_KEY.'
-        if not web and topic:
-            try:
-                web = search_web(topic)
-            except (URLError, OSError, ValueError, KeyError, TypeError, AttributeError):
-                pass
-        if not web:
-            notice = ' '.join(filter(None, (notice, 'Внешние источники не получены.')))
+        web, notice = external_sources(question, query, manual)
 
     if direct and not web:
         return replace(direct, notice=notice)
@@ -256,7 +313,8 @@ def choose_passages(question, sources, device, previous='', model=DEFAULT_MODEL,
     """Answer in words, citing only document and web excerpts supplied to Ollama."""
     source_rule = {
         LOCAL: ' Используй только выдержки из руководства.',
-        INTERNET: ' Используй только веб-источники. Не утверждай, как устроен GeoGarModel, если источник этого не подтверждает.',
+        INTERNET: ' Используй только веб-источники. Если вопрос о GeoGarModel, а источники описывают общий метод '
+                  'или другую программу, объясни общий принцип и явно укажи, что источник не описывает реализацию GeoGarModel.',
         HYBRID: ' Действия в GeoGarModel описывай по руководству. Если веб-источник подтверждает или дополняет объяснение, '
                 'сформулируй из него отдельный абзац и укажи его номер вместе с номером руководства.',
     }[mode]
