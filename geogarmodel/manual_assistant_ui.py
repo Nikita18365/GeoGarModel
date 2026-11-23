@@ -2,10 +2,24 @@
 from html import escape
 
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal, QSettings
+from PyQt5.QtGui import QColor, QFontDatabase, QTextCursor, QTextLength, QTextOption, QTextTableFormat
 from PyQt5.QtWidgets import (QComboBox, QDockWidget, QDialog, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QTextBrowser, QVBoxLayout, QWidget)
+    QPlainTextEdit, QPushButton, QTextBrowser, QTextEdit, QVBoxLayout, QWidget)
 
 from .manual_assistant import choose_passages, find_passages, OFF_TOPIC, NO_ANSWER, terms
+
+
+USER_MESSAGE_COLOR = '#203b54'
+
+
+class ChatInput(QPlainTextEdit):
+    submitted = pyqtSignal()
+
+    def keyPressEvent(self,event):
+        if event.key() in (Qt.Key_Return,Qt.Key_Enter) and event.modifiers()==Qt.NoModifier:
+            self.submitted.emit()
+            return
+        super().keyPressEvent(event)
 
 
 class ReplySignal(QObject):
@@ -29,9 +43,20 @@ class ManualChat(QDockWidget):
         self.device = device
         self.previous = ''
         self.sources = []
+        font=QFontDatabase.systemFont(QFontDatabase.GeneralFont)
+        if 'OpenAI Sans' in QFontDatabase().families():
+            font.setFamily('OpenAI Sans')
+        font.setPixelSize(15)
+        self.chat_font=font
         body = QWidget()
         column = QVBoxLayout(body)
         self.history = QTextBrowser()
+        self.history.setFont(font)
+        self.history.document().setDefaultFont(font)
+        self.history.document().setDocumentMargin(12)
+        self.history.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.history.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.history.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.history.setOpenLinks(False)
         self.history.anchorClicked.connect(self.show_source)
         self.history.setMinimumWidth(340)
@@ -39,14 +64,19 @@ class ManualChat(QDockWidget):
         column.addWidget(self.history,1)
         row = QHBoxLayout()
         column.addLayout(row)
-        self.input = QLineEdit()
-        self.input.setMaxLength(1000)
+        self.input = ChatInput()
+        self.input.setFont(font)
+        self.input.setStyleSheet('font-size: 15px;')
+        self.input.setFixedHeight(self.input.fontMetrics().lineSpacing()*3+20)
+        self.input.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.input.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.input.setPlaceholderText('Вопрос по программе')
-        self.input.returnPressed.connect(self.ask)
+        self.input.submitted.connect(self.ask)
         row.addWidget(self.input,1)
         self.send = QPushButton('Спросить')
         self.send.clicked.connect(self.ask)
-        row.addWidget(self.send)
+        row.addWidget(self.send,0,Qt.AlignBottom)
         self.status = QLabel()
         self.status.setWordWrap(True)
         column.addWidget(self.status)
@@ -55,11 +85,15 @@ class ManualChat(QDockWidget):
         self.hide()
 
     def ask(self):
-        question=self.input.text().strip()
+        question=self.input.toPlainText().strip()
         if not question or not self.send.isEnabled():
             return
+        if len(question)>1000:
+            self.status.setText('Сократите вопрос до 1000 символов.')
+            return
+        self.status.clear()
         self.input.clear()
-        self.history.append('<b>Вы</b> · '+escape(question))
+        self.append_question(question)
         previous=self.previous
         candidates=find_passages(question,previous)
         if not candidates:
@@ -72,6 +106,26 @@ class ManualChat(QDockWidget):
         self.request.signal.done.connect(self.received)
         self.pending=(question,candidates)
         QThreadPool.globalInstance().start(self.request)
+
+    def append_question(self,question):
+        cursor=QTextCursor(self.history.document())
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertBlock()
+        frame=QTextTableFormat()
+        frame.setBorder(0)
+        frame.setCellPadding(9)
+        frame.setCellSpacing(0)
+        frame.setTopMargin(6)
+        frame.setBottomMargin(6)
+        frame.setWidth(QTextLength(QTextLength.PercentageLength,100))
+        frame.setColumnWidthConstraints([QTextLength(QTextLength.PercentageLength,width) for width in (13,87)])
+        cell=cursor.insertTable(1,2,frame).cellAt(0,1)
+        style=cell.format()
+        style.setBackground(QColor(USER_MESSAGE_COLOR))
+        cell.setFormat(style)
+        cell.firstCursorPosition().insertText(question)
+        self.history.moveCursor(QTextCursor.End)
+        self.history.ensureCursorVisible()
 
     def received(self,selected):
         question,candidates=self.pending
@@ -104,6 +158,8 @@ class ManualChat(QDockWidget):
         dialog.resize(750,500)
         layout=QVBoxLayout(dialog)
         view=QTextBrowser()
+        view.document().setDefaultFont(self.chat_font)
+        view.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         view.setPlainText(line)
         layout.addWidget(view)
         dialog.exec_()

@@ -36,8 +36,12 @@ def test_ollama_only_selects_local_passages(monkeypatch,device,layers):
 
 
 def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lifetime):
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtGui import QTextOption
+    from PyQt5.QtTest import QTest
     from PyQt5.QtWidgets import QPushButton
     from geogarmodel.app import MainWindow
+    from geogarmodel.manual_assistant_ui import USER_MESSAGE_COLOR
 
     window=MainWindow()
     try:
@@ -47,8 +51,16 @@ def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lif
         chat=window.manual_assistant
         assert not chat.isHidden()
         assert [chat.device.itemText(i) for i in range(chat.device.count())]==['CPU','GPU']
-        chat.input.setText('Какая погода в Москве?')
-        chat.ask()
+        assert chat.input.wordWrapMode()==QTextOption.WrapAtWordBoundaryOrAnywhere
+        assert chat.history.wordWrapMode()==QTextOption.WrapAtWordBoundaryOrAnywhere
+        chat.input.setPlainText('Какая погода в Москве?')
+        chat.input.moveCursor(chat.input.textCursor().End)
+        QTest.keyClick(chat.input,Qt.Key_Return,Qt.ShiftModifier)
+        chat.input.insertPlainText('<'+('a'*160)+'>')
+        QTest.keyClick(chat.input,Qt.Key_Return)
+        assert not chat.input.toPlainText()
         assert helpdesk.OFF_TOPIC in chat.history.toPlainText()
+        assert USER_MESSAGE_COLOR in chat.history.toHtml()
+        assert '<'+('a'*160)+'>' in chat.history.toPlainText()
     finally:
         window.close()
