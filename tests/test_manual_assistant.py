@@ -61,6 +61,45 @@ def test_sigma_looks_up_explanation_and_supplies_web_source(monkeypatch):
     assert queries==['Метод наименьших квадратов взвешенный']
 
 
+def test_cloud_model_uses_selected_tag_without_schema(monkeypatch):
+    source=helpdesk.Passage('guide.md','Title','Text')
+    model='kimi-k3.1-pro:cloud'
+
+    class Local:
+        def open(self,request,timeout):
+            params=json.loads(request.data)
+            assert params['model']==model
+            assert 'format' not in params and 'options' not in params
+            return BytesIO(json.dumps({'message':{'content':
+                '```json\n{"text":"Ответ","sources":[1],"outside":false}\n```'}}).encode())
+
+    monkeypatch.setattr(helpdesk,'build_opener',lambda *_:Local())
+    answer=helpdesk.choose_passages('Вопрос',[source],'CPU',model=model)
+    assert answer==helpdesk.Answer('Ответ',(source,),False)
+
+
+def test_model_picker_displays_model_specific_commands(qt_application_lifetime,monkeypatch):
+    from geogarmodel.app import MainWindow
+    from geogarmodel.ollama_models_ui import OllamaModels
+    import geogarmodel.ollama_models_ui as model_ui
+    window=MainWindow()
+    try:
+        dialog=OllamaModels(window,'qwen3:4b')
+        monkeypatch.setattr(model_ui,'installed_models',lambda:['local-model:latest'])
+        dialog.refresh_installed()
+        assert dialog.models.findText('local-model:latest')>=0
+        dialog.models.setCurrentText('namespace/example:custom')
+        assert dialog.ok.isEnabled()
+        assert dialog.commands.toPlainText()=='ollama pull namespace/example:custom'
+        dialog.models.setCurrentText('deepseek-v4.1-flash:cloud')
+        assert dialog.commands.toPlainText()=='ollama signin\nollama run deepseek-v4.1-flash:cloud'
+        assert 'Ollama Cloud' in dialog.note.text()
+        dialog.models.setCurrentText('ollama pull invalid')
+        assert not dialog.ok.isEnabled()
+    finally:
+        window.close()
+
+
 def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lifetime):
     from PyQt5.QtCore import Qt
     from PyQt5.QtGui import QTextOption

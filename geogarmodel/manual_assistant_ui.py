@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QDialog, QHBoxLa
     QPlainTextEdit, QPushButton, QTextBrowser, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
 from .manual_assistant import choose_passages, find_passages, verified_answer, OFF_TOPIC, NO_ANSWER, terms
+from .ollama_catalog import DEFAULT_MODEL, is_cloud, valid_model
 
 
 USER_MESSAGE_COLOR = '#203b54'
@@ -82,9 +83,9 @@ class ReplySignal(QObject):
 
 
 class ManualRequest(QRunnable):
-    def __init__(self, question, sources, device, previous, use_web):
+    def __init__(self, question, sources, device, previous, use_web, model):
         super().__init__()
-        self.args = question,sources,device,previous,use_web
+        self.args = question,sources,device,previous,use_web,model
         self.signal = ReplySignal()
 
     def run(self):
@@ -96,6 +97,9 @@ class ManualChat(QDockWidget):
         super().__init__('Помощник GeoGarModel',window)
         self.setObjectName('manualAssistant')
         self.device = device
+        self.settings = QSettings('GeoGarModel','GeoGarModel')
+        configured_model = self.settings.value('assistant/model',DEFAULT_MODEL,type=str)
+        self.model = configured_model if valid_model(configured_model) else DEFAULT_MODEL
         self.previous = ''
         self.sources = []
         font=chat_font()
@@ -114,6 +118,10 @@ class ManualChat(QDockWidget):
         self.history.setMinimumWidth(340)
         self.history.append('Задайте вопрос о GeoGarModel или о методе, который используется в программе.')
         column.addWidget(self.history,1)
+        self.model_button = QPushButton()
+        self.model_button.clicked.connect(self.choose_model)
+        column.addWidget(self.model_button)
+        self.update_model_label()
         row = QHBoxLayout()
         column.addLayout(row)
         self.input = ChatInput()
@@ -129,11 +137,10 @@ class ManualChat(QDockWidget):
         self.send = QPushButton('Спросить')
         self.send.clicked.connect(self.ask)
         row.addWidget(self.send,0,Qt.AlignBottom)
-        settings = QSettings('GeoGarModel','GeoGarModel')
         self.web = QCheckBox('Дополнять ответ интернет-источниками')
-        self.web.setChecked(settings.value('assistant/web',True,type=bool))
-        self.web.setToolTip('Поиск по теме в Википедии. В поиск отправляется название темы, а текст вопроса остаётся в локальной Ollama.')
-        self.web.toggled.connect(lambda value:settings.setValue('assistant/web',value))
+        self.web.setChecked(self.settings.value('assistant/web',True,type=bool))
+        self.web.setToolTip('В Википедию отправляется название темы. При выборе облачной модели текст вопроса получает Ollama Cloud.')
+        self.web.toggled.connect(lambda value:self.settings.setValue('assistant/web',value))
         column.addWidget(self.web)
         self.status = QLabel()
         self.status.setWordWrap(True)
@@ -141,6 +148,20 @@ class ManualChat(QDockWidget):
         self.setWidget(body)
         window.addDockWidget(Qt.RightDockWidgetArea,self)
         self.hide()
+
+    def update_model_label(self):
+        cloud = is_cloud(self.model)
+        self.model_button.setText(f'Модель · {self.model}'+(' · облако' if cloud else ''))
+        self.device.setEnabled(not cloud)
+
+    def choose_model(self):
+        from .ollama_models_ui import OllamaModels
+        dialog=OllamaModels(self.parentWidget(),self.model)
+        dialog.refresh_installed()
+        if dialog.exec_()==QDialog.Accepted:
+            self.model=dialog.selected
+            self.settings.setValue('assistant/model',self.model)
+            self.update_model_label()
 
     def ask(self):
         question=self.input.toPlainText().strip()
@@ -165,7 +186,7 @@ class ManualChat(QDockWidget):
             return
         self.send.setEnabled(False)
         self.status.setText('Готовлю ответ по источникам…')
-        self.request=ManualRequest(question,candidates,self.device.currentText(),previous,self.web.isChecked())
+        self.request=ManualRequest(question,candidates,self.device.currentText(),previous,self.web.isChecked(),self.model)
         self.request.signal.done.connect(self.received)
         self.pending=(question,candidates)
         QThreadPool.globalInstance().start(self.request)
@@ -195,7 +216,7 @@ class ManualChat(QDockWidget):
         self.send.setEnabled(True)
         self.status.clear()
         if answer is None:
-            self.status.setText('Ollama недоступна. Поиск по руководству работает.')
+            self.status.setText(f'Нет ответа от {self.model}. Откройте настройки модели и проверьте подключение Ollama.')
             if terms(question):
                 self.previous=question
             for passage in candidates[:1 if 'sigma' in terms(question) else 2]:
