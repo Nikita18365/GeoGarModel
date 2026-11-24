@@ -12,9 +12,9 @@ from PyQt5.QtWidgets import (QComboBox, QDockWidget, QDialog, QHBoxLayout, QInpu
     QToolButton, QVBoxLayout, QWidget)
 
 from .assistant_history import ChatStore, Message, conversation_context
-from .manual_assistant import HYBRID, INTERNET, LOCAL, SOURCE_MODES, OFF_TOPIC, NO_ANSWER, answer_question
+from .manual_assistant import FREE_CHAT, HYBRID, INTERNET, LOCAL, SOURCE_MODES, OFF_TOPIC, NO_ANSWER, answer_question
 from .ollama_catalog import DEFAULT_MODEL, is_cloud, valid_model
-from .ollama_credentials import OllamaWebCredential
+from .ollama_credentials import DEVICE_SEARCH, OllamaWebCredential
 
 
 USER_MESSAGE_COLOR = '#203b54'
@@ -87,15 +87,16 @@ class ReplySignal(QObject):
 
 
 class ManualRequest(QRunnable):
-    def __init__(self, question, device, mode, model, context, web_key):
+    def __init__(self, question, device, mode, model, context, web_key, device_search=False):
         super().__init__()
         self.args = question, device, mode, model, context
         self.web_key = web_key
+        self.device_search = device_search
         self.signal = ReplySignal()
 
     def run(self):
         try:
-            answer = answer_question(*self.args, web_key=self.web_key)
+            answer = answer_question(*self.args, web_key=self.web_key, device_search=self.device_search)
         finally:
             self.web_key = ''
         self.signal.done.emit(answer)
@@ -159,7 +160,6 @@ class ManualChat(QDockWidget):
         self.model_button = QPushButton()
         self.model_button.clicked.connect(self.choose_model)
         column.addWidget(self.model_button)
-        self.update_model_label()
         row = QHBoxLayout()
         column.addLayout(row)
         self.input = ChatInput()
@@ -176,7 +176,7 @@ class ManualChat(QDockWidget):
         self.send.clicked.connect(self.ask)
         row.addWidget(self.send,0,Qt.AlignBottom)
         self.mode = QComboBox()
-        self.mode.setAccessibleName('Источники ответа')
+        self.mode.setAccessibleName('Режим ответа')
         for key, label in SOURCE_MODES.items():
             self.mode.addItem(label, key)
         default_mode = HYBRID if self.settings.value('assistant/web', True, type=bool) else LOCAL
@@ -184,8 +184,7 @@ class ManualChat(QDockWidget):
         self.mode.setCurrentIndex(self.mode.findData(saved_mode if saved_mode in SOURCE_MODES else default_mode))
         self.mode.setToolTip('Википедия получает название темы или ключевые слова. Если настроен ключ поиска Ollama, '
                              'его сервис получает текущий вопрос. Облачная модель получает также контекст чата.')
-        self.mode.currentIndexChanged.connect(
-            lambda: self.settings.setValue('assistant/sourceMode', self.mode.currentData()))
+        self.mode.currentIndexChanged.connect(self.update_mode)
         sources_row = QHBoxLayout()
         sources_row.addWidget(self.mode, 1)
         self.web_button = QPushButton()
@@ -203,11 +202,17 @@ class ManualChat(QDockWidget):
             column.addWidget(warning)
         self.setWidget(body)
         window.addDockWidget(Qt.RightDockWidgetArea,self)
+        self.update_mode()
         self.refresh_chats(self.settings.value('assistant/activeChat', 0, type=int))
         self.hide()
 
     def update_web_label(self):
         connected = bool(self.web_credential.current())
+        device_search = self.settings.value(DEVICE_SEARCH, False, type=bool)
+        if device_search and not connected:
+            self.web_button.setText('Поиск через Ollama App')
+            self.web_button.setToolTip('Настроить поиск через подключённую Ollama App.')
+            return
         self.web_button.setText('Веб-поиск ✓' if connected else 'Подключить поиск…')
         self.web_button.setToolTip('Ключ Ollama подключён. Нажмите для настройки.' if connected else
                                    'Подключить ключ Ollama для поиска по сайтам.')
@@ -245,10 +250,11 @@ class ManualChat(QDockWidget):
         self.sources.clear()
         messages = self.store.messages(chat_id)
         if not messages:
-            self.history.append('Задайте вопрос о GeoGarModel или о методе, который используется в программе.')
+            self.history.append('Задайте любой вопрос локальной модели.' if self.mode.currentData() == FREE_CHAT else
+                                'Задайте вопрос о GeoGarModel или о методе, который используется в программе.')
         for message in messages:
             self.render_message(message)
-        self.status.setText('Готовлю ответ по источникам…' if self.pending and self.pending[0] == chat_id else '')
+        self.status.setText('Готовлю ответ…' if self.pending and self.pending[0] == chat_id else '')
 
     def new_chat(self):
         self.input.clear()
@@ -273,18 +279,39 @@ class ManualChat(QDockWidget):
             self.input.clear()
             self.refresh_chats()
 
+    def update_mode(self):
+        mode = self.mode.currentData()
+        self.settings.setValue('assistant/sourceMode', mode)
+        self.web_button.setVisible(mode in (INTERNET, HYBRID))
+        self.input.setPlaceholderText('Задайте любой вопрос' if mode == FREE_CHAT else 'Вопрос по программе')
+        self.update_model_label()
+        if self.chats.count() and not self.store.messages(self.chats.currentData()):
+            self.load_chat()
+
+    def active_model(self):
+        if self.mode.currentData() != FREE_CHAT:
+            return self.model
+        default = DEFAULT_MODEL if is_cloud(self.model) else self.model
+        model = self.settings.value('assistant/freeModel', default, type=str)
+        return model if valid_model(model) and not is_cloud(model) else default
+
     def update_model_label(self):
-        cloud = is_cloud(self.model)
-        self.model_button.setText(f'Модель · {self.model}'+(' · облако' if cloud else ''))
+        model = self.active_model()
+        cloud = is_cloud(model)
+        self.model_button.setText(f'Модель · {model}'+(' · облако' if cloud else ''))
         self.device.setEnabled(not cloud)
 
     def choose_model(self):
         from .ollama_models_ui import OllamaModels
-        dialog=OllamaModels(self.parentWidget(),self.model)
+        local_only = self.mode.currentData() == FREE_CHAT
+        dialog=OllamaModels(self.parentWidget(),self.active_model(),local_only=local_only)
         dialog.refresh_installed()
         if dialog.exec_()==QDialog.Accepted:
-            self.model=dialog.selected
-            self.settings.setValue('assistant/model',self.model)
+            if local_only:
+                self.settings.setValue('assistant/freeModel', dialog.selected)
+            else:
+                self.model=dialog.selected
+                self.settings.setValue('assistant/model',self.model)
             self.update_model_label()
 
     def ask(self):
@@ -311,9 +338,11 @@ class ManualChat(QDockWidget):
             self.chats.setItemText(self.chats.currentIndex(), title)
             self.chats.setToolTip(title)
         self.send.setEnabled(False)
-        self.status.setText('Готовлю ответ по источникам…')
-        web_key = self.web_credential.current() if mode != LOCAL else ''
-        self.request=ManualRequest(question,self.device.currentText(),mode,self.model,context,web_key)
+        self.status.setText('Готовлю ответ…' if mode == FREE_CHAT else 'Готовлю ответ по источникам…')
+        web = mode in (INTERNET, HYBRID)
+        web_key = self.web_credential.current() if web else ''
+        device_search = web and self.settings.value(DEVICE_SEARCH, False, type=bool)
+        self.request=ManualRequest(question,self.device.currentText(),mode,self.active_model(),context,web_key,device_search)
         self.request.signal.done.connect(self.received)
         self.pending=(chat_id, mode)
         QThreadPool.globalInstance().start(self.request)
@@ -322,10 +351,13 @@ class ManualChat(QDockWidget):
         if message.role == 'user':
             self.append_question(message.text)
             return
+        if message.role == 'reference':
+            return
         if message.text:
             self.append_markdown(message.text)
-        for passage in message.sources:
-            self.append_source(passage, excerpt=message.excerpt)
+        if message.excerpt:
+            for passage in message.sources:
+                self.append_source(passage, excerpt=True)
 
     def append_question(self,question):
         cursor=QTextCursor(self.history.document())
@@ -353,22 +385,19 @@ class ManualChat(QDockWidget):
         self.send.setEnabled(True)
         if self.chats.findData(chat_id) < 0:
             return
-        text = answer.text if answer.sources else ''
+        text = answer.text if answer.sources or mode == FREE_CHAT else ''
         if answer.outside:
             text = OFF_TOPIC
-        elif not text and not (answer.excerpt and answer.sources):
+        elif mode != FREE_CHAT and not text and not (answer.excerpt and answer.sources):
             text = ('По найденным веб-источникам ответ подтвердить не удалось.'
                     if mode == INTERNET else NO_ANSWER)
         if answer.notice:
             self.save_reply(chat_id, Message('notice', answer.notice, mode))
-            if mode == INTERNET and not answer.sources:
+            if mode in (INTERNET, FREE_CHAT) and not answer.sources and not text:
                 if self.chats.currentData() == chat_id:
                     self.status.clear()
                 return
         self.save_reply(chat_id, Message('assistant', text, mode, answer.sources, answer.excerpt))
-        if answer.supplement:
-            self.save_reply(chat_id, Message('reference', '**Дополнительные выдержки**', mode,
-                                             answer.supplement, excerpt=True))
         if self.chats.currentData() == chat_id:
             self.status.clear()
 

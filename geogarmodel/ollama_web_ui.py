@@ -1,13 +1,63 @@
 """Connection dialog for Ollama Web Search."""
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QVBoxLayout,
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QPushButton, QVBoxLayout,
 )
 
 from .manual_assistant import OLLAMA_BILLING_REQUIRED, search_ollama
-from .ollama_credentials import CAN_REMEMBER_KEY, valid_web_key
+from .ollama_credentials import CAN_REMEMBER_KEY, DEVICE_SEARCH, valid_web_key
+
+
+class OllamaDeviceDialog(QDialog):
+    def __init__(self, parent, settings):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle('Подключение устройства Ollama')
+        self.setMinimumWidth(430)
+        layout = QVBoxLayout(self)
+        instructions = QLabel(
+            'Войдите в Ollama App или выполните <b>ollama signin</b> в терминале. '
+            'Для ручной привязки скопируйте публичный Device Key и вставьте его '
+            'в <a href="https://ollama.com/settings/keys">настройках аккаунта Ollama</a>.')
+        instructions.setWordWrap(True)
+        instructions.setOpenExternalLinks(True)
+        layout.addWidget(instructions)
+        copy = QPushButton('Скопировать публичный Device Key')
+        copy.clicked.connect(self.copy_public_key)
+        layout.addWidget(copy)
+        self.use_device = QCheckBox('Использовать поиск через Ollama App')
+        self.use_device.setChecked(settings.value(DEVICE_SEARCH, False, type=bool))
+        layout.addWidget(self.use_device)
+        self.status = QLabel(
+            'Ollama App получает текущий вопрос и выполняет веб-поиск через ваш аккаунт. '
+            'Доступ зависит от версии Ollama и условий аккаунта.')
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def copy_public_key(self):
+        try:
+            with (Path.home() / '.ollama' / 'id_ed25519.pub').open(encoding='ascii') as file:
+                key = file.read(4096).strip()
+        except (OSError, ValueError):
+            key = ''
+        fields = key.split()
+        if len(fields) < 2 or fields[0] != 'ssh-ed25519':
+            self.status.setText('Публичный ключ Ollama не найден. Запустите Ollama App и войдите в аккаунт.')
+            return
+        QApplication.clipboard().setText(' '.join(fields[:2]))
+        self.status.setText('Публичный ключ скопирован. Вставьте его в настройках аккаунта Ollama.')
+
+    def accept(self):
+        self.settings.setValue(DEVICE_SEARCH, self.use_device.isChecked())
+        self.settings.sync()
+        super().accept()
 
 
 class KeyCheckSignal(QObject):
@@ -77,6 +127,9 @@ class OllamaWebDialog(QDialog):
         self.billing_link.setOpenExternalLinks(True)
         self.billing_link.hide()
         layout.addWidget(self.billing_link)
+        self.device_button = QPushButton('Подключение через Ollama App…')
+        self.device_button.clicked.connect(self.configure_device)
+        layout.addWidget(self.device_button)
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         self.verify_button = buttons.addButton('Проверить и подключить', QDialogButtonBox.ActionRole)
         self.disconnect_button = buttons.addButton('Отключить', QDialogButtonBox.ActionRole)
@@ -86,6 +139,14 @@ class OllamaWebDialog(QDialog):
         self.disconnect_button.clicked.connect(self.disconnect)
         self.key.returnPressed.connect(self.verify)
         layout.addWidget(buttons)
+
+    def configure_device(self):
+        dialog = OllamaDeviceDialog(self, self.credential.settings)
+        if dialog.exec_() == QDialog.Accepted:
+            self.result_message = ('Поиск через Ollama App включён.' if dialog.use_device.isChecked()
+                                   else 'Поиск через Ollama App отключён.')
+            self.accept()
+        dialog.deleteLater()
 
     def verify(self):
         if self.pending_key:
@@ -101,6 +162,7 @@ class OllamaWebDialog(QDialog):
         self.remember.setEnabled(False)
         self.verify_button.setEnabled(False)
         self.disconnect_button.setEnabled(False)
+        self.device_button.setEnabled(False)
         self.billing_link.hide()
         self.status.setText('Проверяю ключ…')
         self.request = KeyCheck(key)
@@ -118,6 +180,7 @@ class OllamaWebDialog(QDialog):
             self.remember.setEnabled(True)
             self.verify_button.setEnabled(True)
             self.disconnect_button.setEnabled(bool(self.credential.current()))
+            self.device_button.setEnabled(True)
             self.key.setFocus()
             return
         try:

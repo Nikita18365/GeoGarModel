@@ -4,7 +4,7 @@ import sqlite3
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 
-from .manual_assistant import Passage, terms
+from .manual_assistant import FREE_CHAT, Passage, terms
 
 
 @dataclass(frozen=True)
@@ -79,11 +79,14 @@ class ChatStore:
 def conversation_context(messages, question, mode):
     """Include recent questions and relevant older context from this chat."""
     turns = []
+    include_turn = False
     for message in messages:
         if message.role == "user":
-            turns.append({"question": message.text})
-        elif (turns and message.role == "assistant" and message.mode == mode
-              and message.text and message.sources and not message.excerpt):
+            include_turn = (message.mode == FREE_CHAT) == (mode == FREE_CHAT)
+            if include_turn:
+                turns.append({"question": message.text})
+        elif (include_turn and message.role == "assistant" and message.mode == mode
+              and message.text and (message.sources or mode == FREE_CHAT) and not message.excerpt):
             turns[-1]["answer"] = message.text
 
     query = terms(question)

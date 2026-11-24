@@ -9,6 +9,7 @@ from ctypes import wintypes
 CAN_REMEMBER_KEY = sys.platform == 'win32'
 SAVED_KEY = 'assistant/ollamaWebKeyEncrypted'
 ENABLED = 'assistant/ollamaWebSearchEnabled'
+DEVICE_SEARCH = 'assistant/ollamaDeviceSearch'
 
 
 class _Blob(ctypes.Structure):

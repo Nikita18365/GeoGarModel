@@ -8,9 +8,10 @@ from .ollama_catalog import FEATURED, LIBRARY, catalog_models, installed_models,
 
 
 class OllamaModels(QDialog):
-    def __init__(self, window, current):
+    def __init__(self, window, current, *, local_only=False):
         super().__init__(window)
         self.activity = window.activity
+        self.local_only = local_only
         self.setWindowTitle('Модель помощника · Ollama')
         self.resize(600,320)
         layout = QFormLayout(self)
@@ -18,7 +19,7 @@ class OllamaModels(QDialog):
         self.models.setEditable(True)
         self.models.setInsertPolicy(QComboBox.NoInsert)
         self.models.lineEdit().setPlaceholderText('например, qwen3.5:4b')
-        self.models.addItems(list(dict.fromkeys((*FEATURED,current))))
+        self.add_names((*FEATURED, current))
         self.models.setCurrentText(current)
         layout.addRow('Модель или тег',self.models)
 
@@ -62,9 +63,12 @@ class OllamaModels(QDialog):
 
     def update_setup(self,*args):
         model=self.selected
-        self.commands.setPlainText(setup_commands(model))
-        self.ok.setEnabled(valid_model(model))
-        if is_cloud(model):
+        allowed = valid_model(model) and not (self.local_only and is_cloud(model))
+        self.commands.setPlainText(setup_commands(model) if allowed else '')
+        self.ok.setEnabled(allowed)
+        if self.local_only and is_cloud(model):
+            self.note.setText('Для свободного чата выберите локальную модель.')
+        elif is_cloud(model):
             self.note.setText('Облачная модель. Войдите в Ollama и запустите модель один раз. '
                               'После запуска можно выйти из терминала командой /bye. '
                               'Вопрос и выдержки отправляются в Ollama Cloud.')
@@ -74,7 +78,7 @@ class OllamaModels(QDialog):
 
     def add_names(self,names):
         for name in names:
-            if self.models.findText(name)<0:
+            if self.models.findText(name)<0 and not (self.local_only and is_cloud(name)):
                 self.models.addItem(name)
 
     def refresh_installed(self):
@@ -93,6 +97,11 @@ class OllamaModels(QDialog):
             if not ok:
                 return
             names=self.activity.run('Чтение тегов Ollama',catalog_models,family)
+            if self.local_only:
+                names = [name for name in names if not is_cloud(name)]
+            if not names:
+                self.status.setText('В этом семействе нет подходящих тегов.')
+                return
             name,ok=QInputDialog.getItem(self,'Варианты Ollama','Выберите точный тег',names,0,False)
             if ok:
                 self.add_names([name])

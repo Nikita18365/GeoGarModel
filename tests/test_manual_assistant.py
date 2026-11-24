@@ -24,7 +24,7 @@ def test_ollama_only_selects_local_passages(monkeypatch,device,layers,model):
             assert request.full_url=='http://127.0.0.1:11434/api/chat'
             params=json.loads(request.data)
             assert params['model']==model and params['think'] is False
-            assert timeout==120
+            assert timeout==180 and params['options']['num_predict']==850
             assert params['options']['num_gpu']==layers
             assert params['options']['num_ctx']==4096 and params['keep_alive']==0
             return BytesIO(json.dumps({'message':{'content':json.dumps(
@@ -83,6 +83,66 @@ def test_cloud_model_uses_selected_tag_without_schema(monkeypatch):
     assert answer==helpdesk.Answer('Ответ',(source,),False)
 
 
+def test_free_chat_uses_local_generation_and_skips_retrieval(monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail('Free chat must bypass retrieval.')
+
+    monkeypatch.setattr(helpdesk, 'find_passages', unexpected)
+    monkeypatch.setattr(helpdesk, 'external_sources', unexpected)
+    calls = []
+
+    class Local:
+        def open(self, request, timeout):
+            assert request.full_url == 'http://127.0.0.1:11434/api/chat'
+            params = json.loads(request.data)
+            calls.append(params)
+            return BytesIO(json.dumps({'message': {'content': json.dumps(
+                {'text': 'Нагрейте воду и посолите её.'})}}).encode())
+
+    monkeypatch.setattr(helpdesk, 'build_opener', lambda *_: Local())
+    answer = helpdesk.answer_question('Как сварить макароны?', 'CPU', helpdesk.FREE_CHAT, 'qwen3:4b',
+                                      [{'question': 'Я готовлю ужин', 'answer': 'Что есть в холодильнике?'}],
+                                      web_key='unused', device_search=True)
+    assert answer == helpdesk.Answer('Нагрейте воду и посолите её.', (), False)
+    assert len(calls) == 1
+    assert calls[0]['format']['required'] == ['text'] and calls[0]['options']['num_predict'] == 1000
+    assert [message['role'] for message in calls[0]['messages']] == ['system', 'user', 'assistant', 'user']
+    blocked = helpdesk.answer_question('Как сварить макароны?', 'CPU', helpdesk.FREE_CHAT, 'example:cloud')
+    assert blocked.notice and len(calls) == 1
+
+
+def test_free_chat_displays_and_saves_an_answer_without_sources(qt_application_lifetime, monkeypatch):
+    from PyQt5.QtCore import QThreadPool
+    from geogarmodel.app import MainWindow
+    from geogarmodel import manual_assistant_ui
+    from geogarmodel.assistant_history import conversation_context
+
+    def reply(question, device, mode, model, context, *, web_key, device_search):
+        assert mode == helpdesk.FREE_CHAT and model == helpdesk.DEFAULT_MODEL
+        assert not web_key and not device_search
+        return helpdesk.Answer('Обычный ответ.', (), False)
+
+    monkeypatch.setattr(manual_assistant_ui, 'answer_question', reply)
+    window = MainWindow()
+    try:
+        chat = window.manual_assistant
+        chat.model = 'example:cloud'
+        chat.mode.setCurrentIndex(chat.mode.findData(helpdesk.FREE_CHAT))
+        assert chat.web_button.isHidden() and chat.device.isEnabled()
+        chat.input.setPlainText('Вопрос на общую тему')
+        chat.ask()
+        assert QThreadPool.globalInstance().waitForDone(3000)
+        qt_application_lifetime.processEvents()
+        assert 'Обычный ответ.' in chat.history.toPlainText() and not chat.sources
+        messages = chat.store.messages(chat.chats.currentData())
+        assert conversation_context(messages, 'Уточнение', helpdesk.FREE_CHAT)[0]['answer'] == 'Обычный ответ.'
+        assert conversation_context(messages, 'Уточнение', helpdesk.LOCAL) == []
+        chat.mode.setCurrentIndex(chat.mode.findData(helpdesk.HYBRID))
+        assert chat.active_model() == 'example:cloud'
+    finally:
+        window.close()
+
+
 def test_source_modes_and_web_fallback(monkeypatch):
     question = 'Зачем задавать сигму при моделировании плотности?'
     web = helpdesk.Passage('example.org', 'Weights', 'Measurement weights', 'https://example.org/weights')
@@ -107,10 +167,6 @@ def test_source_modes_and_web_fallback(monkeypatch):
     monkeypatch.setattr(helpdesk, 'search_web', lambda topic: (web,))
     helpdesk.answer_question(question, 'CPU', helpdesk.INTERNET, helpdesk.DEFAULT_MODEL, web_key='')
     assert len(searches) == 3
-    monkeypatch.setattr(helpdesk, 'choose_passages', lambda question, sources, *args, **kwargs:
-                        helpdesk.Answer('Ответ по руководству', (sources[0],), False))
-    mixed = helpdesk.answer_question(question, 'CPU', helpdesk.HYBRID, helpdesk.DEFAULT_MODEL)
-    assert mixed.supplement == (web,)
 
     def offline(*args):
         raise URLError('offline')
@@ -182,8 +238,8 @@ def test_chat_history_reopens_and_keeps_replies_in_origin_chat(qt_application_li
     contexts = []
     source = helpdesk.Passage('INVERSION.md', 'Сигма', 'Сигма — погрешность наблюдений.')
 
-    def respond(question, device, mode, model, context, *, web_key):
-        assert web_key == ''
+    def respond(question, device, mode, model, context, *, web_key, device_search):
+        assert web_key == '' and not device_search
         contexts.append(context)
         return helpdesk.Answer('Погрешность наблюдений.', (source,), False)
 
@@ -213,7 +269,8 @@ def test_chat_history_reopens_and_keeps_replies_in_origin_chat(qt_application_li
         assert chat.chats.currentText() == 'Параметры инверсии'
         assert chat.mode.currentData() == helpdesk.LOCAL
         assert 'Погрешность наблюдений.' in chat.history.toPlainText()
-        assert chat.sources == [source]
+        assert not chat.sources
+        assert chat.store.messages(first)[-1].sources == (source,)
         chat.input.setPlainText('А в каких единицах она задаётся?')
         chat.ask()
         assert QThreadPool.globalInstance().waitForDone(3000)
@@ -303,7 +360,8 @@ def test_variable_height_question_gets_direct_answer_in_chat(qt_application_life
         assert 'Прямой расчёт по призмам' in transcript
         assert 'Высота Up, м' in transcript
         assert 'требует, чтобы все наблюдения лежали на одной высоте' in transcript
-        assert chat.sources[0].file=='INVERSION.md'
+        assert not chat.sources
+        assert chat.store.messages(chat.chats.currentData())[-1].sources[0].file=='INVERSION.md'
         fft=helpdesk.verified_answer('Можно ли выполнить 2D FFT, если высоты разные?')
         assert fft.text.startswith('**Для послойной 2D FFT — нет.**')
         assert helpdesk.strip_question_echo('**'+question+'**\n\nДа, методом призм.',question)=='Да, методом призм.'

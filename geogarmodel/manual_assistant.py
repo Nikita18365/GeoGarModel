@@ -21,11 +21,12 @@ OFF_TOPIC = 'Задайте вопрос по функционалу GeoGarModel
 NO_ANSWER = 'В документации GeoGarModel не найден ответ. Уточните название команды или текст ошибки.'
 OLLAMA_BILLING_REQUIRED = ('Ollama отклонила веб-поиск по условиям оплаты (HTTP 402). '
                            'Проверьте баланс, способ оплаты и доступ к поиску в аккаунте Ollama.')
-LOCAL, INTERNET, HYBRID = 'local', 'internet', 'hybrid'
+LOCAL, INTERNET, HYBRID, FREE_CHAT = 'local', 'internet', 'hybrid', 'free'
 SOURCE_MODES = {
     INTERNET: 'Поиск в интернете',
     HYBRID: 'Документация и интернет',
     LOCAL: 'Локальная документация',
+    FREE_CHAT: 'Свободный чат',
 }
 STOP = set('как где что чем чтобы зачем какой какая можно делать сделать нужно меня мне или для это '
            'этой этот вот какие geogarmodel программа программах программы программе ошибку '
@@ -49,7 +50,6 @@ class Answer:
     outside: bool
     notice: str = ''
     excerpt: bool = False
-    supplement: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -223,13 +223,15 @@ def wikipedia_keywords(question, manual):
     return ' '.join(query[:6]) if len(query) >= 2 else ''
 
 
-def external_sources(question, query, manual, web_key=None):
+def external_sources(question, query, manual, web_key=None, *, device_search=False):
     topic = next((label for keys, label in WEB_TOPICS if keys & query), None)
     keywords = wikipedia_keywords(question, manual)
     key = os.environ.get('OLLAMA_API_KEY', '').strip() if web_key is None else web_key
     providers = []
     if key:
         providers.append(('Ollama Web Search', search_ollama, (question, key)))
+    if device_search:
+        providers.append(('Ollama App', search_ollama_device, (question,)))
     if topic:
         name = 'Fatiando a Terra' if topic == 'Прямоугольные призмы' else 'Википедия'
         providers.append((name, search_web, (topic,)))
@@ -242,8 +244,10 @@ def external_sources(question, query, manual, web_key=None):
         try:
             results = search(*args)
         except HTTPError as error:
-            if search is search_ollama and error.code == 402:
+            if search in (search_ollama, search_ollama_device) and error.code == 402:
                 billing_notice = OLLAMA_BILLING_REQUIRED
+            elif search is search_ollama_device and error.code == 401:
+                unavailable.append('Ollama App (войдите в аккаунт Ollama)')
             else:
                 unavailable.append(name)
             continue
@@ -255,6 +259,8 @@ def external_sources(question, query, manual, web_key=None):
             results = tuple(source for source in results
                             if len(keywords & terms(source.heading + ' ' + source.text)) >= 2)
         if results:
+            if search is search_ollama_device:
+                return results, ''
             return results, f'{billing_notice} Использованы открытые источники.' if billing_notice else ''
     if billing_notice:
         return (), f'{billing_notice} В открытых источниках подходящие материалы не найдены.'
@@ -266,12 +272,25 @@ def external_sources(question, query, manual, web_key=None):
 
 
 def search_ollama(question, key):
-    data = json.dumps({'query': question, 'max_results': 3}).encode('utf-8')
-    request = Request('https://ollama.com/api/web_search', data,
-                      {'Content-Type': 'application/json'})
+    request = web_search_request('https://ollama.com/api/web_search', question)
     request.add_unredirected_header('Authorization', f'Bearer {key}')
     with build_opener().open(request, timeout=10) as response:
-        results = json.load(response)['results']
+        return search_results(response)
+
+
+def search_ollama_device(question):
+    request = web_search_request('http://127.0.0.1:11434/api/experimental/web_search', question)
+    with build_opener(ProxyHandler({})).open(request, timeout=10) as response:
+        return search_results(response)
+
+
+def web_search_request(url, question):
+    data = json.dumps({'query': question, 'max_results': 3}).encode('utf-8')
+    return Request(url, data, {'Content-Type': 'application/json'})
+
+
+def search_results(response):
+    results = json.load(response)['results']
     sources = []
     for result in results[:3]:
         url = urlsplit(result['url'])
@@ -280,7 +299,9 @@ def search_ollama(question, key):
     return tuple(sources)
 
 
-def answer_question(question, device, mode, model, context=(), *, web_key=None):
+def answer_question(question, device, mode, model, context=(), *, web_key=None, device_search=False):
+    if mode == FREE_CHAT:
+        return free_chat(question, device, model, context)
     previous = context[-1]['question'] if context else ''
     manual = find_passages(question, previous)
     direct = verified_answer(question) if mode != INTERNET else None
@@ -295,7 +316,7 @@ def answer_question(question, device, mode, model, context=(), *, web_key=None):
         if not (manual or direct or any(keys & query for keys, _ in WEB_TOPICS)
                 or 'geogarmodel' in question.casefold()):
             return Answer('', (), True)
-        web, notice = external_sources(question, query, manual, web_key)
+        web, notice = external_sources(question, query, manual, web_key, device_search=device_search)
 
     if direct and not web:
         return replace(direct, notice=notice)
@@ -312,13 +333,36 @@ def answer_question(question, device, mode, model, context=(), *, web_key=None):
         fallback = tuple((manual[:1] if mode != INTERNET else []) + list(web[:1]))
         return Answer(direct.text if direct else '', fallback, False,
                       ' '.join(filter(None, (notice, error))), not bool(direct))
-    supplement = ()
-    if mode == HYBRID and not answer.outside:
-        if web and not any(source.url for source in answer.sources):
-            supplement += tuple(web[:1])
-        if manual and not any(not source.url for source in answer.sources):
-            supplement += tuple(manual[:1])
-    return replace(answer, notice=notice, supplement=supplement)
+    return replace(answer, notice=notice)
+
+
+def free_chat(question, device, model, context):
+    if is_cloud(model):
+        return Answer('', (), False, 'Для свободного чата выберите локальную модель Ollama.')
+    messages = [{
+        'role': 'system',
+        'content': 'Веди обычный разговор на языке пользователя. Дай развёрнутый ответ по существу. '
+                   'Начни сразу с ответа и не пересказывай, как ты собираешься отвечать. '
+                   'Для сложного вопроса поясни решение и приведи пример, если он помогает. '
+                   'Если не уверен или вопрос требует свежих данных, скажи об этом. '
+                   'Помести только готовый ответ в поле text.',
+    }]
+    for turn in context:
+        messages.append({'role': 'user', 'content': turn['question']})
+        if turn.get('answer'):
+            messages.append({'role': 'assistant', 'content': turn['answer']})
+    messages.append({'role': 'user', 'content': question})
+    schema = {'type': 'object', 'required': ['text'], 'properties': {'text': {'type': 'string'}}}
+    content = ollama_chat(model, device, messages, schema=schema, max_tokens=1000)
+    if isinstance(content, AnswerFailure):
+        return Answer('', (), False, content.message)
+    try:
+        text = json.loads(content)['text'].strip()
+    except (ValueError, KeyError, TypeError, AttributeError):
+        text = ''
+    if not text:
+        return Answer('', (), False, f'Не удалось получить ответ от {model}.')
+    return Answer(text, (), False)
 
 
 def choose_passages(question, sources, device, previous='', model=DEFAULT_MODEL, *, mode=LOCAL, context=()):
@@ -328,16 +372,16 @@ def choose_passages(question, sources, device, previous='', model=DEFAULT_MODEL,
         INTERNET: ' Используй только веб-источники. Если вопрос о GeoGarModel, а источники описывают общий метод '
                   'или другую программу, объясни общий принцип и явно укажи, что источник не описывает реализацию GeoGarModel.',
         HYBRID: ' Действия в GeoGarModel описывай по руководству. Если веб-источник подтверждает или дополняет объяснение, '
-                'сформулируй из него отдельный абзац и укажи его номер вместе с номером руководства.',
+                'используй его для пояснения и укажи его номер вместе с номером руководства в поле sources.',
     }[mode]
-    payload = dict(model=model,stream=False,keep_alive=0,
-                   options=dict(num_ctx=4096,num_predict=500,temperature=0,num_gpu=0 if device=='CPU' else -1),
-                   format={'type':'object','required':['text','sources','outside'],'properties':{
-                       'text':{'type':'string'},
-                       'outside':{'type':'boolean'},
-                       'sources':{'type':'array','items':{'type':'integer'},'maxItems':3}}},
-                   messages=[
+    schema = {'type':'object','required':['text','sources','outside'],'properties':{
+        'text':{'type':'string'},
+        'outside':{'type':'boolean'},
+        'sources':{'type':'array','items':{'type':'integer'},'maxItems':3}}}
+    messages = [
                        {'role':'system','content':'Ты помощник GeoGarModel. Ответь по-русски своими словами, начиная с прямого ответа. '
+                        'Дай несколько содержательных предложений. Для сложного вопроса раскрой суть, условия и пример, '
+                        'если это подтверждают источники. Не добавляй ссылки и номера источников в текст самого ответа. '
                         'Для вопроса о параметре объясни смысл, единицы и пример, если это подтверждают источники. '
                         'Сохраняй единицы и их обозначения из источника. Не повторяй вопрос. '
                         'Если спрашивают о возможности, начни с ответа и укажи необходимые условия. '
@@ -349,20 +393,11 @@ def choose_passages(question, sources, device, previous='', model=DEFAULT_MODEL,
                        {'role':'user','content':json.dumps(dict(question=question,previous=previous[:260],history=context,
                            excerpts=[dict(id=i,heading=p.heading,text=p.text[:650],kind='Интернет' if p.url else 'Руководство')
                                      for i,p in enumerate(sources,1)]),
-                           ensure_ascii=False)}])
-    cloud = is_cloud(model)
-    if not cloud and model.rsplit('/', 1)[-1].casefold().startswith('qwen3'):
-        payload['think']=False
-    if cloud:
-        # Ollama Cloud does not currently support the structured-output option.
-        for key in ('format','options','keep_alive'):
-            payload.pop(key,None)
-    request = Request('http://127.0.0.1:11434/api/chat',json.dumps(payload).encode('utf-8'),
-                      {'Content-Type':'application/json'})
+                           ensure_ascii=False)}]
+    content = ollama_chat(model, device, messages, schema=schema)
+    if content is None or isinstance(content, AnswerFailure):
+        return content
     try:
-        with build_opener(ProxyHandler({})).open(request,timeout=120) as response:
-            reply = json.load(response)
-        content=reply['message']['content'].strip()
         fenced=re.fullmatch(r'```(?:json)?\s*(.*?)\s*```',content,re.DOTALL|re.IGNORECASE)
         answer = json.loads(fenced[1] if fenced else content)
         selected = answer['sources']
@@ -372,12 +407,34 @@ def choose_passages(question, sources, device, previous='', model=DEFAULT_MODEL,
         outside = answer['outside']
         if not isinstance(message,str) or type(outside) is not bool:
             raise ValueError('Invalid answer')
+    except (ValueError, KeyError, TypeError):
+        return None
+    return Answer(strip_question_echo(message.strip(),question),tuple(sources[i-1] for i in dict.fromkeys(selected)),outside)
+
+
+def ollama_chat(model, device, messages, *, schema=None, max_tokens=850):
+    payload = dict(model=model, stream=False, messages=messages)
+    cloud = is_cloud(model)
+    if not cloud:
+        payload.update(keep_alive=0, options=dict(num_ctx=4096, num_predict=max_tokens,
+                                                  temperature=0, num_gpu=0 if device=='CPU' else -1))
+        if schema is not None:
+            payload['format'] = schema
+        if model.rsplit('/', 1)[-1].casefold().startswith('qwen3'):
+            payload['think'] = False
+    request = Request('http://127.0.0.1:11434/api/chat',json.dumps(payload).encode('utf-8'),
+                      {'Content-Type':'application/json'})
+    try:
+        with build_opener(ProxyHandler({})).open(request,timeout=180) as response:
+            reply = json.load(response)
+        return reply['message']['content'].strip()
     except TimeoutError:
-        return AnswerFailure(f'{model} не успела ответить за 120 секунд. Попробуйте менее тяжёлую модель.')
+        return AnswerFailure(f'{model} не успела ответить за 180 секунд. Попробуйте менее тяжёлую модель.')
     except HTTPError as exc:
         if exc.code == 404:
             return AnswerFailure(f'Ollama не нашла модель {model}. Проверьте статус модели в настройках.')
+        if exc.code == 401 and cloud:
+            return AnswerFailure('Для облачной модели войдите в Ollama App или выполните ollama signin, затем повторите вопрос.')
         return AnswerFailure(f'Ollama вернула ошибку HTTP {exc.code} для {model}.')
     except (URLError,OSError,ValueError,KeyError,TypeError,AttributeError):
         return None
-    return Answer(strip_question_echo(message.strip(),question),tuple(sources[i-1] for i in dict.fromkeys(selected)),outside)

@@ -76,3 +76,47 @@ def test_web_search_402_preserves_public_fallback(monkeypatch):
     sources, notice = manual_assistant.external_sources('Как рассчитывается сила тяжести?', {'грави'}, [],
                                                        web_key='test-key')
     assert sources == (source,) and 'HTTP 402' in notice and 'Использованы открытые источники' in notice
+
+
+def test_web_search_402_can_fall_back_to_ollama_app(monkeypatch):
+    from io import BytesIO
+    from geogarmodel import manual_assistant
+
+    visited = []
+
+    class Connection:
+        def open(self, request, timeout):
+            visited.append(request.full_url)
+            if request.full_url.startswith('https://'):
+                assert request.get_header('Authorization') == 'Bearer example'
+                raise HTTPError(request.full_url, 402, 'payment required', {}, None)
+            assert request.get_header('Authorization') is None
+            return BytesIO(b'{"results":[{"title":"Source","url":"https://example.com/","content":"Result"}]}')
+
+    monkeypatch.setattr(manual_assistant, 'build_opener', lambda *args: Connection())
+    sources, notice = manual_assistant.external_sources('Что такое σ?', {'sigma'}, [],
+                                                       web_key='example', device_search=True)
+    assert visited == ['https://ollama.com/api/web_search', 'http://127.0.0.1:11434/api/experimental/web_search']
+    assert not notice and sources[0].url == 'https://example.com/'
+
+
+def test_device_key_dialog_copies_only_public_key_and_saves_opt_in(tmp_path, monkeypatch):
+    from PyQt5.QtWidgets import QApplication
+    from geogarmodel.ollama_credentials import DEVICE_SEARCH
+
+    folder = tmp_path / '.ollama'
+    folder.mkdir()
+    (folder / 'id_ed25519').write_text('private-example')
+    (folder / 'id_ed25519.pub').write_text('ssh-ed25519 cHVibGljLWV4YW1wbGU= local-host\n')
+    monkeypatch.setattr(ollama_web_ui.Path, 'home', lambda: tmp_path)
+    settings = QSettings(str(tmp_path / 'ollama.ini'), QSettings.IniFormat)
+    dialog = ollama_web_ui.OllamaDeviceDialog(None, settings)
+    try:
+        assert not dialog.use_device.isChecked()
+        dialog.copy_public_key()
+        assert QApplication.clipboard().text() == 'ssh-ed25519 cHVibGljLWV4YW1wbGU='
+        dialog.use_device.setChecked(True)
+        dialog.accept()
+        assert settings.value(DEVICE_SEARCH, False, type=bool)
+    finally:
+        dialog.close()
