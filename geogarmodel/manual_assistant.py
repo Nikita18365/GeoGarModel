@@ -23,10 +23,10 @@ OLLAMA_BILLING_REQUIRED = ('Ollama отклонила веб-поиск по у�
                            'Проверьте баланс, способ оплаты и доступ к поиску в аккаунте Ollama.')
 LOCAL, INTERNET, HYBRID, FREE_CHAT = 'local', 'internet', 'hybrid', 'free'
 SOURCE_MODES = {
-    INTERNET: 'Поиск в интернете',
-    HYBRID: 'Документация и интернет',
-    LOCAL: 'Локальная документация',
-    FREE_CHAT: 'Свободный чат',
+    INTERNET: 'Paid API Web search',
+    HYBRID: 'Smart documentation',
+    LOCAL: 'Local documentation',
+    FREE_CHAT: 'Free Web search',
 }
 STOP = set('как где что чем чтобы зачем какой какая можно делать сделать нужно меня мне или для это '
            'этой этот вот какие geogarmodel программа программах программы программе ошибку '
@@ -223,7 +223,7 @@ def wikipedia_keywords(question, manual):
     return ' '.join(query[:6]) if len(query) >= 2 else ''
 
 
-def external_sources(question, query, manual, web_key=None, *, device_search=False):
+def external_sources(question, query, manual, web_key=None, *, device_search=False, prefer_device=False):
     topic = next((label for keys, label in WEB_TOPICS if keys & query), None)
     keywords = wikipedia_keywords(question, manual)
     key = os.environ.get('OLLAMA_API_KEY', '').strip() if web_key is None else web_key
@@ -231,7 +231,8 @@ def external_sources(question, query, manual, web_key=None, *, device_search=Fal
     if key:
         providers.append(('Ollama Web Search', search_ollama, (question, key)))
     if device_search:
-        providers.append(('Ollama App', search_ollama_device, (question,)))
+        position = 0 if prefer_device else len(providers)
+        providers.insert(position, ('Ollama App', search_ollama_device, (question,)))
     if topic:
         name = 'Fatiando a Terra' if topic == 'Прямоугольные призмы' else 'Википедия'
         providers.append((name, search_web, (topic,)))
@@ -259,7 +260,7 @@ def external_sources(question, query, manual, web_key=None, *, device_search=Fal
             results = tuple(source for source in results
                             if len(keywords & terms(source.heading + ' ' + source.text)) >= 2)
         if results:
-            if search is search_ollama_device:
+            if search in (search_ollama, search_ollama_device):
                 return results, ''
             return results, f'{billing_notice} Использованы открытые источники.' if billing_notice else ''
     if billing_notice:
@@ -316,7 +317,10 @@ def answer_question(question, device, mode, model, context=(), *, web_key=None, 
         if not (manual or direct or any(keys & query for keys, _ in WEB_TOPICS)
                 or 'geogarmodel' in question.casefold()):
             return Answer('', (), True)
-        web, notice = external_sources(question, query, manual, web_key, device_search=device_search)
+        web, notice = external_sources(question, query, manual, web_key, device_search=device_search,
+                                       prefer_device=mode == HYBRID)
+        if mode == HYBRID and notice.startswith(OLLAMA_BILLING_REQUIRED):
+            notice = '' if manual or direct or web else 'Подходящие материалы по этому вопросу не найдены.'
 
     if direct and not web:
         return replace(direct, notice=notice)
@@ -372,7 +376,10 @@ def choose_passages(question, sources, device, previous='', model=DEFAULT_MODEL,
         INTERNET: ' Используй только веб-источники. Если вопрос о GeoGarModel, а источники описывают общий метод '
                   'или другую программу, объясни общий принцип и явно укажи, что источник не описывает реализацию GeoGarModel.',
         HYBRID: ' Действия в GeoGarModel описывай по руководству. Если веб-источник подтверждает или дополняет объяснение, '
-                'используй его для пояснения и укажи его номер вместе с номером руководства в поле sources.',
+                'используй его для пояснения и укажи его номер вместе с номером руководства в поле sources. '
+                'Когда вопрос требует объяснения, напиши два–четыре коротких абзаца или несколько шагов. '
+                'После прямого ответа объясни, как это работает и что это значит на практике. '
+                'Если выдержки содержат подходящий пример, разъясни его. При нехватке фактов скажи об этом кратко.',
     }[mode]
     schema = {'type':'object','required':['text','sources','outside'],'properties':{
         'text':{'type':'string'},
@@ -394,7 +401,7 @@ def choose_passages(question, sources, device, previous='', model=DEFAULT_MODEL,
                            excerpts=[dict(id=i,heading=p.heading,text=p.text[:650],kind='Интернет' if p.url else 'Руководство')
                                      for i,p in enumerate(sources,1)]),
                            ensure_ascii=False)}]
-    content = ollama_chat(model, device, messages, schema=schema)
+    content = ollama_chat(model, device, messages, schema=schema, max_tokens=1050 if mode == HYBRID else 850)
     if content is None or isinstance(content, AnswerFailure):
         return content
     try:

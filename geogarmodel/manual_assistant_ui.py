@@ -184,6 +184,8 @@ class ManualChat(QDockWidget):
         self.mode.setCurrentIndex(self.mode.findData(saved_mode if saved_mode in SOURCE_MODES else default_mode))
         self.mode.setToolTip('Википедия получает название темы или ключевые слова. Если настроен ключ поиска Ollama, '
                              'его сервис получает текущий вопрос. Облачная модель получает также контекст чата.')
+        self.mode.setItemData(self.mode.findData(FREE_CHAT),
+                              'Свободный чат с локальной моделью без веб-поиска.', Qt.ToolTipRole)
         self.mode.currentIndexChanged.connect(self.update_mode)
         sources_row = QHBoxLayout()
         sources_row.addWidget(self.mode, 1)

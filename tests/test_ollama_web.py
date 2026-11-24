@@ -100,6 +100,38 @@ def test_web_search_402_can_fall_back_to_ollama_app(monkeypatch):
     assert not notice and sources[0].url == 'https://example.com/'
 
 
+def test_smart_documentation_prefers_app_and_suppresses_billing_notice(monkeypatch):
+    from geogarmodel import manual_assistant as assistant
+
+    calls = []
+    public = assistant.Passage('Открытая справка', 'Сигма', 'Вес наблюдений', 'https://example.com/')
+
+    def payment_required(*args):
+        calls.append('api')
+        raise HTTPError('https://ollama.com/api/web_search', 402, 'payment required', {}, None)
+
+    def device(*args):
+        calls.append('app')
+        return ()
+
+    monkeypatch.setattr(assistant, 'search_ollama', payment_required)
+    monkeypatch.setattr(assistant, 'search_ollama_device', device)
+    monkeypatch.setattr(assistant, 'search_web', lambda *_: (public,))
+    monkeypatch.setattr(assistant, 'choose_passages', lambda question, sources, *args, **kwargs:
+                        assistant.Answer('Подробное объяснение.', tuple(sources), False))
+    question = 'Что такое сигма константа в 3Д моделировании?'
+    answer = assistant.answer_question(question, 'CPU', assistant.HYBRID, assistant.DEFAULT_MODEL,
+                                       web_key='example', device_search=True)
+    assert calls == ['app', 'api']
+    assert answer.text and public in answer.sources and not answer.notice
+
+    monkeypatch.setattr(assistant, 'search_web', lambda *_: ())
+    monkeypatch.setattr(assistant, 'search_wikipedia', lambda *_: ())
+    answer = assistant.answer_question(question, 'CPU', assistant.HYBRID, assistant.DEFAULT_MODEL,
+                                       web_key='example', device_search=True)
+    assert answer.text and answer.sources and not answer.notice
+
+
 def test_device_key_dialog_copies_only_public_key_and_saves_opt_in(tmp_path, monkeypatch):
     from PyQt5.QtWidgets import QApplication
     from geogarmodel.ollama_credentials import DEVICE_SEARCH

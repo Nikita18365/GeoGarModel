@@ -53,6 +53,8 @@ def test_sigma_looks_up_explanation_and_supplies_web_source(monkeypatch):
     class Local:
         def open(self,request,timeout):
             params=json.loads(request.data)
+            assert params['options']['num_predict']==1050
+            assert 'два–четыре' in params['messages'][0]['content']
             context=json.loads(params['messages'][-1]['content'])
             assert context['question']==question
             assert context['excerpts'][-1]['kind']=='Интернет'
