@@ -3,6 +3,7 @@ import numpy as np
 from PyQt5.QtWidgets import QDoubleSpinBox,QLabel,QPushButton
 from .map_presentation_ui import MapImageExportDialog
 from .map_presentation import save_map_image
+from .map_layout import DecorationDrag
 from pyproj import CRS,Transformer
 from .figure_toolbar import FigureToolbar
 from matplotlib.backends.backend_qt import SubplotToolQt
@@ -45,6 +46,30 @@ class MapToolbar(FigureToolbar):
         self.nominal_scale=QLabel('1 : —')
         self.nominal_scale.setToolTip('Расчётный масштаб листа в проекции; не физический масштаб монитора')
         self.addWidget(self.nominal_scale)
+        self.addSeparator()
+        self.edit_layout=QPushButton('Перемещать элементы')
+        self.edit_layout.setCheckable(True)
+        self.edit_layout.setToolTip('Левой кнопкой мыши перетащите заголовок, подпись оси, линейку, цветовую шкалу или север')
+        self.addWidget(self.edit_layout)
+        self.edit_layout.toggled.connect(self.toggle_layout_edit)
+        self.reset_layout=QPushButton('Сброс позиций')
+        self.reset_layout.clicked.connect(self.reset_positions)
+        self.addWidget(self.reset_layout)
+        self.decoration_drag=DecorationDrag(self)
+
+    def toggle_layout_edit(self,enabled):
+        if enabled:
+            if self.mode.name=='PAN': self.pan()
+            elif self.mode.name=='ZOOM': self.zoom()
+            self.workbench.map_views.setCurrentWidget(self.canvas)
+            self.workbench.statusBar().showMessage('Перетащите элемент оформления левой кнопкой мыши')
+        else:
+            self.decoration_drag.active=None
+
+    def reset_positions(self,*args):
+        self.decoration_drag.active=None
+        self.workbench.map_offsets.clear()
+        self.workbench.guard(self.workbench.redraw)
 
     def sync_scale(self):
         home=getattr(self.workbench,'_map_home',None)

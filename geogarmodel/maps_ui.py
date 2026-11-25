@@ -18,7 +18,9 @@ from .crs_editor import CRSEditor,read_prj
 from .palette_library import local_library,PaletteDialog,preview,default_map_palette
 from .ui_layout import Disclosure
 from .view_icons import view_icon
-from .map_presentation import apply_map_fonts, text_options, centered_limits, save_map_image
+from .map_presentation import apply_map_fonts, text_options, centered_limits, migrate_map_fonts
+from .map_layout import (attach_colorbar, apply_text_offsets, offset_pixels,
+                         fit_publication, clean_crs_name)
 from .map_presentation_ui import MapFontEditor
 
 
@@ -77,7 +79,7 @@ class MapWorkspace:
         try: self._map_layout=json.loads(self.map_layout_settings.value('subplot_layout','null'))
         except (ValueError,TypeError): self._map_layout=None
         self._map_selected=None; self._map_loading=False; self._map_fit=True
-        self.map_fonts={}; self._map_home=None; self._map_exporting=False
+        self.map_fonts={}; self.map_offsets={}; self._map_home=None; self._map_exporting=False
         self.map_style_group.setTitle('')
         self.map_style_heading=QLabel('Оформление карты — выберите карту')
         self.map_style_heading.setWordWrap(True)
@@ -348,7 +350,8 @@ class MapWorkspace:
             rows=self.map_layer_rows(); crs=next((r['data'].crs for r in rows if r['kind']=='grid'),'')
         if not crs: return 'СК не задана'
         source=CRS.from_user_input(crs); authority=source.to_authority()
-        return f'{source.name} ({authority[0]}:{authority[1]})' if authority else source.name
+        name=clean_crs_name(source.name)
+        return f'{name} ({authority[0]}:{authority[1]})' if authority else name
 
     def update_project_label(self):
         caption=self.crs_caption() if self.map_project_crs else ''
@@ -673,7 +676,7 @@ class MapWorkspace:
         old=self.figure.axes[0] if self.figure.axes else None
         if old is not None and old.images: self._map_view=(old.get_xlim(),old.get_ylim())
         view=getattr(self,'_map_view',None) if not self._map_fit else None
-        self.figure._map_cache=None; self.figure.clear(); ax=None
+        self.figure._map_cache=None; self.figure.clear(); ax=self.figure.add_subplot(111)
         if grids:
             crs=grids[0]['data'].crs
             if any(r['data'].crs!=crs or r['data'].coordinate_unit!=grids[0]['data'].coordinate_unit for r in grids):
@@ -689,11 +692,13 @@ class MapWorkspace:
                 for artist in set(ax.get_children())-before:
                     if artist in ax.images or artist in ax.collections or artist in ax.texts:
                         artist.set_zorder(order+min(artist.get_zorder(),5))
-            # The one colourbar describes the frontmost visible map.
-            self.figure.axes[1]._colorbar.update_normal([im for im in ax.images if im.get_gid()=='map-field'][-1])
-            self.figure.axes[1]._colorbar.set_label(grids[0]['data'].unit)
+            # The colourbar is an independent axes, anchored to the actual
+            # equal-aspect map frame. It never steals space from that axes.
+            bar=attach_colorbar(self,ax,[im for im in ax.images if im.get_gid()=='map-field'][-1],
+                                grids[0]['data'].unit)
+            from .theme import style_map_figure
+            style_map_figure(self.figure)
         else:
-            ax=self.figure.add_subplot(111)
             ax.set_xlabel('X, м'); ax.set_ylabel('Y, м')
             ax.set_aspect('equal',adjustable='box',anchor='C')
             ax.set_title(self.map_title.text().strip() or self.map_project_name)
@@ -720,8 +725,15 @@ class MapWorkspace:
             self._geo_key=None; self.refresh_map_geography(update_fast=False)
             apply_map_fonts(self.figure,self.map_fonts)
             if self._map_layout and not self.auto_map_layout.isChecked(): self.figure.subplots_adjust(**self._map_layout)
-            else: self.figure.subplots_adjust(left=.14,right=.9,bottom=(.23 if self.scale_crs.isChecked() else .20) if self.scale_on.isChecked() else .13,top=.84)
-            if grids: self.draw_north(ax,self.figure.axes[1],crs)
+            else:
+                horizontal=bool(grids) and self.colorbar_orientation.currentData()=='horizontal'
+                bottom=(.31 if horizontal else .25) if self.scale_on.isChecked() else (.24 if horizontal else .13)
+                self.figure.subplots_adjust(left=.14,right=.95 if horizontal or not grids else .80,
+                                            bottom=bottom,top=.86)
+            ax.set_anchor('C')
+            ax.apply_aspect()
+            apply_text_offsets(self)
+            if grids: self.draw_north(ax,bar,crs)
             if self.scale_on.isChecked():
                 if grids and grids[0]['data'].coordinate_unit=='degrees': raise ValueError('Масштабная линейка в метрах требует метрических координат.')
                 self.draw_scale(ax)
@@ -754,7 +766,7 @@ class MapWorkspace:
         return dict(title=self.map_title.text(),geography=self.read_geography(),
                     auto_layout=self.auto_map_layout.isChecked(),
                     colorbar_orientation=self.colorbar_orientation.currentData(),
-                    fonts=self.map_fonts)
+                    fonts=self.map_fonts,offsets=self.map_offsets)
 
     def map_drawn(self,event):
         if self._map_exporting: return
@@ -763,19 +775,23 @@ class MapWorkspace:
         if changed: apply_map_fonts(self.figure,self.map_fonts)
         self.map_toolbar.sync_scale()
         for update in getattr(self,'_map_decorations',[]): changed=update() or changed
-        if hasattr(self,'auto_map_layout') and self.auto_map_layout.isChecked() and len(self.figure.axes)>1:
+        if self._map_home and self.auto_map_layout.isChecked() and not self.map_offsets:
             ax=self.figure.axes[0]
             key=(*self.figure.bbox.bounds,*ax.get_xlim(),*ax.get_ylim())
             if key!=getattr(self,'_auto_layout_key',None):
-                self._auto_layout_key=key
-                self.figure.tight_layout(pad=1.4,rect=(.01,.02,.99,.98)); changed=True
+                self._auto_layout_key=key; self._layout_passes=0
+            if self._layout_passes<4:
+                self._layout_passes+=1
+                changed=fit_publication(self.figure,event.renderer) or changed
         if changed: self.canvas.draw_idle()
 
     def draw_north(self,ax,bar,crs):
         self._map_decorations=[]
-        arrow=bar.annotate('',xy=(0,0),xytext=(0,0),xycoords='figure pixels',textcoords='figure pixels',
+        arrow=ax.annotate('',xy=(0,0),xytext=(0,0),xycoords=IdentityTransform(),textcoords=IdentityTransform(),
                            arrowprops=dict(arrowstyle='-|>',color='black',lw=2.5,mutation_scale=18,shrinkA=0,shrinkB=0),annotation_clip=False)
-        label=bar.text(0,0,'N',transform=IdentityTransform(),ha='left',va='center',fontsize=14,fontweight='bold',color='black',clip_on=False)
+        label=ax.text(0,0,'N',transform=IdentityTransform(),ha='left',va='center',fontsize=14,fontweight='bold',color='black',clip_on=False)
+        arrow.set_zorder(100001); label.set_zorder(100001)
+        ax._map_north_artists=[arrow,label]
         def update(_=None):
             x=np.mean(ax.get_xlim()); y=np.mean(ax.get_ylim())
             try:
@@ -783,9 +799,8 @@ class MapWorkspace:
                 direction=north_direction(crs,x,y)
                 points=ax.transData.transform([[x,y],[x+direction[0],y+direction[1]]])
                 delta=points[1]-points[0]; delta/=np.linalg.norm(delta)
-                horizontal=self.colorbar_orientation.currentData()=='horizontal'
-                center=(ax.transAxes.transform((.98,1))+np.array([0,22*self.figure.dpi/100]) if horizontal
-                        else bar.transAxes.transform((.15,1))+np.array([0,22*self.figure.dpi/100]))
+                center=ax.transAxes.transform((.98,1))+np.array([0,22*self.figure.dpi/100])
+                center+=offset_pixels(self,'north')
                 base=center-delta*15*self.figure.dpi/100; tip=center+delta*15*self.figure.dpi/100
                 changed=not np.allclose(arrow.xy,tip) or not np.allclose(arrow.get_position(),base)
                 arrow.xy=tip; arrow.set_position(base); arrow.set_visible(True)
@@ -803,12 +818,14 @@ class MapWorkspace:
 
     def draw_scale(self,ax):
         artists=[]; state=[]
+        ax._map_scale_artists=artists
         def update(_=None):
             lo,hi=ax.get_xlim(); count=self.scale_count.value()
             factor=1000 if self.scale_unit.currentText()=='км' else 1
             step=self.scale_step.value()*factor
             if step==0:
-                desired=abs(hi-lo)*.25/count; base=10**np.floor(np.log10(max(desired,1e-12)))
+                fraction=.22 if self.colorbar_orientation.currentData()=='horizontal' and len(self.figure.axes)>1 else .25
+                desired=abs(hi-lo)*fraction/count; base=10**np.floor(np.log10(max(desired,1e-12)))
                 step=next(v*base for v in (1,2,5,10) if v*base>=desired)
             if self.auto_map_layout.isChecked() and step*count>abs(hi-lo)*.75:
                 desired=abs(hi-lo)*.75/count; base=10**np.floor(np.log10(max(desired,1e-12)))
@@ -821,26 +838,29 @@ class MapWorkspace:
             value_size=text_options(self.map_fonts,'scale_values',8,'#222222')['fontsize']
             unit_size=text_options(self.map_fonts,'scale_unit',9,'#222222')['fontsize']
             base=bottom-(15+value_size)*pixels
-            current=(lo,hi,x,step,base)
+            offset=offset_pixels(self,'scale')
+            current=(lo,hi,x,step,base,*offset,self.figure.dpi,ax.bbox.x0,ax.bbox.width)
             if state and np.allclose(state[0],current,rtol=0,atol=.01): return False
             state[:]=[current]
             for artist in artists: artist.remove()
             artists.clear()
-            trans=blended_transform_factory(ax.transData,IdentityTransform())
+            from matplotlib.transforms import Affine2D
+            trans=blended_transform_factory(ax.transData,IdentityTransform())+Affine2D().translate(*offset)
             for i in range(count):
                 patch=Rectangle((x+i*step,base),step,5*pixels,transform=trans,clip_on=False,
                                 facecolor='white' if i%2 else 'black',edgecolor='black',linewidth=.7,zorder=100000)
                 ax.add_patch(patch); artists.append(patch)
             for i in range(count+1):
                 artists.append(ax.text(x+i*step,base+9*pixels,f'{i*step/factor:g}',transform=trans,ha='center',**text_options(self.map_fonts,'scale_values',8,'#222222'),zorder=100000,clip_on=False))
-            artists.append(ax.text(x+count*step,base-11*pixels,self.scale_unit.currentText(),transform=trans,ha='right',**text_options(self.map_fonts,'scale_unit',9,'#222222'),zorder=100000,clip_on=False))
+            artists.append(ax.text(x+count*step/2,base-11*pixels,self.scale_unit.currentText(),transform=trans,ha='center',**text_options(self.map_fonts,'scale_unit',9,'#222222'),zorder=100000,clip_on=False))
             if self.scale_crs.isChecked():
-                artists.append(ax.text(x,base-(15+unit_size)*pixels,self.crs_caption(),transform=trans,ha='left',**text_options(self.map_fonts,'scale_crs',8,'#222222'),zorder=100000,clip_on=False))
+                artists.append(ax.text(x+count*step/2,base-(15+unit_size)*pixels,self.crs_caption(),transform=trans,ha='center',**text_options(self.map_fonts,'scale_crs',8,'#222222'),zorder=100000,clip_on=False))
             return True
         original_draw=ax.draw
         def draw_with_scale(renderer):
             ax.xaxis.get_tightbbox(renderer); update(renderer); original_draw(renderer)
         ax.draw=draw_with_scale
+        ax._map_scale_update=update
         update(); self._map_decorations.append(update); ax.callbacks.connect('xlim_changed',update)
 
     def fit_maps(self): self._map_fit=True; self.redraw()
@@ -857,7 +877,7 @@ class MapWorkspace:
     def reset_map_project(self,name='Без названия'):
         self._map_loading=True; self._map_selected=None; self.layers.clear(); self._map_loading=False
         self.map_title.clear()
-        self.map_fonts={}; self._map_home=None
+        self.map_fonts={}; self.map_offsets={}; self._map_home=None
         self.colorbar_orientation.blockSignals(True); self.colorbar_orientation.setCurrentIndex(0); self.colorbar_orientation.blockSignals(False)
         self.map_font_editor.load_element()
         self.restore_geography()
@@ -905,7 +925,9 @@ class MapWorkspace:
                 if row['kind']=='vector': row['data']=row['data'].reproject(project_crs)
         MapWorkspace.reset_map_project(self,manifest['name'])
         presentation=manifest.get('presentation',{})
-        self.map_fonts=dict(presentation.get('fonts') or {})
+        self.map_fonts=migrate_map_fonts(presentation.get('fonts'))
+        from .map_layout import validated_offsets
+        self.map_offsets=validated_offsets(presentation.get('offsets'))
         self.map_font_editor.load_element()
         self.colorbar_orientation.blockSignals(True)
         self.colorbar_orientation.setCurrentIndex(max(0,self.colorbar_orientation.findData(presentation.get('colorbar_orientation','vertical'))))

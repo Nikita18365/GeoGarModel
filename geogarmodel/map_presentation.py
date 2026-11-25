@@ -5,7 +5,8 @@ from .model_archive import atomic_output
 
 FONT_ELEMENTS={
     'title':('Название карты',12,'#111111'),
-    'colorbar':('Значения и единицы цветовой шкалы',10,'#222222'),
+    'colorbar':('Значения цветовой шкалы',10,'#222222'),
+    'colorbar_label':('Подпись цветовой шкалы',10,'#222222'),
     'coordinates':('Значения координатной сетки',10,'#222222'),
     'axes':('Подписи осей',10,'#222222'),
     'scale_unit':('Размерность масштабной линейки',9,'#222222'),
@@ -13,6 +14,14 @@ FONT_ELEMENTS={
     'scale_values':('Значения масштабной линейки',8,'#222222'),
     'contours':('Значения изолиний',8,None),
 }
+
+
+def migrate_map_fonts(settings):
+    """Split the legacy combined colorbar style without changing old projects."""
+    result=dict(settings or {})
+    if 'colorbar' in result and 'colorbar_label' not in result:
+        result['colorbar_label']=dict(result['colorbar'])
+    return result
 
 
 def text_options(settings,key,size=None,color=None):
@@ -44,7 +53,7 @@ def apply_map_fonts(figure,settings):
     for other in figure.axes[1:]:
         if not hasattr(other,'_colorbar'): continue
         for axis in (other.xaxis,other.yaxis):
-            apply(axis.label,'colorbar')
+            apply(axis.label,'colorbar_label')
             for label in [*axis.get_ticklabels(),axis.get_offset_text()]: apply(label,'colorbar')
             if 'colorbar' in settings:
                 options=text_options(settings,'colorbar')
