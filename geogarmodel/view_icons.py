@@ -1,6 +1,6 @@
 """Small native vector icons for model navigation, independent of external APIs."""
 from PyQt5.QtCore import Qt,QPointF,QRectF
-from PyQt5.QtGui import QIcon,QPixmap,QPainter,QPen,QColor,QPolygonF
+from PyQt5.QtGui import QIcon,QPixmap,QPainter,QPen,QColor,QPolygonF,QPainterPath
 
 
 def view_icon(kind):
@@ -12,6 +12,39 @@ def view_icon(kind):
         p.setBrush(Qt.NoBrush)
         p.drawRect(QRectF(3,6,22,16))
         if kind=='maps': p.drawLine(5,10,23,10); p.drawLine(5,15,23,15)
+    elif kind=='layer_grid':
+        # Colour bands and curved isolines: a numerical geophysical grid.
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor('#213b66')); p.drawRoundedRect(QRectF(2,3,24,22),3,3)
+        for i,color in enumerate(('#3678d4','#35a9c7','#51c997','#f2d15b','#e77a45')):
+            p.fillRect(QRectF(4+i*4,5,4,18),QColor(color))
+        p.setPen(QPen(QColor('#24364b'),1.5)); p.setBrush(Qt.NoBrush)
+        for offset in (0,7):
+            contour=QPainterPath(QPointF(4,10+offset))
+            contour.cubicTo(11,2+offset,15,21+offset,24,10+offset)
+            p.drawPath(contour)
+        p.setPen(QPen(QColor('#b9d1e5'),1.2))
+        p.drawRoundedRect(QRectF(2,3,24,22),3,3)
+    elif kind=='layer_vector':
+        # Polygon, polyline and a point; one icon for all vector geometries.
+        p.setPen(QPen(QColor('#b1ebba'),1.7)); p.setBrush(QColor('#2c714b'))
+        p.drawPolygon(QPolygonF([QPointF(4,5),QPointF(15,4),QPointF(20,12),QPointF(7,14)]))
+        p.setPen(QPen(QColor('#59dfae'),2.2)); p.setBrush(Qt.NoBrush)
+        p.drawPolyline(QPolygonF([QPointF(3,22),QPointF(10,17),QPointF(17,23),QPointF(25,15)]))
+        p.setPen(QPen(QColor('#efffdc'),1.2)); p.setBrush(QColor('#f2cd69'))
+        p.drawEllipse(QRectF(20,3,5,5))
+    elif kind=='layer_raster':
+        # A framed pixel mosaic, distinct from a scalar grid with isolines.
+        p.setPen(Qt.NoPen); p.setBrush(QColor('#364b67'))
+        p.drawRoundedRect(QRectF(2,3,24,22),3,3)
+        colors=(('#90bce8','#90bce8','#c9d9ee'),
+                ('#7893a6','#d2c39a','#90bce8'),
+                ('#5e8b6d','#8db185','#b0a077'))
+        for y,band in enumerate(colors):
+            for x,color in enumerate(band):
+                p.fillRect(QRectF(4+x*7,5+y*6,6,5),QColor(color))
+        p.setPen(QPen(QColor('#b9d1e5'),1.2)); p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(2,3,24,22),3,3)
     elif kind=='fit':
         for x,y,sx,sy in [(3,3,1,1),(25,3,-1,1),(3,25,1,-1),(25,25,-1,-1)]:
             p.drawLine(x,y,x+sx*7,y); p.drawLine(x,y,x,y+sy*7)

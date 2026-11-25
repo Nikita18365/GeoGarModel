@@ -2,7 +2,7 @@
 from pathlib import Path
 import json
 import numpy as np
-from PyQt5.QtCore import Qt,QMimeData,QSettings
+from PyQt5.QtCore import Qt,QMimeData,QSettings,QSize
 from PyQt5.QtGui import QColor,QKeySequence,QDrag
 from PyQt5.QtWidgets import (QListWidgetItem,QAbstractItemView,QMenu,QShortcut,QInputDialog,
     QFileDialog,QMessageBox,QDoubleSpinBox,QSpinBox,QLineEdit,QCheckBox,QColorDialog,QStyledItemDelegate,QPushButton,QComboBox,QDialog,QDialogButtonBox,QFormLayout,QSlider,QWidget,QHBoxLayout)
@@ -17,6 +17,7 @@ from .sun_picker import SunPicker
 from .crs_editor import CRSEditor,read_prj
 from .palette_library import local_library,PaletteDialog,preview
 from .ui_layout import Disclosure
+from .view_icons import view_icon
 
 
 class LayerNameDelegate(QStyledItemDelegate):
@@ -92,6 +93,7 @@ class MapWorkspace:
         self.layers.setSelectionMode(QAbstractItemView.SingleSelection)
         self.layers.setDragDropMode(QAbstractItemView.InternalMove)
         self.layers.setItemDelegate(LayerNameDelegate(self.layers))
+        self.layers.setIconSize(QSize(20,20))
         self.layers.setContextMenuPolicy(Qt.CustomContextMenu)
         self.layers.customContextMenuRequested.connect(self.map_context)
         self.layers.currentItemChanged.connect(self.map_selection)
@@ -425,6 +427,8 @@ class MapWorkspace:
                 row['style'].setdefault(key,value)
         self._map_loading=True
         item=LayerItem(row['name']); item.setData(Qt.UserRole,row)
+        icon_kind={'grid':'layer_grid','vector':'layer_vector','raster':'layer_raster'}.get(row['kind'])
+        if icon_kind is not None: item.setIcon(view_icon(icon_kind))
         item.setForeground(QColor('#dbe7f6'))
         item.setFlags(item.flags()|Qt.ItemIsUserCheckable|Qt.ItemIsEditable|Qt.ItemIsDragEnabled)
         item.setCheckState(Qt.Checked if row['visible'] else Qt.Unchecked)
