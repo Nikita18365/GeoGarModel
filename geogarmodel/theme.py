@@ -1,10 +1,8 @@
 """Application-wide palette and spacing, independent of numerical code."""
 STYLE = """
 QMainWindow, QDialog, QWidget { background: #0b1220; color: #dbe7f6; font-size: 13px; }
-QWidget#header { background: #101c2f; border-bottom: 1px solid #24364e; }
-QLabel#brand { font-size: 20px; font-weight: 600; color: #f1f7ff; }
+QWidget#mainTabTools { background: transparent; }
 QLabel#muted { color: #93a9c4; }
-QLabel#logo { background: #123c49; color: #2dd4bf; font-size: 24px; font-weight: 700; border-radius: 10px; }
 QLabel#metricCard { background: #14263b; border: 1px solid #243e59; border-radius: 9px; padding: 6px 9px; font-size: 15px; font-weight: 600; }
 QLabel { background: transparent; }
 QTabWidget::pane { border: 1px solid #24364e; border-radius: 8px; }
@@ -15,6 +13,8 @@ QPushButton#workflowStep { background: #14263b; color: #cbdff5; border: 1px soli
 QPushButton#workflowStep:checked { background: #1b394c; color: #38bdf8; border-color: #38bdf8; }
 QWidget#inversionParameters QComboBox:disabled, QWidget#inversionParameters QCheckBox:disabled { color: #cbdff5; }
 QPushButton, QToolButton { background: #182b43; border: 1px solid #2a4360; border-radius: 6px; padding: 7px 11px; }
+QWidget#mainTabTools QPushButton, QWidget#mainTabTools QToolButton { padding: 3px 8px; }
+QWidget#mainTabTools QComboBox { padding: 3px 6px; }
 QPushButton:hover, QToolButton:hover { background: #23405d; border-color: #38bdf8; }
 QPushButton:disabled { color: #586d86; background: #101c2f; }
 QPushButton#primary { background: #147d91; border-color: #2dd4bf; color: white; font-weight: 600; }

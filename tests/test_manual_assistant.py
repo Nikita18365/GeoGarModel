@@ -307,7 +307,7 @@ def test_model_picker_displays_model_specific_commands(qt_application_lifetime,m
         window.close()
 
 
-def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lifetime):
+def test_chat_is_accessible_from_tab_row_and_refuses_off_topic(qt_application_lifetime):
     from PyQt5.QtCore import Qt, QThreadPool
     from PyQt5.QtGui import QTextOption
     from PyQt5.QtTest import QTest
@@ -317,7 +317,19 @@ def test_chat_is_accessible_from_header_and_refuses_off_topic(qt_application_lif
 
     window=MainWindow()
     try:
-        button=next(button for button in window.findChildren(QPushButton) if '🦊' in button.text())
+        from PyQt5.QtWidgets import QLabel,QToolButton
+        tools=window.tabs.cornerWidget(Qt.TopRightCorner)
+        assert tools is not None
+        assert tools.isAncestorOf(window.compute_badge)
+        assert tools.isAncestorOf(window.manual_assistant.device)
+        assert any(b.text()=='Питомец' for b in tools.findChildren(QToolButton))
+        assert not any(label.objectName() in ('brand','logo') or
+                       label.text()=='Данные → настройки → результат'
+                       for label in window.findChildren(QLabel))
+        root_layout=window.centralWidget().layout()
+        assert root_layout.count()==1 and root_layout.itemAt(0).widget() is window.tabs
+        assert window.tabs.count()==3
+        button=next(button for button in tools.findChildren(QPushButton) if '🦊' in button.text())
         assert window.manual_assistant.isHidden()
         button.click()
         chat=window.manual_assistant
