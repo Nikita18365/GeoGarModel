@@ -467,7 +467,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
             transform,points = dialog.transform,dialog.points
         raster = self.activity.run('Привязка растра',place_raster,image,transform,crs,self.map_project_crs,points)
         self._map_fit = True
-        self.add_map_layer(dict(kind='raster',name=Path(path).stem,visible=True,style={},data=raster))
+        self.add_map_layer(dict(kind='raster',name=Path(path).name,visible=True,style={},data=raster))
 
     def open_grid(self):
         if not self.ensure_map_project(): return

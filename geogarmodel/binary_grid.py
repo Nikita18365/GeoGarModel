@@ -62,7 +62,7 @@ def read_binary_grid(path):
             xx,yy=np.meshgrid(x-x0,y[start:start+128]-y0)
             rotated[start:start+128]=sample(np.stack((-s*xx+c*yy,c*xx+s*yy),axis=-1))
         values=rotated; history.append(dict(operation='rotate_to_xy',interpolation='linear'))
-    grid=Grid(x,y,values,path.stem,coordinate_unit='m',history=history)
+    grid=Grid(x,y,values,path.name,coordinate_unit='m',history=history)
     # Only trust actual WKT sidecars. Binary GI is deliberately not guessed.
     sidecars={p.name.lower():p for p in path.parent.iterdir() if p.is_file()}
     for name in (path.stem+'.prj',path.name+'.prj'):

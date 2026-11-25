@@ -112,7 +112,7 @@ def read_arcgis_float(path):
     # The first stored row is the northern edge, while Grid indexes Y upwards.
     values = raw.reshape(ny,nx)[::-1].astype(float)
     values[(values==nodata) | ~np.isfinite(values)] = np.nan
-    return Grid(origin[0]+step*np.arange(nx),origin[1]+step*np.arange(ny),values,path.stem)
+    return Grid(origin[0]+step*np.arange(nx),origin[1]+step*np.arange(ny),values,path.name)
 
 
 def read_zmap(path):
@@ -145,7 +145,7 @@ def read_zmap(path):
         raise ValueError(f"ZMAP: ожидалось {nx * ny} значений, получено {len(values)}.")
     array = np.asarray(values).reshape(nx, ny).T[::-1]
     array[array == null] = np.nan
-    return Grid(np.linspace(xmin, xmax, nx), np.linspace(ymin, ymax, ny), array, Path(path).stem)
+    return Grid(np.linspace(xmin, xmax, nx), np.linspace(ymin, ymax, ny), array, Path(path).name)
 
 
 def points_to_grid(x, y, values, nx=200, ny=200, method="linear", **metadata):

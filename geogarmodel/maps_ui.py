@@ -499,7 +499,7 @@ class MapWorkspace:
                 source=self.import_source_crs(read_prj(prj) if prj.exists() else '',Path(path).stem)
                 if source is None: return
             vector=self.activity.run('Загрузка векторного слоя',lambda: read_vector(path,source).reproject(crs))
-            self.add_map_layer(dict(kind='vector',name=Path(path).stem,visible=True,style={},data=vector))
+            self.add_map_layer(dict(kind='vector',name=Path(path).name,visible=True,style={},data=vector))
 
     def clear_overlays(self):
         self._map_loading=True
