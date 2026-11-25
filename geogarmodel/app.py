@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, QVB
     QScrollArea, QGroupBox, QProgressBar, QGridLayout, QSizePolicy, QBoxLayout,QInputDialog)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
-from .grids import load_grid, save_grid, points_to_grid
+from .grids import load_grid, points_to_grid
 from .fields import TRANSFORMS, transform
 from .models import read_table, available_models, train_horizon, make_model
 from .plotting import draw_map
@@ -26,6 +26,7 @@ from .parameter_files import validate_parameters, read_parameters, best_snapshot
 from .window_theme import apply_window_theme
 from .ui_layout import Disclosure,ParameterSplitter,details,form_details,workflow_sections,quiet_button,prepare_forms
 from .maps_ui import MapWorkspace,LayerList
+from .map_export_ui import MapExportMixin
 from .map_navigation import MapToolbar
 from .project_ui import ProjectWorkspace
 
@@ -58,7 +59,7 @@ class Worker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
-class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
+class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GeoGarModel 2.3 · интерпретация и моделирование")
@@ -228,9 +229,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         self.setup_map_workspace(map_style_form,form,main_data_panel)
         self.transform_button = self.button("Рассчитать → новый слой", self.apply_transform, panel)
         self.transform_button.setObjectName('primary')
-        export_group=QGroupBox('Сохранить результат'); panel=QVBoxLayout(export_group); root_panel.addWidget(export_group)
-        self.button("Сохранить сетку NPZ", self.export_grid, panel)
-        self.button("Экспорт XYZ CSV", self.export_xyz, panel)
+        export_group=QGroupBox('Экспорт выбранного слоя'); panel=QVBoxLayout(export_group); root_panel.addWidget(export_group)
+        self.setup_map_exports(panel)
         self.map_workflow=workflow_sections(root_panel,[('1 · Карта',[data_group]),('2 · Расчёт',[transform_group]),
             ('3 · Вид',[style_group]),('4 · Файл',[export_group])])
         for group in (style_group,transform_group):
@@ -697,22 +697,6 @@ class MainWindow(ProjectWorkspace,MapWorkspace,QMainWindow):
         grid, operation = self.selected_grid(), self.operation.currentData()
         args = dict(height=self.height.value(), wavelength=self.wave.value(), degree=self.degree.value())
         self.run_job(lambda: transform(grid, operation, **args), self.add_grid,title='Расчёт трансформанты')
-
-    def export_grid(self):
-        grid = self.selected_grid()
-        path, _ = QFileDialog.getSaveFileName(self, "Сохранить сетку с метаданными", "", "NPZ (*.npz)")
-        if path:
-            self.activity.run('Экспорт сетки',save_grid,grid, path if path.lower().endswith(".npz") else path + ".npz")
-
-    def export_xyz(self):
-        import pandas as pd
-        grid = self.selected_grid()
-        path,_=QFileDialog.getSaveFileName(self,'Поле XYZ','','CSV (*.csv)')
-        if path:
-            def write_xyz():
-                xx, yy = np.meshgrid(grid.x, grid.y)
-                write_csv(pd.DataFrame({"X": xx.ravel(), "Y": yy.ravel(), grid.name: grid.values.ravel()}),path)
-            self.activity.run('Экспорт XYZ',write_xyz)
 
     def open_training(self):
         path, _ = QFileDialog.getOpenFileName(self, "Обучающая таблица", "", "Таблицы (*.xlsx *.csv *.txt)")
