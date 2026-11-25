@@ -341,3 +341,54 @@ def test_hillshade_illumination_and_intensity():
     south=np.asarray(ax.images[1].get_array()).mean()
     assert south>north  # A surface rising northward faces south (origin='lower').
     assert ax.images[1].get_alpha()==pytest.approx(.2)
+
+
+def test_default_geophysical_palette_and_view_sections(tmp_path,qt_application_lifetime):
+    from geogarmodel.palette_library import DEFAULT_MAP_PALETTE,bundled_palettes
+    window=MainWindow()
+    try:
+        assert DEFAULT_MAP_PALETTE in bundled_palettes()
+        assert window.palette.currentText()==DEFAULT_MAP_PALETTE
+        assert window.palette.itemText(0)==DEFAULT_MAP_PALETTE
+        assert all(window.palette.findText(name)>=0 for name in window.palette_library)
+        sections=window.map_view_sections
+        assert list(sections)==['colors','contours','relief','axes','scale','layout']
+        assert sections['colors'].toggle.isChecked()
+        assert all(not s.toggle.isChecked() for k,s in sections.items() if k!='colors')
+        assert sections['colors'].content.isAncestorOf(window.palette)
+        assert sections['contours'].content.isAncestorOf(window.contour_step)
+        assert sections['relief'].content.isAncestorOf(window.sun_intensity)
+        assert sections['axes'].content.isAncestorOf(window.geo_widgets['axes'])
+        assert sections['scale'].content.isAncestorOf(window.scale_step)
+        assert sections['layout'].content.isAncestorOf(window.map_title)
+        window.add_grid(grid('first'))
+        first=window.layers.currentItem()
+        assert first.data(Qt.UserRole)['style']['cmap']==DEFAULT_MAP_PALETTE
+        assert first.data(Qt.UserRole)['style']['palette_colors']==window._default_palette_entry['colors']
+        window.palette.setCurrentText('terrain')
+        window.map_reverse.setChecked(True)
+        window.contours.setChecked(True)
+        window.contour_step.setValue(5)
+        section=sections['contours']
+        section.toggle.click()
+        assert not section.content.isHidden()
+        assert not window.contour_step.isHidden()
+        section.toggle.click()
+        assert section.content.isHidden()
+        assert window.contours.isChecked() and window.contour_step.value()==5
+        section.toggle.click()
+        assert not window.contour_color_button.isHidden()
+        window.add_grid(grid('second'))
+        assert window.palette.currentText()==DEFAULT_MAP_PALETTE
+        assert not window.map_reverse.isChecked()
+        assert first.data(Qt.UserRole)['style']['cmap']=='terrain'
+        window.layers.setCurrentItem(first)
+        assert window.palette.currentText()=='terrain' and window.map_reverse.isChecked()
+        path=tmp_path/'styles.ggproject'
+        window.save_project_to(path)
+        assert window.open_project_from(path)
+        rows=window.map_layer_rows()
+        assert rows[0]['style']['cmap']==DEFAULT_MAP_PALETTE
+        assert rows[1]['style']['cmap']=='terrain' and rows[1]['style']['reverse']
+    finally:
+        window.close()

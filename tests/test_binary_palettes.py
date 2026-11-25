@@ -37,6 +37,10 @@ def test_bundled_library_available_without_user_import(monkeypatch):
     assert len(bundled)==144
     assert {name.split('/')[0] for name in bundled}=={'heat map','geophysics','topography','monochromatic','miscellaneous'}
     assert library['geophysics/#GRAV.TBL']['colors']
+    assert palettes.DEFAULT_MAP_PALETTE in bundled
+    assert palettes.default_map_palette(library)==palettes.DEFAULT_MAP_PALETTE
+    assert palettes.default_map_palette({'GEOPHYSICS/CLRA_128.TBL':{}})=='GEOPHYSICS/CLRA_128.TBL'
+    assert palettes.default_map_palette({'viridis':{}})=='viridis'
     assert all(name in library and len(value['colors'])>=2 for name,value in bundled.items())
 
 

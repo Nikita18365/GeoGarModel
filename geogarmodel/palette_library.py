@@ -13,6 +13,16 @@ from PyQt5.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QComboBox,QLineEdit
     QTreeWidgetItem,QPushButton,QDialogButtonBox,QFileDialog,QMessageBox)
 
 
+DEFAULT_MAP_PALETTE = 'geophysics/clra_128.tbl'
+
+
+def default_map_palette(library):
+    """Prefer the bundled geophysical scale, including differently cased imports."""
+    if DEFAULT_MAP_PALETTE in library:
+        return DEFAULT_MAP_PALETTE
+    return next((name for name in library if name.casefold()==DEFAULT_MAP_PALETTE.casefold()),'viridis')
+
+
 def parse_palette(text,name):
     header=text.lower().split('}')[0]
     rows=[]

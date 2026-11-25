@@ -15,7 +15,7 @@ from .plotting import draw_map
 from .map_navigation import north_direction
 from .sun_picker import SunPicker
 from .crs_editor import CRSEditor,read_prj
-from .palette_library import local_library,PaletteDialog,preview
+from .palette_library import local_library,PaletteDialog,preview,default_map_palette
 from .ui_layout import Disclosure
 from .view_icons import view_icon
 
@@ -104,9 +104,18 @@ class MapWorkspace:
         self.map_style_widgets={'cmap':self.palette,'mode':self.norm,'vmin':self.minimum,'vmax':self.maximum,
             'contours':self.contours,'hillshade':self.shade}
         self.palette_library=local_library()
-        self.palette.setIconSize(__import__('PyQt5.QtCore',fromlist=['QSize']).QSize(130,18))
-        for i in range(self.palette.count()):
-            name=self.palette.itemText(i); self.palette.setItemIcon(i,preview(self.palette_library[name]['colors']))
+        self.default_map_palette=default_map_palette(self.palette_library)
+        # Keep the initial palette independent of embedded styles restored from projects.
+        self._default_palette_entry=dict(self.palette_library[self.default_map_palette])
+        self.palette.setIconSize(QSize(130,18))
+        self.palette.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.palette.setMinimumContentsLength(10)
+        self.palette.clear()
+        self.palette.addItem(preview(self._default_palette_entry['colors']),self.default_map_palette)
+        self.refresh_map_palettes()
+        self.palette.setCurrentText(self.default_map_palette)
+        self.palette.setToolTip(self.default_map_palette)
+        self.palette.currentTextChanged.connect(self.palette.setToolTip)
         palette_button=QPushButton('Библиотека палитр…'); palette_button.clicked.connect(lambda:self.guard(self.choose_palette))
         style_form.insertRow(1,palette_button)
         self.map_discrete=QCheckBox('Дискретные цветовые зоны')
@@ -180,24 +189,69 @@ class MapWorkspace:
             selected=QColorDialog.getColor(QColor(self.geo_color),self,'Цвет географической сетки')
             if selected.isValid(): self.geo_color=selected.name(); self.redraw()
         geo_color.clicked.connect(choose_geo_color); geo_form.addRow('Цвет линий',geo_color)
-        style_form.addRow(Disclosure('Оси и географическая сетка',geo_panel))
+        geo_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        geo_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        geo_form.setVerticalSpacing(6)
         style_form.addRow('Единицы линейки',self.scale_unit)
         style_form.addRow('Шаг линейки',self.scale_step); style_form.addRow('Число делений',self.scale_count)
         style_form.addRow(self.scale_crs)
+
+        # Move the existing controls, not copies. Signal connections and style
+        # serialization continue to refer to the same widget objects.
+        self.map_view_sections={}
+        field_labels={}
+        def section(key,title,fields,expanded=False):
+            body=QWidget()
+            inner=QFormLayout(body)
+            inner.setContentsMargins(8,4,4,6)
+            inner.setRowWrapPolicy(QFormLayout.WrapAllRows)
+            inner.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            inner.setVerticalSpacing(6)
+            for field in fields:
+                moved=style_form.takeRow(field)
+                label=moved.labelItem.widget() if moved.labelItem else None
+                widget=moved.fieldItem.widget()
+                if label is not None:
+                    inner.addRow(label,widget)
+                    field_labels[field]=label
+                else:
+                    inner.addRow(widget)
+            disclosure=Disclosure(title,body,expanded)
+            disclosure.toggle.setAccessibleName(title)
+            self.map_view_sections[key]=disclosure
+            style_form.addRow(disclosure)
+
+        section('colors','Цветовые элементы',
+                [self.palette,palette_button,self.norm,self.minimum,self.maximum,
+                 self.map_reverse,self.map_discrete,self.map_bins,self.map_zone_values,
+                 self.map_smooth,self.map_alpha],True)
+        section('contours','Изолинии',
+                [self.contours,self.contour_step,color_button,self.contour_width,self.contour_labels])
+        section('relief','Теневой рельеф',
+                [self.shade,self.sun_picker,self.sun_azimuth,self.sun_altitude,self.sun_intensity_row,self.sun_relief])
+        axes_section=Disclosure('Оси и географическая сетка',geo_panel)
+        axes_section.toggle.setAccessibleName('Оси и географическая сетка')
+        self.map_view_sections['axes']=axes_section
+        style_form.addRow(axes_section)
+        section('scale','Масштабная линейка',
+                [self.scale_on,self.scale_unit,self.scale_step,self.scale_count,self.scale_crs])
+        section('layout','Заголовок и компоновка',
+                [self.map_title,self.auto_map_layout])
+
         def show_details():
             for widget in (self.sun_picker,self.sun_azimuth,self.sun_altitude,self.sun_intensity_row,self.sun_relief):
                 widget.setVisible(self.shade.isChecked())
-                label=style_form.labelForField(widget)
+                label=field_labels.get(widget)
                 if label: label.setVisible(self.shade.isChecked())
             for widget in (self.contour_step,self.contour_width,self.contour_labels):
                 widget.setVisible(self.contours.isChecked())
-                label=style_form.labelForField(widget)
+                label=field_labels.get(widget)
                 if label: label.setVisible(self.contours.isChecked())
             color_button.setVisible(self.contours.isChecked())
-            style_form.labelForField(color_button).setVisible(self.contours.isChecked())
+            field_labels[color_button].setVisible(self.contours.isChecked())
             for widget in (self.scale_step,self.scale_count,self.scale_unit,self.scale_crs):
                 widget.setVisible(self.scale_on.isChecked())
-                label=style_form.labelForField(widget)
+                label=field_labels.get(widget)
                 if label: label.setVisible(self.scale_on.isChecked())
         self.contours.toggled.connect(show_details); self.scale_on.toggled.connect(show_details); self.shade.toggled.connect(show_details); show_details()
         self.scale_unit.currentIndexChanged.connect(self.change_scale_unit)
@@ -299,12 +353,28 @@ class MapWorkspace:
         if not known: self.statusBar().showMessage('СК файла не найдена: используется СК проекта. Изменить: «СК и параметры слоя…».',12000)
         return known or self.map_project_crs
 
+    def refresh_map_palettes(self):
+        # Include every palette in the inline selector; the library dialog
+        # remains available for searching, previewing and importing files.
+        blocked=self.palette.blockSignals(True)
+        try:
+            preferred=('viridis','cividis','RdBu_r','coolwarm','terrain','seismic','rainbow','turbo')
+            names=[*preferred,*sorted(self.palette_library,key=str.casefold)]
+            for name in dict.fromkeys(names):
+                if name not in self.palette_library: continue
+                index=self.palette.findText(name)
+                icon=preview(self.palette_library[name]['colors'])
+                if index<0: self.palette.addItem(icon,name)
+                else: self.palette.setItemIcon(index,icon)
+        finally:
+            self.palette.blockSignals(blocked)
+
     def choose_palette(self):
         dialog=PaletteDialog(self.palette_library,self)
-        if dialog.exec_()!=QDialog.Accepted: return
-        name=dialog.selected
-        if self.palette.findText(name)<0: self.palette.addItem(preview(self.palette_library[name]['colors']),name)
-        self.palette.setCurrentText(name)
+        accepted=dialog.exec_()==QDialog.Accepted
+        self.refresh_map_palettes()
+        if accepted:
+            self.palette.setCurrentText(dialog.selected)
 
     def choose_source_crs(self,known,name):
         dialog=QDialog(self); dialog.setWindowTitle('Исходная СК — '+name); dialog.resize(620,320)
@@ -396,7 +466,10 @@ class MapWorkspace:
             style=item.data(Qt.UserRole)['style']; self._map_loading=True
             if style.get('palette_colors'):
                 self.palette_library[style['cmap']]=dict(colors=style['palette_colors'],zones=style.get('palette_zones'))
-                if self.palette.findText(style['cmap'])<0: self.palette.addItem(preview(style['palette_colors']),style['cmap'])
+                index=self.palette.findText(style['cmap'])
+                icon=preview(style['palette_colors'])
+                if index<0: self.palette.addItem(icon,style['cmap'])
+                else: self.palette.setItemIcon(index,icon)
             for key,w in self.map_style_widgets.items():
                 value=style.get(key)
                 if value is None: continue
@@ -451,7 +524,13 @@ class MapWorkspace:
                 if not self.apply_project_crs(grid.crs): return
             else:
                 self.map_project_crs=grid.crs; self.update_project_label()
-        style=self.read_map_style(); style.update(vmin='',vmax='')
+        style=self.read_map_style()
+        # New imports and calculated grids always start with the same scale,
+        # not the palette (or reverse/discrete options) of the selected layer.
+        style.update(vmin='',vmax='',cmap=self.default_map_palette,
+                     palette_colors=self._default_palette_entry['colors'],
+                     palette_zones=self._default_palette_entry.get('zones'),
+                     reverse=False,discrete=False,zone_values=False)
         row=dict(kind='grid',name=grid.name,visible=True,style=style,data=grid)
         if xyz is not None: row['xyz']=xyz
         if source_path:
