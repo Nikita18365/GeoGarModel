@@ -43,8 +43,7 @@ class AssistantPet(QWidget):
         self.dismiss.setAccessibleName('Скрыть питомца')
         self.dismiss.setFixedSize(21,21)
         self.dismiss.move(70,1)
-        self.dismiss.setStyleSheet('QToolButton {padding: 0; border: 1px solid #34506b; '
-                                   'background: #182b43; border-radius: 10px;}')
+        self.dismiss.setObjectName('petDismiss')
         self.dismiss.clicked.connect(lambda: self.set_pet_visible(False))
         self.timer = QTimer(self)
         self.timer.setInterval(75)
@@ -54,8 +53,7 @@ class AssistantPet(QWidget):
         self.greeting.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.greeting.setWordWrap(True)
         self.greeting.setFixedWidth(270)
-        self.greeting.setStyleSheet('QLabel {color: #f1f7ff; background: #182b43; '
-                                    'border: 1px solid #34506b; border-radius: 7px; padding: 8px;}')
+        self.greeting.setObjectName('petGreeting')
         self.greeting_timer = QTimer(self)
         self.greeting_timer.setSingleShot(True)
         self.greeting_timer.setTimerType(Qt.PreciseTimer)

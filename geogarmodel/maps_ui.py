@@ -30,7 +30,7 @@ class LayerNameDelegate(QStyledItemDelegate):
 
     def createEditor(self,parent,option,index):
         editor=QLineEdit(parent)
-        editor.setStyleSheet('QLineEdit {padding: 2px 4px; border: 1px solid #38bdf8; color: #f1f7ff; background: #101c2f; selection-color: white;}')
+        editor.setObjectName('layerNameEditor')
         return editor
 
     def updateEditorGeometry(self,editor,option,index):
@@ -521,7 +521,7 @@ class MapWorkspace:
         item=LayerItem(row['name']); item.setData(Qt.UserRole,row)
         icon_kind={'grid':'layer_grid','vector':'layer_vector','raster':'layer_raster'}.get(row['kind'])
         if icon_kind is not None: item.setIcon(view_icon(icon_kind))
-        item.setForeground(QColor('#dbe7f6'))
+        # Inherit text color from the current application palette.
         item.setFlags(item.flags()|Qt.ItemIsUserCheckable|Qt.ItemIsEditable|Qt.ItemIsDragEnabled)
         item.setCheckState(Qt.Checked if row['visible'] else Qt.Unchecked)
         self.layers.insertItem(0,item); self._map_loading=False

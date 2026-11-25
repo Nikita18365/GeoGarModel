@@ -24,7 +24,7 @@ class ModelDocument(QMdiSubWindow):
     def __init__(self,title,parent=None):
         super().__init__(parent); self.setWindowTitle(title); self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowIcon(view_icon('iso'))
-        palette=self.palette(); palette.setColor(QPalette.Highlight,QColor('#165c7a')); palette.setColor(QPalette.HighlightedText,QColor('#f1f7ff')); self.setPalette(palette)
+        # Inherit selection colors from the application palette.
         self.view=ModelView(); self.setWidget(self.view); self.resize(900,650)
         self.entries=[]; self.states={}; self.selected=None
         self.systemMenu().addSeparator()
@@ -96,7 +96,7 @@ class ModelWorkspace(QWidget):
         sidebar=QWidget(); rows=QVBoxLayout(sidebar); rows.setContentsMargins(3,3,3,3)
         self.window_title=QLabel('Модели активного окна'); self.window_title.setWordWrap(True); rows.addWidget(self.window_title)
         self.models=QListWidget(); self.models.setContextMenuPolicy(Qt.CustomContextMenu); self.models.customContextMenuRequested.connect(self.model_menu)
-        self.models.setStyleSheet('QListWidget::item { color: #dbe7f6; padding: 4px; } QListWidget::item:selected { color: #f1f7ff; background: #165c7a; }')
+        self.models.setObjectName('modelList')
         self.models.currentItemChanged.connect(self.model_selected); rows.addWidget(self.models,1)
         rows.addWidget(QLabel('Источник выбранной модели'))
         self.source_path=QLineEdit(); self.source_path.setReadOnly(True); rows.addWidget(self.source_path)
@@ -105,7 +105,7 @@ class ModelWorkspace(QWidget):
         self.catalogue=QComboBox(); self.catalogue.setMinimumContentsLength(12); self.catalogue.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon); add_row.addWidget(self.catalogue,1)
         add_bar=QToolBar(); add_bar.setIconSize(QSize(20,20)); add_bar.setStyleSheet('QToolButton { padding: 3px; }'); add_row.addWidget(add_bar)
         self.add_action=add_bar.addAction(view_icon('new'),'Добавить выбранную модель в активное окно'); self.add_action.triggered.connect(self.add_from_catalogue)
-        self.mdi=QMdiArea(); self.mdi.setBackground(QBrush(QColor('#182638'))); self.mdi.setActivationOrder(QMdiArea.ActivationHistoryOrder)
+        self.mdi=QMdiArea(); self.mdi.setActivationOrder(QMdiArea.ActivationHistoryOrder)
         self.mdi.subWindowActivated.connect(self.active_changed)
         splitter.addWidget(sidebar); splitter.addWidget(self.mdi); splitter.setSizes([230,950]); splitter.setStretchFactor(1,1)
         self._documents=[]; self.refresh()

@@ -5,6 +5,7 @@ from PyQt5.QtCore import QRectF,QTimer,QPointF,Qt
 from PyQt5.QtGui import QPainterPath,QPen,QColor,QBrush,QPainter,QPolygonF,QFont
 from PyQt5.QtWidgets import QGraphicsPathItem
 from .plotting import map_colors
+from .theme import current_theme
 from .map_sampling import sample_display
 
 
@@ -35,7 +36,7 @@ class MapImage(pg.ImageItem):
 
 class FastMap(pg.PlotWidget):
     def __init__(self,workbench):
-        super().__init__(background='#101c2f'); self.workbench=workbench
+        super().__init__(background=current_theme().panel); self.workbench=workbench
         self.setLabel('bottom','X, м'); self.setLabel('left','Y, м')
         self.setAspectLocked(True); self.showGrid(x=True,y=True,alpha=.12)
         self.getPlotItem().setMenuEnabled(False)
@@ -127,7 +128,7 @@ class FastMap(pg.PlotWidget):
         try:
             self.clear(); self.rasters=[]; self.geo_items=[]
             self.bar.setVisible(any(r['visible'] and r['kind']=='grid' for r in rows))
-            self.setTitle(self.workbench.map_title.text().strip() or self.workbench.map_project_name,color='#dbe7f6')
+            self.setTitle(self.workbench.map_title.text().strip() or self.workbench.map_project_name,color=current_theme().text)
             self.getPlotItem().layout.setRowFixedHeight(0,58)
             for index,row in enumerate(reversed(rows)):
                 if not row['visible']: continue

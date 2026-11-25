@@ -375,7 +375,9 @@ class ManualChat(QDockWidget):
         frame.setColumnWidthConstraints([QTextLength(QTextLength.PercentageLength,width) for width in (13,87)])
         cell=cursor.insertTable(1,2,frame).cellAt(0,1)
         style=cell.format()
-        style.setBackground(QColor(USER_MESSAGE_COLOR))
+        from .theme import current_theme,theme_colors
+        t=current_theme()
+        style.setBackground(QColor(USER_MESSAGE_COLOR if t.name=='Midnight Blue' else theme_colors(t)['selection']))
         cell.setFormat(style)
         cell.firstCursorPosition().insertText(question)
         self.history.moveCursor(QTextCursor.End)

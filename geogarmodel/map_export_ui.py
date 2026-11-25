@@ -27,7 +27,10 @@ def format_icon(fmt):
     font.setPixelSize(13)
     font.setBold(True)
     painter.setFont(font)
-    painter.setPen(QColor(FORMAT_COLORS[fmt]))
+    from .theme import current_theme,theme_colors
+    t=current_theme(); c=theme_colors(t)
+    color=FORMAT_COLORS[fmt] if not t.light else (t.accent if fmt=='npz' else c['success'] if fmt in ('xlsx','csv','txt') else c['gold'])
+    painter.setPen(QColor(color))
     painter.drawText(QRect(0, 0, 48, 22), Qt.AlignLeft|Qt.AlignVCenter, fmt.upper())
     painter.end()
     return QIcon(pixmap)

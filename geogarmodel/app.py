@@ -19,7 +19,7 @@ from .models import read_table, available_models, train_horizon, make_model
 from .plotting import draw_map
 from .coordinates import gsk2011_zones, validate_crs
 from .dashboard import TrainingDashboard
-from .theme import STYLE
+from .theme_ui import ThemeController
 from .compute import GPU_MODELS, ComputationCancelled
 from .optimization import default_space
 from .parameter_files import validate_parameters, read_parameters, best_snapshot
@@ -65,7 +65,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         super().__init__()
         self.setWindowTitle("GeoGarModel 2.3 · интерпретация и моделирование")
         self.resize(1480, 940)
-        self.setStyleSheet(STYLE)
+        self.theme_controller=ThemeController(self)
+        self.theme_controller.initialize()
         self.grids, self.overlays = [], []
         self.training = self.prediction = self.result = self.output = None
         self.worker = None
@@ -106,6 +107,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         settings_menu.addAction('Уведомления Telegram…').triggered.connect(lambda: self.guard(self.telegram_settings))
         self.statusBar().showMessage("Загрузите карту или обучающую таблицу.")
         self.setup_project()
+        self.theme_controller.install_menu()
+        self.theme_controller.refresh()
 
     def telegram_settings(self):
         from .telegram_ui import TelegramDialog

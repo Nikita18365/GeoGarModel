@@ -1,4 +1,7 @@
 """Application-wide palette and spacing, independent of numerical code."""
+import re
+from dataclasses import dataclass
+
 STYLE = """
 QMainWindow, QDialog, QWidget { background: #0b1220; color: #dbe7f6; font-size: 13px; }
 QWidget#mainTabTools { background: transparent; }
@@ -46,20 +49,141 @@ QToolTip { background: #203b53; color: white; border: 1px solid #38bdf8; padding
 """
 
 
+@dataclass(frozen=True)
+class Theme:
+    name: str
+    background: str
+    panel: str
+    surface: str
+    border: str
+    text: str
+    muted: str
+    accent: str
+    primary: str
+    light: bool = False
+
+
+THEMES = {
+    'midnight': Theme('Midnight Blue','#0b1220','#101c2f','#182b43','#304965','#dbe7f6','#93a9c4','#38bdf8','#147d91'),
+    'arctic': Theme('Arctic Light','#edf2f7','#ffffff','#e4ebf4','#a6b9cf','#23364b','#536a81','#236bc4','#276ec0',True),
+    'atlas': Theme('Geological Atlas','#e5dfd1','#f7f2e7','#e8e0cc','#b0a187','#3c4436','#686452','#586b31','#677a49',True),
+    'amethyst': Theme('Amethyst','#151122','#221a35','#32254b','#4e396b','#ece1fa','#b1a0cc','#bf9bff','#7045ad'),
+    'taiga': Theme('Taiga','#101e19','#182e25','#254336','#3a5c47','#deeee0','#98b6a0','#a0d781','#407c50'),
+    'copper': Theme('Copper Core','#201715','#30221d','#443028','#684737','#f5e2cf','#c6a08b','#f1ac70','#9b5632'),
+}
+DEFAULT_THEME = 'midnight'
+THEME_SETTINGS_KEY = 'appearance/theme'
+_active_theme = DEFAULT_THEME
+
+
+def theme_id(value):
+    return value if isinstance(value,str) and value in THEMES else DEFAULT_THEME
+
+
+def current_theme():
+    return THEMES[_active_theme]
+
+
+def set_active_theme(value):
+    global _active_theme
+    _active_theme=theme_id(value)
+    return current_theme()
+
+
+def blend(a,b,fraction):
+    return '#'+''.join(f'{round(int(a[i:i+2],16)*(1-fraction)+int(b[i:i+2],16)*fraction):02x}'
+                       for i in (1,3,5))
+
+
+def contrast_text(background):
+    def linear(v):
+        v=v/255
+        return v/12.92 if v<=.04045 else ((v+.055)/1.055)**2.4
+    luminance=sum(w*linear(int(background[i:i+2],16)) for i,w in zip((1,3,5),(.2126,.7152,.0722)))
+    return '#000000' if luminance>.179 else '#ffffff'
+
+
+def theme_colors(theme=None):
+    t=theme or current_theme()
+    return dict(hover=blend(t.surface,t.accent,.15),
+                selection='#165c7a' if t.name=='Midnight Blue' else blend(t.panel,t.accent,.20 if t.light else .28),
+                disabled=blend(t.muted,t.panel,.36),
+                danger='#a51d36' if t.light else '#fda4af',
+                success='#27663d' if t.light else '#86d6a0',
+                gold='#8a5a09' if t.light else '#edc775')
+
+
+def stylesheet(value):
+    key=theme_id(value); t=THEMES[key]; c=theme_colors(t)
+    replacements={
+        '#0b1220':t.background,'#101c2f':t.panel,'#182b43':t.surface,
+        '#dbe7f6':t.text,'#93a9c4':t.muted,'#304965':t.border,
+        '#38bdf8':t.accent,'#147d91':t.primary,
+        '#14263b':t.surface,'#243e59':t.border,'#24364e':t.border,
+        '#a9bbd3':t.muted,'#15263c':c['selection'],'#1b3049':c['hover'],
+        '#cbdff5':t.text,'#1b394c':c['selection'],'#2a4360':t.border,
+        '#23405d':c['hover'],'#586d86':c['disabled'],'#2dd4bf':t.accent,
+        '#1995a8':blend(t.primary,t.accent,.18),'#fda4af':c['danger'],
+        '#713343':blend(t.border,c['danger'],.45),'#a7c5e7':t.text,
+        '#165c7a':c['selection'],'#142238':blend(t.panel,t.surface,.5),
+        '#1a2d45':t.surface,'#b9cde5':t.text,'#20344d':t.surface,
+        '#65829f':t.border,'#203b53':t.surface,
+    }
+    qss=STYLE if key==DEFAULT_THEME else re.sub(r'#[0-9a-fA-F]{6}',lambda m:replacements.get(m[0].lower(),m[0]),STYLE)
+    return qss+f"""
+QTextBrowser, QTextEdit, QTreeView, QTableView {{ background: {t.panel}; color: {t.text}; selection-background-color: {c['selection']}; selection-color: {t.text}; }}
+QAbstractItemView::item:selected {{ background: {c['selection']}; color: {t.text}; }}
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{ selection-color: {t.text}; }}
+QMenuBar::item:selected, QMenu::item:selected {{ background: {c['hover']}; color: {t.text}; }}
+QMenu::item:disabled {{ color: {c['disabled']}; }}
+QToolTip {{ color: {t.text}; }}
+QPushButton#primary {{ color: {contrast_text(t.primary)}; }}
+QPushButton#primary:hover {{ color: {contrast_text(blend(t.primary,t.accent,.18))}; }}
+QPushButton#primary:disabled {{ color: {c['disabled']}; }}
+QLabel#gridCalculatorError {{ color: {c['danger']}; }}
+QListWidget#modelList::item {{ padding: 4px; }}
+QLineEdit#layerNameEditor {{ padding: 2px 4px; border: 1px solid {t.accent}; }}
+QToolButton#petDismiss {{ padding: 0; border: 1px solid {t.border}; background: {t.surface}; border-radius: 10px; }}
+QLabel#petGreeting {{ color: {t.text}; background: {t.surface}; border: 1px solid {t.border}; border-radius: 7px; padding: 8px; }}
+"""
+
+
+def qt_palette(theme=None):
+    from PyQt5.QtGui import QColor,QPalette
+    t=theme or current_theme(); c=theme_colors(t)
+    p=QPalette()
+    for role,color in ((QPalette.Window,t.background),(QPalette.WindowText,t.text),
+                       (QPalette.Base,t.panel),(QPalette.AlternateBase,t.surface),
+                       (QPalette.Text,t.text),(QPalette.Button,t.surface),(QPalette.ButtonText,t.text),
+                       (QPalette.Highlight,c['selection']),(QPalette.HighlightedText,t.text),
+                       (QPalette.ToolTipBase,t.surface),(QPalette.ToolTipText,t.text),
+                       (QPalette.Link,t.accent),(QPalette.LinkVisited,t.accent),
+                       (QPalette.Mid,t.border),(QPalette.Dark,t.border)):
+        p.setColor(role,QColor(color))
+    for role in (QPalette.Text,QPalette.WindowText,QPalette.ButtonText):
+        p.setColor(QPalette.Disabled,role,QColor(c['disabled']))
+    return p
+
+
 def style_figure(figure):
-    figure.set_facecolor("#101c2f")
+    figure._geogar_theme_figure=True
+    t=current_theme()
+    figure.set_facecolor(t.panel)
+    for text in figure.texts:
+        text.set_color(t.text)
     for ax in figure.axes:
-        ax.set_facecolor("#101c2f")
-        ax.tick_params(colors="#a9bbd3", labelsize=9)
-        ax.xaxis.label.set_color("#a9bbd3")
-        ax.yaxis.label.set_color("#a9bbd3")
-        ax.title.set_color("#dbe7f6")
+        ax.set_facecolor(t.panel)
+        ax.tick_params(colors=t.muted,labelsize=9)
+        ax.xaxis.label.set_color(t.muted)
+        ax.yaxis.label.set_color(t.muted)
+        ax.title.set_color(t.text)
         for spine in ax.spines.values():
-            spine.set_edgecolor("#304965")
+            spine.set_edgecolor(t.border)
 
 
 def style_map_figure(figure):
     """White publication sheet for maps, independent of the application theme."""
+    figure._geogar_theme_figure=False
     figure.set_facecolor('white')
     for ax in figure.axes:
         ax.set_facecolor('white'); ax.tick_params(colors='#222222',labelsize=10)

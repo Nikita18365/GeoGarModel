@@ -56,7 +56,7 @@ class GridCalculatorDialog(QDialog):
         options.addRow('Единицы результата',self.unit)
         root.addWidget(self.unit_note)
         self.error = QLabel(); self.error.setWordWrap(True)
-        self.error.setStyleSheet('color: #fda4af')
+        self.error.setObjectName('gridCalculatorError')
         root.addWidget(self.error)
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         buttons.addButton('Рассчитать → новый грид',QDialogButtonBox.AcceptRole)
