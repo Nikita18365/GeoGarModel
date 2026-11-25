@@ -27,6 +27,7 @@ from .window_theme import apply_window_theme
 from .ui_layout import Disclosure,ParameterSplitter,details,form_details,workflow_sections,quiet_button,prepare_forms
 from .maps_ui import MapWorkspace,LayerList
 from .map_export_ui import MapExportMixin
+from .grid_calculator_ui import GridCalculatorMixin
 from .map_navigation import MapToolbar
 from .project_ui import ProjectWorkspace
 
@@ -59,7 +60,7 @@ class Worker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
-class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,QMainWindow):
+class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixin,QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GeoGarModel 2.3 · интерпретация и моделирование")
@@ -229,9 +230,13 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,QMainWindow):
         self.setup_map_workspace(map_style_form,form,main_data_panel)
         self.transform_button = self.button("Рассчитать → новый слой", self.apply_transform, panel)
         self.transform_button.setObjectName('primary')
+        calculator_group=QGroupBox('Операции над сетками')
+        calculator_layout=QVBoxLayout(calculator_group); root_panel.addWidget(calculator_group)
+        self.grid_calculator_button=self.button('Калькулятор гридов…',self.open_grid_calculator,calculator_layout)
+        self.grid_calculator_button.setToolTip('Арифметика, логические операции и формулы над несколькими картами')
         export_group=QGroupBox('Экспорт выбранного слоя'); panel=QVBoxLayout(export_group); root_panel.addWidget(export_group)
         self.setup_map_exports(panel)
-        self.map_workflow=workflow_sections(root_panel,[('1 · Карта',[data_group]),('2 · Расчёт',[transform_group]),
+        self.map_workflow=workflow_sections(root_panel,[('1 · Карта',[data_group]),('2 · Расчёт',[transform_group,calculator_group]),
             ('3 · Вид',[style_group]),('4 · Файл',[export_group])])
         for group in (style_group,transform_group):
             for i in range(group.layout().count()):
@@ -647,7 +652,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,QMainWindow):
         self.worker.cancelled.connect(self.job_cancelled)
         self.worker.progress.connect(self.trial_progress)
         self.worker.finished.connect(self.job_finished)
-        for widget in (self.fit_button, self.predict_button, self.transform_button, self.train_load, self.pred_load):
+        for widget in (self.fit_button, self.predict_button, self.transform_button, self.grid_calculator_button, self.train_load, self.pred_load):
             widget.setEnabled(False)
         self.statusBar().showMessage("Выполняется расчёт…")
         self.stop_button.setEnabled(with_context)
@@ -688,7 +693,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,QMainWindow):
         self.worker.function = None
         self.worker.deleteLater()
         self.worker = None
-        for widget in (self.fit_button, self.predict_button, self.transform_button, self.train_load, self.pred_load):
+        for widget in (self.fit_button, self.predict_button, self.transform_button, self.grid_calculator_button, self.train_load, self.pred_load):
             widget.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.statusBar().showMessage(self.job_outcome)
