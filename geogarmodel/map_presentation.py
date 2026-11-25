@@ -1,6 +1,8 @@
 """Presentation-only settings for publication maps and tight image export."""
 from pathlib import Path
 import math
+from functools import lru_cache
+from matplotlib import font_manager
 from .model_archive import atomic_output
 
 FONT_ELEMENTS={
@@ -16,18 +18,49 @@ FONT_ELEMENTS={
 }
 
 
+DEFAULT_MAP_FONT = 'DejaVu Sans'
+
+
+@lru_cache(maxsize=1)
+def available_map_fonts():
+    """Real family names known to Matplotlib, not Qt/Windows aliases."""
+    return tuple(sorted(font_manager.fontManager.get_font_names(), key=str.casefold))
+
+
+@lru_cache(maxsize=256)
+def resolve_map_font(family):
+    """Resolve before drawing, rather than repeatedly logging missing fonts."""
+    names = {name.casefold(): name for name in available_map_fonts()}
+    requested = (family or '').strip().casefold()
+    if requested in names:
+        return names[requested]
+    aliases = {
+        'ms shell dlg 2': ('Tahoma', 'Segoe UI'),
+        'ms shell dlg': ('Microsoft Sans Serif', 'Tahoma', 'Segoe UI'),
+    }
+    for candidate in (*aliases.get(requested, ()), DEFAULT_MAP_FONT):
+        if candidate.casefold() in names:
+            return names[candidate.casefold()]
+    # Matplotlib normally ships DejaVu Sans even on a minimal installation.
+    return font_manager.FontProperties(fname=font_manager.findfont(
+        font_manager.FontProperties(family=['sans-serif']))).get_name()
+
+
 def migrate_map_fonts(settings):
     """Split the legacy combined colorbar style without changing old projects."""
     result=dict(settings or {})
     if 'colorbar' in result and 'colorbar_label' not in result:
         result['colorbar_label']=dict(result['colorbar'])
+    for key,style in result.items():
+        if isinstance(style,dict) and 'family' in style:
+            result[key]=dict(style,family=resolve_map_font(style['family']))
     return result
 
 
 def text_options(settings,key,size=None,color=None):
     _,default_size,default_color=FONT_ELEMENTS[key]
     style=settings.get(key,{})
-    options=dict(fontfamily=style.get('family','DejaVu Sans'),
+    options=dict(fontfamily=resolve_map_font(style.get('family',DEFAULT_MAP_FONT)),
                  fontsize=style.get('size',default_size if size is None else size),
                  fontweight='bold' if style.get('bold',False) else 'normal',
                  fontstyle='italic' if style.get('italic',False) else 'normal')

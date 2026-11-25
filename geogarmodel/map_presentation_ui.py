@@ -1,10 +1,10 @@
 """Compact font editor and publication image export options."""
 from pathlib import Path
 from PyQt5.QtGui import QColor,QFont
-from PyQt5.QtWidgets import (QWidget,QFormLayout,QComboBox,QFontComboBox,QSpinBox,
+from PyQt5.QtWidgets import (QWidget,QFormLayout,QComboBox,QSpinBox,
     QDoubleSpinBox,QCheckBox,QPushButton,QLabel,QColorDialog,QHBoxLayout,QDialog,
     QDialogButtonBox,QFileDialog,QVBoxLayout)
-from .map_presentation import FONT_ELEMENTS,text_options
+from .map_presentation import FONT_ELEMENTS,text_options,available_map_fonts,resolve_map_font
 from .ui_layout import quiet_button
 
 
@@ -16,7 +16,11 @@ class MapFontEditor(QWidget):
         form.setRowWrapPolicy(QFormLayout.WrapAllRows)
         self.element=QComboBox()
         for key,(name,_,_) in FONT_ELEMENTS.items(): self.element.addItem(name,key)
-        self.family=QFontComboBox()
+        # Qt's font chooser can return Windows aliases that Matplotlib
+        # cannot render. Use the actual renderer's catalog instead.
+        self.family=QComboBox()
+        self.family.addItems(available_map_fonts())
+        self.family.setToolTip('Гарнитуры, доступные Matplotlib для карты и экспорта')
         self.size=QSpinBox(); self.size.setRange(4,72); self.size.setSuffix(' pt')
         self.bold=QCheckBox('Жирный'); self.italic=QCheckBox('Курсив')
         self.color_button=QPushButton('Цвет текста…')
@@ -28,7 +32,7 @@ class MapFontEditor(QWidget):
                              ('',self.apply_button),('',self.reset_button)]: form.addRow(label,widget)
         for button in (self.color_button,self.apply_button,self.reset_button): quiet_button(button)
         self.element.currentIndexChanged.connect(self.load_element)
-        self.family.currentFontChanged.connect(self.update_preview)
+        self.family.currentTextChanged.connect(self.update_preview)
         self.size.valueChanged.connect(self.update_preview)
         self.bold.toggled.connect(self.update_preview); self.italic.toggled.connect(self.update_preview)
         self.color_button.clicked.connect(self.choose_color)
@@ -41,14 +45,16 @@ class MapFontEditor(QWidget):
         key=self.element.currentData()
         options=text_options(self.window.map_fonts,key)
         self.color=options.get('color')
-        self.family.setCurrentFont(QFont(options['fontfamily']))
+        family=options['fontfamily']
+        if self.family.findText(family)<0: self.family.addItem(family)
+        self.family.setCurrentText(family)
         self.size.setValue(int(options['fontsize']))
         self.bold.setChecked(options['fontweight']=='bold')
         self.italic.setChecked(options['fontstyle']=='italic')
         self.update_preview()
 
     def update_preview(self,*args):
-        font=self.family.currentFont(); font.setPointSize(self.size.value())
+        font=QFont(resolve_map_font(self.family.currentText())); font.setPointSize(self.size.value())
         font.setBold(self.bold.isChecked()); font.setItalic(self.italic.isChecked())
         self.preview.setFont(font)
         color=self.color or '#777777'
@@ -60,7 +66,7 @@ class MapFontEditor(QWidget):
         if value.isValid(): self.color=value.name(); self.update_preview()
 
     def apply(self):
-        self.window.map_fonts[self.element.currentData()]=dict(family=self.family.currentFont().family(),
+        self.window.map_fonts[self.element.currentData()]=dict(family=resolve_map_font(self.family.currentText()),
             size=self.size.value(),bold=self.bold.isChecked(),italic=self.italic.isChecked(),color=self.color)
         self.window.guard(self.window.redraw)
 

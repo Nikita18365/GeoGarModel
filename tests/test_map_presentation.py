@@ -136,3 +136,49 @@ def test_publication_colorbar_and_scale_geometry(tmp_path,qt_application_lifetim
         save_map_image(w.figure,tmp_path/'map.png',dpi=120)
         assert (tmp_path/'map.png').stat().st_size>0
     finally: w.close()
+
+
+@pytest.mark.parametrize('family',['MS Shell Dlg 2','MS Shell Dlg','GeoGarModel Missing Font 123',''])
+def test_unavailable_font_resolves_before_render(family,caplog,tmp_path):
+    from geogarmodel.map_presentation import available_map_fonts,resolve_map_font,text_options
+    f=Figure(); FigureCanvasAgg(f)
+    ax=draw_map(f,grid())
+    style={'title':dict(family=family,size=15,bold=True,italic=True,color='#123456'),
+           'colorbar':dict(family=family,size=12)}
+    expected=resolve_map_font(family)
+    assert expected in available_map_fonts()
+    assert text_options(style,'title')['fontfamily']==expected
+    with caplog.at_level('WARNING',logger='matplotlib.font_manager'):
+        apply_map_fonts(f,style)
+        for _ in range(2): f.canvas.draw()
+        save_map_image(f,tmp_path/'font.png',dpi=100)
+    assert not any('not found' in r.getMessage() and r.name=='matplotlib.font_manager'
+                   for r in caplog.records)
+    assert ax.title.get_fontfamily()==[expected]
+    assert ax.title.get_fontweight()=='bold'
+    assert ax.title.get_fontstyle()=='italic'
+    assert ax.title.get_fontsize()==15
+    assert ax.title.get_color()=='#123456'
+
+
+def test_font_editor_uses_renderable_families_and_migrates_legacy(qt_application_lifetime):
+    from geogarmodel.map_presentation import available_map_fonts,resolve_map_font,migrate_map_fonts
+    from geogarmodel.map_presentation_ui import MapFontEditor
+    w=MainWindow()
+    try:
+        w.add_grid(grid())
+        original={'title':dict(family='MS Shell Dlg 2',size=19,bold=True)}
+        w.map_fonts=migrate_map_fonts(original)
+        editor=w.map_font_editor
+        assert isinstance(editor,MapFontEditor)
+        editor.element.setCurrentIndex(editor.element.findData('title'))
+        editor.load_element()
+        assert editor.family.currentText()==resolve_map_font('MS Shell Dlg 2')
+        assert all(editor.family.itemText(i) in available_map_fonts()
+                   for i in range(editor.family.count()))
+        assert editor.size.value()==19 and editor.bold.isChecked()
+        editor.apply()
+        assert w.map_fonts['title']['family'] in available_map_fonts()
+        assert original['title']['family']=='MS Shell Dlg 2'
+        assert w.figure.axes[0].title.get_fontfamily()==[w.map_fonts['title']['family']]
+    finally: w.close()
