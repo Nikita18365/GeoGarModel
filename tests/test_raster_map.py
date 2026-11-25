@@ -117,9 +117,11 @@ def test_raster_preview_wheel_zoom_preserves_source_pixels(qt_application_lifeti
         after=preview.mapToScene(pos)
         assert abs(after.x()-anchor.x())<5/initial
         assert abs(after.y()-anchor.y())<5/initial
-        source=QPointF(int(after.x())+.5,int(after.y())+.5)
-        QTest.mouseClick(preview.viewport(),Qt.LeftButton,pos=preview.mapFromScene(source))
-        assert points==[(source.x(),source.y())]
+        source=QPointF(after.x()+.173,after.y()+.219)
+        click=preview.mapFromScene(source)
+        expected=preview.scene_position(click)
+        QTest.mouseClick(preview.viewport(),Qt.LeftButton,pos=click)
+        np.testing.assert_allclose(points,[[expected.x(),expected.y()]],rtol=0,atol=1e-10)
         zoom=preview._zoom
         preview.resize(640,420)
         QTest.qWait(10)
@@ -133,3 +135,60 @@ def test_raster_preview_wheel_zoom_preserves_source_pixels(qt_application_lifeti
         assert preview._zoom==1.
     finally:
         preview.close()
+
+
+def test_raster_preview_max_zoom_and_corner_picking(qt_application_lifetime):
+    from PyQt5.QtCore import QPoint,QPointF,Qt
+    from PyQt5.QtGui import QWheelEvent
+    from PyQt5.QtTest import QTest
+
+    dialog=RasterPoints(np.full((800,1200,4),255,dtype=np.uint8),CRS('EPSG:20918'))
+    dialog.show()
+    QTest.qWait(20)
+    preview=dialog.preview
+    try:
+        preview.fit_image()
+        pos=preview.viewport().rect().center()
+        for _ in range(50):
+            event=QWheelEvent(QPointF(pos),QPointF(preview.viewport().mapToGlobal(pos)),
+                              QPoint(),QPoint(0,120),Qt.NoButton,Qt.NoModifier,
+                              Qt.NoScrollPhase,False)
+            preview.wheelEvent(event)
+        assert preview.transform().m11()==pytest.approx(100.)
+        assert preview.transform().m11()>=5*16.
+        bounds=preview.picture.boundingRect()
+        corners=[QPointF(.13,.27),QPointF(bounds.right()-.19,.31),
+                 QPointF(.23,bounds.bottom()-.37),
+                 QPointF(bounds.right()-.41,bounds.bottom()-.17)]
+        for index,source in enumerate(corners):
+            preview.centerOn(source)
+            click=preview.mapFromScene(source)
+            assert (click-preview.viewport().rect().center()).manhattanLength()<=4
+            expected=preview.scene_position(click)
+            assert bounds.contains(expected)
+            QTest.mouseClick(preview.viewport(),Qt.LeftButton,pos=click)
+            assert len(dialog.pixels)==index+1
+            actual=dialog.pixels[-1]
+            np.testing.assert_allclose(actual,[expected.x(),expected.y()],rtol=0,atol=1e-10)
+            marker,label=dialog.markers[-1]
+            np.testing.assert_allclose([marker.pos().x(),marker.pos().y()],actual,rtol=0,atol=1e-10)
+            assert (preview.mapFromScene(marker.scenePos())-click).manhattanLength()<=1
+            assert label.parentItem() is marker
+            assert float(dialog.table.item(index,0).text())==pytest.approx(actual[0],abs=5.1e-7)
+            assert float(dialog.table.item(index,1).text())==pytest.approx(actual[1],abs=5.1e-7)
+        # Navigation margins are not part of the raster, and clicks there
+        # must never be added as control points.
+        preview.centerOn(QPointF(0,0))
+        outside=preview.mapFromScene(QPointF(-1,-1))
+        assert preview.viewport().rect().contains(outside)
+        QTest.mouseClick(preview.viewport(),Qt.LeftButton,pos=outside)
+        assert len(dialog.pixels)==4
+        original=list(dialog.pixels)
+        preview.fit_image()
+        assert dialog.pixels==original
+        dialog.table.setCurrentCell(0,2)
+        dialog.remove_point()
+        assert len(dialog.markers)==3 and len(dialog.pixels)==3
+        assert dialog.markers[0][1].text()=='1'
+    finally:
+        dialog.close()
