@@ -157,6 +157,9 @@ def save_project(path,name,layers,view,scale,crs='',presentation=None):
     arrays={}; rows=[]; tables={}
     for i,layer in enumerate(layers):
         row={k:layer[k] for k in ('name','visible','style','kind')}
+        # Optional provenance is backward compatible with version 1 projects.
+        for key in ('source_path','source_crs'):
+            if layer.get(key): row[key]=str(layer[key])
         value=layer['data']
         if row['kind']=='grid':
             for key in ('x','y','values'): arrays[f'{i}_{key}']=getattr(value,key)
@@ -209,6 +212,8 @@ def load_project(path):
             else:
                 value=Vector(row['features'],row['crs'])
             layer={**{k:row[k] for k in ('name','visible','style','kind')},'data':value}
+            for key in ('source_path','source_crs'):
+                if row.get(key): layer[key]=row[key]
             if 'xyz' in row:
                 source=dict(row['xyz'])
                 key=source.pop('table_key')

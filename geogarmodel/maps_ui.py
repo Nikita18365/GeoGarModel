@@ -440,7 +440,8 @@ class MapWorkspace:
         if item is None or item.data(Qt.UserRole)['kind']!='grid': raise ValueError('Выберите карту в списке слоёв.')
         return item.data(Qt.UserRole)['data']
 
-    def add_grid(self,grid,xyz=None):
+    def add_grid(self,grid,xyz=None,source_path=None,source_crs=None):
+        original_crs=source_crs or grid.crs
         if self.map_project_crs:
             source=self.source_crs(grid.crs,grid.name)
             if not source: return
@@ -453,6 +454,9 @@ class MapWorkspace:
         style=self.read_map_style(); style.update(vmin='',vmax='')
         row=dict(kind='grid',name=grid.name,visible=True,style=style,data=grid)
         if xyz is not None: row['xyz']=xyz
+        if source_path:
+            row['source_path']=str(Path(source_path).resolve())
+            if original_crs: row['source_crs']=original_crs
         self.add_map_layer(row)
 
     def map_reordered(self):
@@ -468,6 +472,7 @@ class MapWorkspace:
         if item is None: return
         self.layers.setCurrentItem(item); menu=QMenu(self)
         menu.addAction('Переименовать',lambda:self.layers.editItem(item))
+        menu.addAction('Свойства…',lambda:self.guard(lambda:self.show_layer_properties(item)))
         menu.addAction('СК и параметры проекции…',lambda:self.guard(self.layer_coordinates))
         if item.data(Qt.UserRole)['kind']=='vector':
             menu.addAction('Оформление контура…',lambda:self.guard(self.vector_style_dialog))
@@ -475,6 +480,16 @@ class MapWorkspace:
         menu.addAction('Ниже',lambda:self.move_map_layer(1))
         menu.addAction('Удалить',lambda:self.guard(self.delete_map_layer))
         menu.exec_(self.layers.mapToGlobal(position))
+
+    def show_layer_properties(self,item=None):
+        from .layer_properties import describe_layer
+        from .layer_properties_ui import LayerPropertiesDialog
+        item=item if item is not None else self.layers.currentItem()
+        if item is None: raise ValueError('Выберите слой в дереве проекта.')
+        # A shallow snapshot is sufficient: statistics never modify arrays.
+        row=dict(item.data(Qt.UserRole),name=item.text(),visible=item.checkState()==Qt.Checked)
+        sections=self.activity.run('Свойства слоя',describe_layer,row)
+        LayerPropertiesDialog(row['name'],sections,self).exec_()
 
     def move_map_layer(self,direction):
         source=self.layers.currentRow(); target=source+direction
@@ -502,8 +517,12 @@ class MapWorkspace:
                 prj=Path(path).with_suffix('.prj')
                 source=self.import_source_crs(read_prj(prj) if prj.exists() else '',Path(path).stem)
                 if source is None: return
-            vector=self.activity.run('Загрузка векторного слоя',lambda: read_vector(path,source).reproject(crs))
-            self.add_map_layer(dict(kind='vector',name=Path(path).name,visible=True,style={},data=vector))
+            def load():
+                original=read_vector(path,source)
+                return original.reproject(crs),original.crs
+            vector,original_crs=self.activity.run('Загрузка векторного слоя',load)
+            self.add_map_layer(dict(kind='vector',name=Path(path).name,visible=True,style={},data=vector,
+                                    source_path=str(Path(path).resolve()),source_crs=original_crs))
 
     def clear_overlays(self):
         self._map_loading=True

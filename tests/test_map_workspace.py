@@ -222,11 +222,13 @@ def test_xyz_import_uses_project_crs_independently_of_ml(tmp_path,monkeypatch,qt
     window.open_xyz()
     assert asked==[] and window.selected_grid().crs=='EPSG:20918'
     assert window.layers.currentItem().text()=='TXT_survey · Signal'
+    assert window.layers.currentItem().data(Qt.UserRole)['source_path']==str(path.resolve())
     assert not window.xyz_controls.isHidden()
     window.xyz_columns[0].setCurrentText('East2')
     window.xyz_columns[2].setCurrentText('Other')
     window.build_xyz_layer()
     assert window.layers.count()==2 and window.selected_grid().x.min()==18502000
+    assert window.layers.currentItem().data(Qt.UserRole)['source_path']==str(path.resolve())
     np.testing.assert_allclose(window.selected_grid().values[0,0],4)
     project=tmp_path/'source.ggproject'
     window.save_project_to(project)
@@ -235,6 +237,7 @@ def test_xyz_import_uses_project_crs_independently_of_ml(tmp_path,monkeypatch,qt
     assert window.layers.count()==2
     window.layers.setCurrentRow(1)
     assert [box.currentText() for box in window.xyz_columns]==['East','North','Signal']
+    assert window.layers.currentItem().data(Qt.UserRole)['source_path']==str(path.resolve())
     window.xyz_columns[2].setCurrentText('Other')
     window.build_xyz_layer()
     assert window.layers.count()==3 and window.selected_grid().x.min()==18500000
@@ -259,6 +262,7 @@ def test_open_arcgis_float_map(tmp_path,monkeypatch,order,dtype,origin):
     try:
         window.open_grid()
         raster=window.selected_grid()
+        assert window.layers.currentItem().data(Qt.UserRole)['source_path']==str(path.resolve())
         assert CRS(raster.crs)==CRS('EPSG:20918')
         np.testing.assert_array_equal(raster.x,[18500005,18500015,18500025])
         np.testing.assert_array_equal(raster.y,[7800005,7800015])

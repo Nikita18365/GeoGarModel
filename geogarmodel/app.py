@@ -472,7 +472,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             transform,points = dialog.transform,dialog.points
         raster = self.activity.run('Привязка растра',place_raster,image,transform,crs,self.map_project_crs,points)
         self._map_fit = True
-        self.add_map_layer(dict(kind='raster',name=Path(path).name,visible=True,style={},data=raster))
+        self.add_map_layer(dict(kind='raster',name=Path(path).name,visible=True,style={},data=raster,
+                                source_path=str(Path(path).resolve()),source_crs=crs))
 
     def open_grid(self):
         if not self.ensure_map_project(): return
@@ -503,7 +504,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             if source is None: continue
             from pyproj import CRS
             grid.crs=source; grid.coordinate_unit='degrees' if CRS(source).is_geographic else 'm'
-            self.add_grid(grid)
+            self.add_grid(grid,source_path=path,source_crs=source)
 
     @staticmethod
     def make_xyz_columns(form, names=(), selected=()):
@@ -538,7 +539,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         if dialog.exec_()!=QDialog.Accepted: return
         crs=self.import_source_crs('',Path(path).stem)
         if crs:
-            self.add_xyz_grid(table,Path(path).stem,[b.currentText() for b in boxes],crs)
+            self.add_xyz_grid(table,Path(path).stem,[b.currentText() for b in boxes],crs,source_path=path)
 
     def selected_xyz(self):
         item=self.layers.currentItem()
@@ -564,9 +565,10 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
     def build_xyz_layer(self):
         source=self.selected_xyz()
         if source:
-            self.add_xyz_grid(source['table'],source['stem'],[b.currentText() for b in self.xyz_columns],self.xyz_crs)
+            self.add_xyz_grid(source['table'],source['stem'],[b.currentText() for b in self.xyz_columns],self.xyz_crs,
+                              source_path=self.layers.currentItem().data(Qt.UserRole).get('source_path'))
 
-    def add_xyz_grid(self,table,stem,columns,crs):
+    def add_xyz_grid(self,table,stem,columns,crs,source_path=None):
         from pyproj import CRS
         import pandas as pd
         if columns[0]==columns[1]:
@@ -586,7 +588,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             unit='degrees' if CRS.from_user_input(crs).is_geographic else 'm'
             return points_to_grid(*values,name=name,crs=crs,coordinate_unit=unit)
         grid=self.activity.run('Интерполяция карты',build)
-        self.add_grid(grid,xyz=dict(table=table,stem=stem,columns=columns,crs=crs))
+        self.add_grid(grid,xyz=dict(table=table,stem=stem,columns=columns,crs=crs),
+                      source_path=source_path,source_crs=crs)
 
     def metadata(self):
         grid = self.selected_grid()

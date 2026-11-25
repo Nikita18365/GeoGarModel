@@ -68,6 +68,8 @@ def test_import_raster_project_and_both_map_views(tmp_path,monkeypatch,manual):
         window.open_raster()
         row=window.layers.currentItem().data(Qt.UserRole)
         assert row['kind']=='raster'
+        assert row['source_path']==str(path.resolve())
+        assert CRS(row['source_crs'])==CRS('EPSG:20918')
         np.testing.assert_allclose(row['data'].bounds,[18500000,7799940,18500080,7800000],rtol=0,atol=1e-6)
         assert len(window.figure.axes[0].images)==1
         assert any(isinstance(item,ImageItem) for item in window.fast_map.getPlotItem().items)
@@ -75,7 +77,9 @@ def test_import_raster_project_and_both_map_views(tmp_path,monkeypatch,manual):
         window.save_project_to(project)
         path.unlink()
         assert window.open_project_from(project)
-        restored=window.layers.currentItem().data(Qt.UserRole)['data']
+        restored_row=window.layers.currentItem().data(Qt.UserRole)
+        assert restored_row['source_path']==str(path.resolve())
+        restored=restored_row['data']
         assert bool(restored.control_points)==manual
         np.testing.assert_array_equal(restored.image,row['data'].image)
     finally:
