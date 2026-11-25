@@ -2,11 +2,35 @@
 from pathlib import Path
 import re
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QSize, QRect
+from PyQt5.QtGui import QIcon, QPixmap, QPainter, QFont, QColor
 from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QFileDialog, QLabel, QInputDialog, QMessageBox
 
 from .map_export import (FORMATS, TABLE_FORMATS, companion_paths, grid_for_export,
                          table_for_export, write_table, write_grid, square_cells, square_grid)
+
+
+FORMAT_COLORS = dict(npz='#7dd3fc', xlsx='#86d6a0', csv='#86d6a0', txt='#86d6a0',
+                     grd='#edc775', zmap='#edc775', flt='#edc775')
+FORMAT_LABELS = dict(npz='Graticule NPZ', xlsx='Excel file (East, North, Z)',
+                     csv='CSV file (East, North, Z)', txt='TXT file (East, North, Z)',
+                     grd='Geosoft Binary Grid file', zmap='Petrel file format', flt='ESRI ArcGIS')
+
+
+def format_icon(fmt):
+    """Fixed-width coloured extension at the left of the action."""
+    pixmap = QPixmap(48, 22)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.TextAntialiasing)
+    font = QFont()
+    font.setPixelSize(13)
+    font.setBold(True)
+    painter.setFont(font)
+    painter.setPen(QColor(FORMAT_COLORS[fmt]))
+    painter.drawText(QRect(0, 0, 48, 22), Qt.AlignLeft|Qt.AlignVCenter, fmt.upper())
+    painter.end()
+    return QIcon(pixmap)
 
 
 class MapExportMixin:
@@ -16,7 +40,12 @@ class MapExportMixin:
         layout.addWidget(self.map_export_hint)
         self.map_export_buttons = {}
         for fmt, label in FORMATS.items():
-            self.map_export_buttons[fmt] = self.button(label, lambda fmt=fmt: self.export_map(fmt), layout)
+            button = self.button(FORMAT_LABELS[fmt], lambda fmt=fmt: self.export_map(fmt), layout)
+            button.setAccessibleName(label)
+            button.setIcon(format_icon(fmt))
+            button.setIconSize(QSize(48, 22))
+            button.setStyleSheet('QPushButton { text-align: left; padding-left: 8px; }')
+            self.map_export_buttons[fmt] = button
         self.layers.currentItemChanged.connect(self.update_map_exports)
         self.update_map_exports()
 
@@ -96,7 +125,8 @@ class MapExportMixin:
                 raise ValueError('Карта превышает лимит строк XLSX. Используйте CSV или TXT.')
             def export_table():
                 table = table_for_export(row, columns)
-                write_table(table, path, fmt)
+                coordinates = source['columns'][:2] if source is not None and columns is None else ('East', 'North')
+                write_table(table, path, fmt, coordinate_columns=coordinates)
             self.activity.run('Экспорт '+fmt.upper(), export_table)
         else:
             grid = self.activity.run('Подготовка сетки', grid_for_export, row, columns)

@@ -22,6 +22,7 @@ FORMATS = {
 }
 TABLE_FORMATS = frozenset(('xlsx', 'csv', 'txt'))
 XYZ_HEADERS = ['East', 'North', 'Z']
+COORDINATE_DECIMALS = 6
 
 
 def xyz_columns(table, columns):
@@ -86,9 +87,31 @@ def grid_for_export(row, columns=None):
     return reproject_grid(selected, grid.crs) if grid.crs else selected
 
 
-def write_table(table, path, fmt):
+def _round_coordinates(table, columns):
+    """Copy only identified coordinate columns; never round Z or features."""
+    result = table.copy(deep=False)
+    for name in columns:
+        values = pd.to_numeric(table[name], errors='raise')
+        if np.isinf(values.to_numpy(dtype=float, na_value=np.nan)).any():
+            raise ValueError('В координатах есть бесконечные значения.')
+        result[name] = values.round(COORDINATE_DECIMALS)
+    return result
+
+
+def _coordinate_text(value):
+    if pd.isna(value):
+        return ''
+    text = f'{value:.6f}'.rstrip('0').rstrip('.')
+    return '0' if text == '-0' else text
+
+
+def write_table(table, path, fmt, coordinate_columns=None):
     if fmt not in TABLE_FORMATS:
         raise ValueError('Неизвестный табличный формат.')
+    if coordinate_columns is None:
+        coordinate_columns = XYZ_HEADERS[:2] if all(c in table.columns for c in XYZ_HEADERS[:2]) else ()
+    coordinate_columns = tuple(coordinate_columns)
+    table = _round_coordinates(table, coordinate_columns)
     if fmt == 'xlsx':
         if len(table) > 1048575 or len(table.columns) > 16384:
             raise ValueError('Таблица превышает лимит XLSX. Используйте CSV или TXT.')
@@ -96,14 +119,24 @@ def write_table(table, path, fmt):
         with atomic_output(path) as tmp, tmp.open('wb') as out:
             with pd.ExcelWriter(out, engine='openpyxl') as writer:
                 table.to_excel(writer, index=False)
+                sheet = writer.sheets['Sheet1']
+                if len(table):
+                    for name in coordinate_columns:
+                        index = table.columns.get_loc(name)+1
+                        for cells in sheet.iter_cols(min_col=index, max_col=index, min_row=2, max_row=len(table)+1):
+                            for cell in cells:
+                                cell.number_format = '0.######'
             report(len(table), len(table), 'Строки XLSX')
     else:
         with atomic_output(path) as tmp, tmp.open('w', encoding='utf-8-sig', newline='') as out:
             size = max(1, 100000 // max(1, len(table.columns)))
             for start in range(0, max(1, len(table)), size):
                 end = min(start+size, len(table))
-                table.iloc[start:end].to_csv(out, index=False, header=start==0,
-                                             sep=',' if fmt == 'csv' else '\t')
+                block = table.iloc[start:end].copy(deep=False)
+                for name in coordinate_columns:
+                    block[name] = block[name].map(_coordinate_text)
+                block.to_csv(out, index=False, header=start==0,
+                             sep=',' if fmt == 'csv' else '\t')
                 report(end, len(table), 'Строки '+fmt.upper())
 
 
@@ -137,6 +170,21 @@ def square_grid(grid):
                 grid.history+[dict(operation='export_flt_resample', step=float(step))])
 
 
+def rounded_export_grid(grid, fmt):
+    """Round regular-lattice origin and step, not Z or individual intervals."""
+    dx, dy = round(grid.dx, COORDINATE_DECIMALS), round(grid.dy, COORDINATE_DECIMALS)
+    if fmt == 'flt':
+        dy = dx
+    if min(dx, dy) <= 0:
+        raise ValueError('Шаг сетки слишком мал для точности координат 6 знаков после запятой.')
+    x = np.round(round(float(grid.x[0]), COORDINATE_DECIMALS)+dx*np.arange(len(grid.x)),
+                 COORDINATE_DECIMALS)
+    y = np.round(round(float(grid.y[0]), COORDINATE_DECIMALS)+dy*np.arange(len(grid.y)),
+                 COORDINATE_DECIMALS)
+    return Grid(x, y, grid.values, grid.name, grid.unit, grid.crs, grid.coordinate_unit,
+                grid.history+[dict(operation='export_coordinate_precision', decimals=COORDINATE_DECIMALS)])
+
+
 def _write_grd(grid, path):
     """Geosoft v2, 512-byte header, uncompressed IEEE little-endian double.
 
@@ -148,7 +196,7 @@ def _write_grd(grid, path):
         raise ValueError('Значения выходят за допустимый диапазон Geosoft GRD.')
     header = bytearray(512)
     struct.pack_into('<5i7d', header, 0, 8, 2, len(grid.x), len(grid.y), 1,
-                     grid.dx, grid.dy, grid.x[0], grid.y[0], 0., 0., 1.)
+                     round(grid.dx, 6), round(grid.dy, 6), float(grid.x[0]), float(grid.y[0]), 0., 0., 1.)
     header[76:140] = b' '*64
     struct.pack_into('<5i4fdi', header, 140, *([-2147483647]*4),
                      int(finite.sum()), *([-1e32]*4), -1e32, -2147483647)
@@ -166,20 +214,21 @@ def _write_zmap(grid, path):
     if np.any(np.abs(grid.values[np.isfinite(grid.values)]) >= null):
         raise ValueError('Значения выходят за допустимый диапазон ZMAP+.')
     nx, ny = len(grid.x), len(grid.y)
-    width, count = 20, 5
+    # 25 characters fit round-trip float64; three fields stay below 80 characters.
+    width, count = 25, 3
     with path.open('w', encoding='ascii', newline='\n') as out:
-        out.write('! GeoGarModel ZMAP+ node coordinates\n@GRID, GRID, 5\n')
-        out.write('20, 1.000000000000E+30, , 12, 1\n')
-        out.write(f'{ny}, {nx}, {grid.x[0]:.17g}, {grid.x[-1]:.17g}, {grid.y[0]:.17g}, {grid.y[-1]:.17g}\n')
+        out.write('! GeoGarModel ZMAP+ node coordinates\n@GRID, GRID, 3\n')
+        out.write('25, 1.0E+30, , 17, 1\n')
+        out.write(f'{ny}, {nx}, {grid.x[0]:.6f}, {grid.x[-1]:.6f}, {grid.y[0]:.6f}, {grid.y[-1]:.6f}\n')
         out.write('0.0, 0.0, 0.0\n@\n')
         for j in range(nx):
             column = grid.values[::-1, j]
             for start in range(0, ny, count):
                 values = column[start:start+count]
-                fields = [f'{value if np.isfinite(value) else null:{width}.12E}' for value in values]
-                # Do not turn a valid value into the declared null through rounding.
-                if any(np.isfinite(v) and float(s) == null for v, s in zip(values, fields)):
-                    raise ValueError('Значение Z совпадает с кодом пропуска ZMAP после округления.')
+                fields = [repr(float(value if np.isfinite(value) else null)).rjust(width)
+                          for value in values]
+                if any(len(field) != width for field in fields):
+                    raise ValueError('Число Z не помещается в поле ZMAP+.')
                 out.write(''.join(fields)+'\n')
             report(j+1, nx, 'Столбцы ZMAP')
 
@@ -199,10 +248,15 @@ def _write_flt(grid, path, header):
                 raise ValueError('Значение Z совпадает с кодом пропуска FLT.')
             data.tofile(out)
             report(min(start+128, ny), ny, 'Строки FLT')
-    header.write_text(f'NCOLS {nx}\nNROWS {ny}\n'
-                      f'XLLCORNER {grid.x[0]-grid.dx/2:.17g}\n'
-                      f'YLLCORNER {grid.y[0]-grid.dx/2:.17g}\n'
-                      f'CELLSIZE {grid.dx:.17g}\nNODATA_VALUE {float(nodata):.17g}\n'
+    step = round(grid.dx, 6)
+    # An odd number of micro-units requires a half-micro-unit corner.
+    # Write the equivalent cell centre instead to keep six decimal places.
+    if round(step*10**COORDINATE_DECIMALS) % 2:
+        origin = f'XLLCENTER {grid.x[0]:.6f}\nYLLCENTER {grid.y[0]:.6f}\n'
+    else:
+        origin = f'XLLCORNER {grid.x[0]-step/2:.6f}\nYLLCORNER {grid.y[0]-step/2:.6f}\n'
+    header.write_text(f'NCOLS {nx}\nNROWS {ny}\n'+origin+
+                      f'CELLSIZE {step:.6f}\nNODATA_VALUE {float(nodata):.17g}\n'
                       'BYTEORDER LSBFIRST\n', encoding='ascii')
 
 
@@ -217,12 +271,13 @@ def write_grid(grid, path, fmt):
     path = Path(path)
     if fmt not in FORMATS or fmt in TABLE_FORMATS:
         raise ValueError('Неизвестный формат сетки.')
+    if fmt == 'flt' and not square_cells(grid):
+        raise ValueError('FLT требует квадратные ячейки. Сначала выполните пересчёт.')
+    grid = rounded_export_grid(grid, fmt)
     if fmt == 'npz':
         with atomic_output(path) as tmp, tmp.open('wb') as out:
             save_grid(grid, out)
         return
-    if fmt == 'flt' and not square_cells(grid):
-        raise ValueError('FLT требует квадратные ячейки. Сначала выполните пересчёт.')
     prj = path.with_suffix('.prj')
     if not grid.crs and prj.exists():
         raise ValueError('У карты нет СК, но рядом существует PRJ. Выберите другое имя файла.')

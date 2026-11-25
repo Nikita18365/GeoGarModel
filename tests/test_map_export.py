@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from pyproj import CRS
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtWidgets import QFileDialog, QInputDialog, QDialog, QComboBox, QMessageBox
 
 from geogarmodel.app import MainWindow
@@ -11,6 +11,7 @@ from geogarmodel.grids import Grid, load_grid
 from geogarmodel.map_export import (FORMATS, grid_for_export, grid_table, square_grid,
                                    table_for_export, write_grid, write_table)
 from geogarmodel.map_project import Vector, read_xyz_table
+from geogarmodel.map_export_ui import FORMAT_COLORS, format_icon
 
 
 def sample(dx=10, dy=10):
@@ -97,6 +98,13 @@ def test_export_controls_use_selected_item(tmp_path,monkeypatch,qt_application_l
     window=MainWindow()
     try:
         assert set(window.map_export_buttons)==set(FORMATS)
+        for fmt, button in window.map_export_buttons.items():
+            assert not button.icon().isNull()
+            assert button.iconSize()==QSize(48,22)
+            assert button.accessibleName()==FORMATS[fmt]
+        assert set(FORMAT_COLORS)==set(FORMATS)
+        icons=[format_icon(fmt).pixmap(48,22).toImage() for fmt in FORMATS]
+        assert all(a!=b for i,a in enumerate(icons) for b in icons[i+1:])
         assert not any(button.isEnabled() for button in window.map_export_buttons.values())
         row=source_row()
         window.add_grid(row['data'],xyz=row['xyz'])
@@ -131,3 +139,73 @@ def test_export_controls_use_selected_item(tmp_path,monkeypatch,qt_application_l
         assert all(button.isEnabled() for button in window.map_export_buttons.values())
     finally:
         window.close()
+
+
+@pytest.mark.parametrize('fmt',['xlsx','csv','txt'])
+def test_table_coordinate_precision(tmp_path,fmt):
+    table=pd.DataFrame(dict(East=[1234.123456789,-23.987654321,np.nan],
+                            North=[-99.876543219,4.1,0.],
+                            Z=[1.23456789012345,-0.000000000123456789,np.nan],
+                            Other=[123.123456789123,2.,3.]))
+    original=table.copy(deep=True)
+    path=tmp_path/('precise.'+fmt)
+    write_table(table,path,fmt)
+    result=read_xyz_table(path)
+    np.testing.assert_allclose(result.East,[1234.123457,-23.987654,np.nan],rtol=0,atol=1e-12,equal_nan=True)
+    np.testing.assert_allclose(result.North,[-99.876543,4.1,0.],rtol=0,atol=1e-12)
+    np.testing.assert_allclose(result.Z,table.Z,rtol=1e-14,atol=0,equal_nan=True)
+    np.testing.assert_allclose(result.Other,table.Other,rtol=1e-14,atol=0)
+    pd.testing.assert_frame_equal(table,original)
+    if fmt=='xlsx':
+        from openpyxl import load_workbook
+        sheet=load_workbook(path).active
+        assert sheet['A2'].number_format=='0.######'
+        assert sheet['C2'].number_format=='General'
+    else:
+        raw=path.read_text(encoding='utf-8-sig')
+        assert '1234.123457' in raw and '1234.123456789' not in raw
+
+
+def test_full_table_rounds_only_active_coordinate_pair(tmp_path):
+    table=pd.DataFrame(dict(X1=[1.123456789],Y1=[2.987654321],
+                            X2=[3.123456789],Signal=[4.123456789],Label=['test']))
+    path=tmp_path/'full.csv'
+    write_table(table,path,'csv',coordinate_columns=('X1','Y1'))
+    result=read_xyz_table(path)
+    assert list(result.columns)==list(table.columns)
+    assert result.X1[0]==1.123457 and result.Y1[0]==2.987654
+    assert result.X2[0]==table.X2[0] and result.Signal[0]==table.Signal[0]
+
+
+@pytest.mark.parametrize('fmt',['npz','grd','zmap','flt'])
+def test_grid_coordinate_precision_and_z(tmp_path,fmt):
+    step=10.123456789
+    x=1000.123456789+step*np.arange(3)
+    y=2000.987654321+step*np.arange(2)
+    values=np.array([[1.2345678901234567,-0.000000000123456789,np.nan],
+                     [4.567890123456789,-2.1234567891234567,6.]])
+    grid=Grid(x,y,values,crs='EPSG:3857')
+    path=tmp_path/('precise.'+fmt)
+    write_grid(grid,path,fmt)
+    loaded=load_grid(path)
+    np.testing.assert_allclose(loaded.x,1000.123457+10.123457*np.arange(3),rtol=0,atol=1e-10)
+    np.testing.assert_allclose(loaded.y,2000.987654+10.123457*np.arange(2),rtol=0,atol=1e-10)
+    expected=values.astype(np.float32).astype(float) if fmt=='flt' else values
+    np.testing.assert_array_equal(loaded.values,expected)
+    np.testing.assert_array_equal(grid.x,x)
+    np.testing.assert_array_equal(grid.y,y)
+    np.testing.assert_array_equal(grid.values,values)
+    if fmt=='flt':
+        hdr=path.with_suffix('.hdr').read_text()
+        assert 'XLLCENTER 1000.123457' in hdr and 'CELLSIZE 10.123457' in hdr
+    if fmt=='zmap':
+        raw=path.read_text()
+        assert '1000.123457' in raw and '1.2345678901234567' in raw
+
+
+def test_export_rejects_step_below_coordinate_precision(tmp_path):
+    grid=Grid([0,1e-7],[0,1e-7],[[1.,2.],[3.,4.]])
+    path=tmp_path/'fine.npz'
+    with pytest.raises(ValueError,match='Шаг сетки слишком мал'):
+        write_grid(grid,path,'npz')
+    assert not path.exists()
