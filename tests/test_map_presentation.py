@@ -69,7 +69,9 @@ def test_presentation_project_roundtrip(tmp_path,qt_application_lifetime):
         assert w.contour_label_every.value()==3
         assert w.figure.axes[0].title.get_fontsize()==18
         w.map_toolbar.home()
-        assert w.map_toolbar.zoom.value()==pytest.approx(100)
+        assert callable(w.map_toolbar.zoom)
+        np.testing.assert_allclose(w.figure.axes[0].get_xlim(),w._map_home[0])
+        np.testing.assert_allclose(w.figure.axes[0].get_ylim(),w._map_home[1])
     finally: w.close()
 
 
@@ -182,3 +184,55 @@ def test_font_editor_uses_renderable_families_and_migrates_legacy(qt_application
         assert original['title']['family']=='MS Shell Dlg 2'
         assert w.figure.axes[0].title.get_fontfamily()==[w.map_fonts['title']['family']]
     finally: w.close()
+
+
+def test_publication_cursor_zoom_and_native_toolbar(qt_application_lifetime):
+    from types import SimpleNamespace
+    w=MainWindow()
+    try:
+        w.add_grid(grid())
+        w.map_views.setCurrentWidget(w.canvas)
+        w.canvas.draw()
+        toolbar=w.map_toolbar
+        assert callable(toolbar.zoom)
+        assert not hasattr(toolbar,'reset_zoom')
+        assert hasattr(toolbar,'nominal_scale')
+        assert hasattr(toolbar,'edit_layout') and hasattr(toolbar,'reset_layout')
+        # The standard rectangle-zoom mode must still be a callable action.
+        toolbar.zoom()
+        assert toolbar.mode.name=='ZOOM'
+        toolbar.edit_layout.setChecked(True)
+        assert not toolbar.mode
+        toolbar.edit_layout.setChecked(False)
+        # Off-centre pointers in opposite quadrants must produce distinct
+        # views, with the pointed data coordinate fixed relative to the frame.
+        centers=[]
+        for fx,fy in ((.25,.2),(.75,.8)):
+            toolbar.home()
+            ax=w.figure.axes[0]
+            old_x=np.array(ax.get_xlim()); old_y=np.array(ax.get_ylim())
+            px=old_x[0]+fx*np.ptp(old_x)
+            py=old_y[0]+fy*np.ptp(old_y)
+            event=SimpleNamespace(inaxes=ax,xdata=px,ydata=py,step=1)
+            w.map_scroll(event)
+            new_x=np.array(ax.get_xlim()); new_y=np.array(ax.get_ylim())
+            np.testing.assert_allclose(new_x,px+(old_x-px)/1.2,rtol=0,atol=1e-7)
+            np.testing.assert_allclose(new_y,py+(old_y-py)/1.2,rtol=0,atol=1e-7)
+            assert (px-new_x[0])/np.ptp(new_x)==pytest.approx(fx)
+            assert (py-new_y[0])/np.ptp(new_y)==pytest.approx(fy)
+            centers.append((new_x.mean(),new_y.mean()))
+            assert w._map_view==(tuple(new_x),tuple(new_y))
+            event.step=-1
+            w.map_scroll(event)
+            np.testing.assert_allclose(ax.get_xlim(),old_x,rtol=0,atol=1e-7)
+            np.testing.assert_allclose(ax.get_ylim(),old_y,rtol=0,atol=1e-7)
+        assert centers[0][0]<centers[1][0] and centers[0][1]<centers[1][1]
+        toolbar.home()
+        ax=w.figure.axes[0]
+        np.testing.assert_allclose(ax.get_xlim(),w._map_home[0])
+        np.testing.assert_allclose(ax.get_ylim(),w._map_home[1])
+        before=ax.get_xlim(),ax.get_ylim()
+        w.map_scroll(SimpleNamespace(inaxes=None,xdata=None,ydata=None,step=1))
+        assert (ax.get_xlim(),ax.get_ylim())==before
+    finally:
+        w.close()

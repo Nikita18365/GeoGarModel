@@ -1,6 +1,6 @@
 """Map navigation and geographic north in display coordinates."""
 import numpy as np
-from PyQt5.QtWidgets import QDoubleSpinBox,QLabel,QPushButton
+from PyQt5.QtWidgets import QLabel,QPushButton
 from .map_presentation_ui import MapImageExportDialog
 from .map_presentation import save_map_image
 from .map_layout import DecorationDrag
@@ -32,17 +32,6 @@ class MapToolbar(FigureToolbar):
         self.workbench=workbench
         super().__init__(canvas,workbench)
         self.addSeparator()
-        self.addWidget(QLabel('Масштаб'))
-        self.zoom=QDoubleSpinBox()
-        self.zoom.setRange(.1,100000); self.zoom.setDecimals(1)
-        self.zoom.setSuffix(' %'); self.zoom.setValue(100)
-        self.zoom.setKeyboardTracking(False); self.zoom.setToolTip('100 % — полный охват; увеличение относительно центра карты')
-        self.addWidget(self.zoom)
-        self.zoom.valueChanged.connect(lambda value:workbench.guard(lambda:workbench.set_map_zoom(value)))
-        self.reset_zoom=QPushButton('100 %')
-        self.reset_zoom.setToolTip('Вписать все видимые слои по центру')
-        self.reset_zoom.clicked.connect(lambda: self.home())
-        self.addWidget(self.reset_zoom)
         self.nominal_scale=QLabel('1 : —')
         self.nominal_scale.setToolTip('Расчётный масштаб листа в проекции; не физический масштаб монитора')
         self.addWidget(self.nominal_scale)
@@ -74,15 +63,11 @@ class MapToolbar(FigureToolbar):
     def sync_scale(self):
         home=getattr(self.workbench,'_map_home',None)
         axes=self.canvas.figure.axes
-        self.zoom.setEnabled(bool(home and axes))
-        self.reset_zoom.setEnabled(bool(home and axes))
         if not home or not axes:
             self.nominal_scale.setText('1 : —'); return
         ax=axes[0]; width=abs(np.ptp(ax.get_xlim()))
-        if width<=0: return
-        self.zoom.blockSignals(True)
-        self.zoom.setValue(100*abs(np.ptp(home[0]))/width)
-        self.zoom.blockSignals(False)
+        if not np.isfinite(width) or width<=0:
+            self.nominal_scale.setText('1 : —'); return
         # Scale denominator is meaningful only with projected metre coordinates.
         try:
             crs=CRS.from_user_input(self.workbench.map_project_crs)

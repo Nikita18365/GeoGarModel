@@ -749,9 +749,16 @@ class MapWorkspace:
         if not self.figure.axes: return
         ax=self.figure.axes[0]
         if event.inaxes is not ax or event.xdata is None or event.ydata is None: return
-        factor=1.2**(-event.step)
-        x,y=centered_limits((ax.get_xlim(),ax.get_ylim()),factor)
+        if not self._map_home or not np.isfinite([event.xdata,event.ydata,event.step]).all(): return
+        if event.step==0: return
+        factor=1.2**(-float(np.clip(event.step,-100,100)))
+        # Preserve the data coordinate beneath the pointer, on both axes.
+        # Keep the frame's equal aspect and do not move the decorations.
+        x=tuple(event.xdata+(v-event.xdata)*factor for v in ax.get_xlim())
+        y=tuple(event.ydata+(v-event.ydata)*factor for v in ax.get_ylim())
+        if not np.isfinite([*x,*y]).all() or x[0]==x[1] or y[0]==y[1]: return
         ax.set_xlim(x); ax.set_ylim(y)
+        self._map_view=(x,y)
         self.map_dirty=True; self.map_toolbar.sync_scale(); self.canvas.draw_idle()
 
     def set_map_zoom(self,percent):
