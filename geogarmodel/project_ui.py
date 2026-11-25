@@ -111,7 +111,7 @@ class ProjectWorkspace:
         ax=self.figure.axes[0] if self.figure.axes else None
         maps=dict(name=self.map_project_name,layers=self.map_layer_rows(),view=[list(ax.get_xlim()),list(ax.get_ylim())] if ax else None,
             scale=dict(enabled=self.scale_on.isChecked(),step=self.scale_step.value(),count=self.scale_count.value(),unit=self.scale_unit.currentText(),show_crs=self.scale_crs.isChecked(),north='arrow'),
-            crs=self.map_project_crs,presentation=dict(title=self.map_title.text(),geography=self.read_geography(),auto_layout=self.auto_map_layout.isChecked()))
+            crs=self.map_project_crs,presentation=self.read_map_presentation())
         t=self.inversion; models={}; entries=[]; seen={}
         for entry in t.scene.registry.values():
             key=seen.setdefault(id(entry.result),str(len(seen))); models[key]=entry.result

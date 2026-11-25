@@ -111,8 +111,9 @@ def test_home_wheel_heading_scale_and_name_editor(qt_application_lifetime):
     ax=window.figure.axes[0]; full=(ax.get_xlim(),ax.get_ylim())
     window.map_scroll(SimpleNamespace(inaxes=ax,xdata=200.,ydata=150.,step=1))
     assert np.ptp(ax.get_xlim())<np.ptp(full[0])
-    # The cursor's relative position is preserved by wheel zoom.
-    assert (200-ax.get_xlim()[0])/np.ptp(ax.get_xlim())==pytest.approx((200-full[0][0])/np.ptp(full[0]))
+    # Publication view zoom is centered rather than anchored at the cursor.
+    assert np.mean(ax.get_xlim())==pytest.approx(np.mean(full[0]))
+    assert np.mean(ax.get_ylim())==pytest.approx(np.mean(full[1]))
     window.map_toolbar.home(); ax=window.figure.axes[0]
     np.testing.assert_allclose(ax.get_xlim(),full[0]); np.testing.assert_allclose(ax.get_ylim(),full[1])
     window.contours.setChecked(True); assert window.contour_color.isHidden()
@@ -352,7 +353,7 @@ def test_default_geophysical_palette_and_view_sections(tmp_path,qt_application_l
         assert window.palette.itemText(0)==DEFAULT_MAP_PALETTE
         assert all(window.palette.findText(name)>=0 for name in window.palette_library)
         sections=window.map_view_sections
-        assert list(sections)==['colors','contours','relief','axes','scale','layout']
+        assert list(sections)==['colors','contours','relief','axes','scale','layout','fonts']
         assert sections['colors'].toggle.isChecked()
         assert all(not s.toggle.isChecked() for k,s in sections.items() if k!='colors')
         assert sections['colors'].content.isAncestorOf(window.palette)

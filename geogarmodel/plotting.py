@@ -35,7 +35,8 @@ def map_colors(grid,cmap='viridis',mode='linear',vmin=None,vmax=None,palette_col
 def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=None,
              contours=False, hillshade=False, title=None, overlays=(), points=None,
              contour_step=0, contour_color='#dbe7f6', contour_width=.5,
-             contour_labels=True, alpha=1., target_ax=None,auto_layout=True,
+             contour_labels=True, contour_label_every=1, alpha=1., target_ax=None,auto_layout=True,
+             colorbar_orientation='vertical',
              sun_azimuth=315.,sun_altitude=45.,sun_intensity=.25,sun_relief=1.,
              palette_colors=None,discrete=False,bins=32,reverse=False,smooth=True,palette_zones=None,zone_values=False,render_quality=2):
     finite = grid.values[np.isfinite(grid.values)]
@@ -52,7 +53,7 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
     cmap,norm=map_colors(grid,cmap,mode,vmin,vmax,palette_colors,discrete,bins,reverse,palette_zones,zone_values)
     fast = target_ax is None and not contours and not hillshade and not overlays and points is None
     cached = getattr(figure, "_map_cache", None)
-    if fast and cached is not None and cached[0] is grid:
+    if fast and cached is not None and cached[0] is grid and cached[3].orientation==colorbar_orientation:
         _, ax, image, bar = cached
         image.set_cmap(cmap)
         image.set_norm(norm)
@@ -90,7 +91,10 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
             levels=np.arange(start,end+1)*contour_step
         if np.isscalar(levels) or len(levels):
             cs = ax.contour(grid.x[::sx], grid.y[::sy], grid.values[::sy, ::sx], levels=levels, colors=contour_color, linewidths=contour_width)
-            if contour_labels: ax.clabel(cs, fontsize=8, inline=True)
+            if contour_labels:
+                every=max(1,int(contour_label_every))
+                for label in ax.clabel(cs, levels=cs.levels[::every], fontsize=8, inline=True):
+                    label.set_gid('map-contour-label')
     for layer in overlays:
         if not grid.crs or layer.crs is None:
             raise ValueError("Для наложения векторных данных задайте CRS карты и вектора.")
@@ -99,14 +103,15 @@ def draw_map(figure, grid, *, cmap="viridis", mode="linear", vmin=None, vmax=Non
     if points is not None:
         ax.scatter(points.iloc[:, 0], points.iloc[:, 1], s=9, c="black", label="Контрольные точки")
         ax.legend(loc="best")
-    ax.set_aspect("equal", adjustable="box")
+    ax.set_aspect("equal", adjustable="box", anchor='C')
     ax.set_title(grid.name if title is None else title)
     ax.set_xlabel('X, м' if grid.coordinate_unit in ('m','unknown') else 'X, °')
     ax.set_ylabel('Y, м' if grid.coordinate_unit in ('m','unknown') else 'Y, °')
     ax.ticklabel_format(style="plain", useOffset=False)
     ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
-    bar = figure.colorbar(image, ax=ax, label=grid.unit, fraction=.045, pad=.04) if target_ax is None else None
+    bar = figure.colorbar(image, ax=ax, label=grid.unit, orientation=colorbar_orientation,
+                          fraction=.045, pad=.10 if colorbar_orientation=='horizontal' else .04) if target_ax is None else None
     style_map_figure(figure)
     if auto_layout: figure.tight_layout()
     if fast:
