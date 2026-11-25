@@ -18,16 +18,83 @@ class RasterPreview(QGraphicsView):
         picture = QImage(image.data,width,height,4*width,QImage.Format_RGBA8888)
         self.picture = self.scene().addPixmap(QPixmap.fromImage(picture))
         self.add_point = add_point
+        self.setSceneRect(self.picture.boundingRect())
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
+        self.setResizeAnchor(QGraphicsView.NoAnchor)
+        self._zoom = 1.
+        self._fit_scale = 1.
+        self._pan_pos = None
+
+    def fit_image(self):
+        """Reset the view without modifying source pixels or control points."""
+        self._zoom = 1.
+        self.fitInView(self.picture,Qt.KeepAspectRatio)
+        self._fit_scale = self.transform().m11()
+        self.centerOn(self.picture.boundingRect().center())
+
+    def _max_zoom(self):
+        # Allow large scans to reach individual pixels (up to 16 screen
+        # pixels per source pixel), without unbounded scene transforms.
+        return max(1.,16./max(self._fit_scale,1e-12))
 
     def resizeEvent(self, event):
+        center = self.mapToScene(self.viewport().rect().center())
+        zoom = self._zoom
         super().resizeEvent(event)
-        self.fitInView(self.picture,Qt.KeepAspectRatio)
+        self.fit_image()
+        if zoom>1.:
+            self._zoom = min(zoom,self._max_zoom())
+            self.scale(self._zoom,self._zoom)
+            self.centerOn(center)
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if not delta:
+            delta = event.pixelDelta().y()*3
+        if not delta:
+            event.ignore()
+            return
+        zoom = min(self._max_zoom(),max(1.,self._zoom*1.25**(max(-1200,min(1200,delta))/120.)))
+        if zoom<=1.:
+            self.fit_image()
+        elif zoom!=self._zoom:
+            pos = event.pos()
+            anchor = self.mapToScene(pos)
+            factor = zoom/self._zoom
+            self.scale(factor,factor)
+            self._zoom = zoom
+            center = self.mapToScene(self.viewport().rect().center())
+            self.centerOn(center+anchor-self.mapToScene(pos))
+        event.accept()
 
     def mousePressEvent(self, event):
+        if event.button()==Qt.MiddleButton:
+            self._pan_pos = event.pos()
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
         pos = self.mapToScene(event.pos())
-        if event.button()==Qt.LeftButton and self.picture.boundingRect().contains(pos):
+        if event.button()==Qt.LeftButton and self._pan_pos is None and self.picture.boundingRect().contains(pos):
+            # Scene coordinates always refer to the original raster pixels.
             self.add_point(int(pos.x())+.5,int(pos.y())+.5)
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._pan_pos is not None:
+            delta = self.mapToScene(self._pan_pos)-self.mapToScene(event.pos())
+            self.centerOn(self.mapToScene(self.viewport().rect().center())+delta)
+            self._pan_pos = event.pos()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button()==Qt.MiddleButton and self._pan_pos is not None:
+            self._pan_pos = None
+            self.viewport().unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class RasterPoints(QDialog):
@@ -39,14 +106,20 @@ class RasterPoints(QDialog):
         self.markers = []
         layout = QVBoxLayout(self)
         hint = QLabel('Нажмите на изображение, затем введите координаты X и Y в таблице. '
-                      'Нужны минимум три точки, расположенные не на одной прямой.')
+                      'Нужны минимум три точки, расположенные не на одной прямой. '
+                      'Колесо — масштабирование около курсора; зажатое колесо — перемещение.')
         hint.setWordWrap(True)
         layout.addWidget(hint)
         layout.addWidget(QLabel('Исходная СК: '+crs.name))
         body = QHBoxLayout()
         layout.addLayout(body,1)
         self.preview = RasterPreview(image,self.add_point)
-        body.addWidget(self.preview,3)
+        image_panel = QVBoxLayout()
+        body.addLayout(image_panel,3)
+        image_panel.addWidget(self.preview,1)
+        fit = QPushButton('Показать весь растр')
+        fit.clicked.connect(self.preview.fit_image)
+        image_panel.addWidget(fit)
         side = QVBoxLayout()
         body.addLayout(side,2)
         self.table = QTableWidget(0,4)

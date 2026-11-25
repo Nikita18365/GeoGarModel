@@ -84,3 +84,52 @@ def test_import_raster_project_and_both_map_views(tmp_path,monkeypatch,manual):
         np.testing.assert_array_equal(restored.image,row['data'].image)
     finally:
         window.close()
+
+
+def test_raster_preview_wheel_zoom_preserves_source_pixels(qt_application_lifetime):
+    from PyQt5.QtCore import QPoint, QPointF, Qt
+    from PyQt5.QtGui import QWheelEvent
+    from PyQt5.QtTest import QTest
+    from geogarmodel.raster_points_ui import RasterPreview
+
+    points=[]
+    preview=RasterPreview(np.full((800,1200,4),255,dtype=np.uint8),
+                          lambda x,y:points.append((x,y)))
+    preview.resize(600,400)
+    preview.show()
+    QTest.qWait(20)
+    try:
+        preview.fit_image()
+        initial=preview.transform().m11()
+        pos=preview.viewport().rect().center()+QPoint(45,25)
+        def wheel(delta):
+            event=QWheelEvent(QPointF(pos),QPointF(preview.viewport().mapToGlobal(pos)),
+                              QPoint(),QPoint(0,delta),Qt.NoButton,Qt.NoModifier,
+                              Qt.NoScrollPhase,False)
+            preview.wheelEvent(event)
+            assert event.isAccepted()
+        anchor=preview.mapToScene(pos)
+        for _ in range(10): wheel(120)
+        assert preview.transform().m11()>initial
+        assert preview._zoom>1
+        assert not points
+        # Scrollbar integer rounding is at most a few display pixels.
+        after=preview.mapToScene(pos)
+        assert abs(after.x()-anchor.x())<5/initial
+        assert abs(after.y()-anchor.y())<5/initial
+        source=QPointF(int(after.x())+.5,int(after.y())+.5)
+        QTest.mouseClick(preview.viewport(),Qt.LeftButton,pos=preview.mapFromScene(source))
+        assert points==[(source.x(),source.y())]
+        zoom=preview._zoom
+        preview.resize(640,420)
+        QTest.qWait(10)
+        assert preview._zoom==pytest.approx(zoom)
+        for _ in range(30): wheel(-120)
+        assert preview._zoom==1.
+        assert preview.transform().m11()==pytest.approx(preview._fit_scale)
+        assert len(points)==1
+        wheel(120)
+        preview.fit_image()
+        assert preview._zoom==1.
+    finally:
+        preview.close()
