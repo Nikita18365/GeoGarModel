@@ -1,3 +1,5 @@
+[![GeoGarModel tests](https://github.com/Nikita18365/GeoGarModel/actions/workflows/tests.yml/badge.svg?branch=main&event=push)](https://github.com/Nikita18365/GeoGarModel/actions/workflows/tests.yml)
+
 # GeoGarModel 2.3
 
 Приложение на PyQt5 для совместной интерпретации потенциальных полей и сейсмических атрибутов по табличным данным.
@@ -30,8 +32,8 @@ python --version
 # Вместо $Home можно задать свой "полный путь" куда импортировать репозиторий
 # Например "cd C:\Users\User"
 cd $HOME
-# Импортируем репозиторий в выбранную папку 
-git clone --branch modernization/horizons-and-fields https://github.com/Nikita18365/GeoGarModel.git
+# Импортируем репозиторий в выбранную папку (только main ветку)
+git clone --single-branch https://github.com/Nikita18365/GeoGarModel.git
 # Переходим в папку проэкта
 cd GeoGarModel
 # Создаем виртуальную среду и активируем её
