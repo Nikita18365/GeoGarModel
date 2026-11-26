@@ -1,3 +1,5 @@
+[![GeoGarModel tests](https://github.com/Nikita18365/GeoGarModel/actions/workflows/tests.yml/badge.svg?branch=main&event=push)](https://github.com/Nikita18365/GeoGarModel/actions/workflows/tests.yml)
+
 # GeoGarModel 2.3
 
 Приложение на PyQt5 для совместной интерпретации потенциальных полей и сейсмических атрибутов по табличным данным.
