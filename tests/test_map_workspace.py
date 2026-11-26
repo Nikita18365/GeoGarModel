@@ -111,9 +111,9 @@ def test_home_wheel_heading_scale_and_name_editor(qt_application_lifetime):
     ax=window.figure.axes[0]; full=(ax.get_xlim(),ax.get_ylim())
     window.map_scroll(SimpleNamespace(inaxes=ax,xdata=200.,ydata=150.,step=1))
     assert np.ptp(ax.get_xlim())<np.ptp(full[0])
-    # Publication view zoom is centered rather than anchored at the cursor.
-    assert np.mean(ax.get_xlim())==pytest.approx(np.mean(full[0]))
-    assert np.mean(ax.get_ylim())==pytest.approx(np.mean(full[1]))
+    # Wheel zoom preserves the data coordinate under the pointer.
+    np.testing.assert_allclose(ax.get_xlim(),200.+(np.asarray(full[0])-200.)/1.2)
+    np.testing.assert_allclose(ax.get_ylim(),150.+(np.asarray(full[1])-150.)/1.2)
     window.map_toolbar.home(); ax=window.figure.axes[0]
     np.testing.assert_allclose(ax.get_xlim(),full[0]); np.testing.assert_allclose(ax.get_ylim(),full[1])
     window.contours.setChecked(True); assert window.contour_color.isHidden()

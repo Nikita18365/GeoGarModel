@@ -11,18 +11,33 @@ from geogarmodel.work_progress import report, reporting
 def test_export_live_map_via_toolbar(qt_application_lifetime,tmp_path,monkeypatch):
     from PyQt5.QtWidgets import QFileDialog,QMessageBox
     from geogarmodel.app import MainWindow
-    from geogarmodel.map_navigation import MapToolbar
+    from geogarmodel.map_navigation import MapToolbar,MapImageExportDialog
     window=MainWindow()
     window.load_demo()
     path=tmp_path/'map.png'
     errors=[]
     monkeypatch.setattr(QFileDialog,'getSaveFileName',lambda *args:(str(path),''))
     monkeypatch.setattr(QMessageBox,'warning',lambda *args:errors.append(args[-1]))
+    # Confirm the real export settings without entering a blocking dialog loop.
+    def confirm_export(dialog):
+        assert dialog.format.currentData()=='png'
+        dialog.dpi.setValue(150)
+        dialog.padding.setValue(2)
+        dialog.choose_path()
+        assert dialog.result_options==(str(path),dict(dpi=150,padding_mm=2.,transparent=False,jpeg_quality=95))
+        return dialog.result()
+    monkeypatch.setattr(MapImageExportDialog,'exec_',confirm_export)
     try:
-        window.findChild(MapToolbar).save_figure()
+        assert window.findChild(MapToolbar).save_figure()==str(path)
         assert not errors,errors
-        assert path.read_bytes().startswith(b'\x89PNG')
-        assert window.activity.bar.value()==100
+        assert path.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+        from PIL import Image
+        with Image.open(path) as image:
+            image.load()
+            assert image.format=='PNG' and min(image.size)>0
+            assert image.info['dpi']==pytest.approx((150,150),abs=.1)
+        assert str(path) in window.statusBar().currentMessage()
+        assert not window._map_exporting
     finally:
         window.close()
 
