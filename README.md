@@ -30,8 +30,8 @@ python --version
 # Вместо $Home можно задать свой "полный путь" куда импортировать репозиторий
 # Например "cd C:\Users\User"
 cd $HOME
-# Импортируем репозиторий в выбранную папку 
-git clone --branch modernization/horizons-and-fields https://github.com/Nikita18365/GeoGarModel.git
+# Импортируем репозиторий в выбранную папку (только main ветку)
+git clone --single-branch https://github.com/Nikita18365/GeoGarModel.git
 # Переходим в папку проэкта
 cd GeoGarModel
 # Создаем виртуальную среду и активируем её
