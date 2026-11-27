@@ -109,7 +109,7 @@ learning_rate/batch_size у нового MLP и width/layers/dropout/learning ra
 | XGBoost | Да | NVIDIA CUDA, `device=cuda:N`, `tree_method=hist` |
 | CatBoost | Да | NVIDIA CUDA, `task_type=GPU`, `devices=N` |
 | LightGBM 4.6 | Да | OpenCL GPU-сборка, `device_type=gpu`, ID внутри выбранной по умолчанию платформы |
-| MLP, MLP (legacy CUDA), ResNet, Transformer | Да | CUDA-сборка PyTorch и доступное `cuda:N` |
+| MLP (pytorch), ResNet, Transformer | Да | CUDA-сборка PyTorch и доступное `cuda:N` |
 
 GPU-модель при отсутствии подходящей сборки/драйвера выдаёт ошибку. Для XGBoost
 после fit дополнительно проверяется конфигурация booster: тихий переход на CPU

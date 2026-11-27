@@ -26,11 +26,10 @@ def default_space(name, device="cpu"):
         "LightGBM": {**common, "n_estimators": i(100, 500), "num_leaves": i(8, 63)},
         "CatBoost": {**common, "iterations": i(100, 500), "depth": i(3, 8), "l2_leaf_reg": f(.1, 10, True)},
         "MLP (sklearn)": {"alpha": f(1e-6, .1, True), "learning_rate_init": f(1e-4, .01, True)},
-        "MLP": {"learning_rate": f(1e-4, .01, True), "batch_size": [32,64,128,256]},
+        "MLP (pytorch)": {"learning_rate": f(1e-4, .01, True), "batch_size": [32,64,128,256]},
     }
     neural = {"width": [32, 64, 128], "layers": i(1, 4), "learning_rate": f(1e-4, .01, True), "dropout": f(0, .3)}
     spaces["ResNet"], spaces["Transformer"] = neural.copy(), neural.copy()
-    spaces["MLP (legacy CUDA)"] = neural.copy()
     return spaces[name]
 
 

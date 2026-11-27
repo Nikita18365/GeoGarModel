@@ -104,15 +104,15 @@ def test_validation_rejects_impossible_splits(survey):
 
 def test_defaults_and_mlp_device():
     assert model_defaults("Ridge")["alpha"]==1.
-    assert [s["units"] for s in model_defaults("MLP")["layer_specs"] if s["type"]=="Dense"]==[128,64,32]
-    assert model_defaults("MLP")==model_defaults("MLP",device="gpu")
-    assert device_parameters("MLP","gpu",1)["device"]=="cuda:1"
-    assert "learning_rate" in default_space("MLP","gpu")
-    assert default_space("MLP","cpu")==default_space("MLP","gpu")
-    assert "device" not in model_defaults("MLP")
+    assert [s["units"] for s in model_defaults("MLP (pytorch)")["layer_specs"] if s["type"]=="Dense"]==[128,64,32]
+    assert model_defaults("MLP (pytorch)")==model_defaults("MLP (pytorch)",device="gpu")
+    assert device_parameters("MLP (pytorch)","gpu",1)["device"]=="cuda:1"
+    assert "learning_rate" in default_space("MLP (pytorch)","gpu")
+    assert default_space("MLP (pytorch)","cpu")==default_space("MLP (pytorch)","gpu")
+    assert "device" not in model_defaults("MLP (pytorch)")
     make_model("MLP (sklearn)",model_defaults("MLP (sklearn)"))
-    if "MLP" in __import__("geogarmodel.models",fromlist=["available_models"]).available_models():
-        make_model("MLP",model_defaults("MLP"))
+    if "MLP (pytorch)" in __import__("geogarmodel.models",fromlist=["available_models"]).available_models():
+        make_model("MLP (pytorch)",model_defaults("MLP (pytorch)"))
 
 def test_torch_mlp_architecture_cpu():
     pytest.importorskip("torch")
@@ -143,7 +143,7 @@ def test_validation_ui_and_parameter_editor(qt_application_lifetime):
         window.validation_method.setCurrentText("BlockKFold")
         assert not window.block.isHidden()
         assert window.buffer_size.isHidden()
-        window.model_choice.setCurrentText("MLP")
+        window.model_choice.setCurrentText("MLP (pytorch)")
         assert window.device_choice.model().item(1).isEnabled()
         dialog=ParameterDialog("Ridge",42,"cpu",0,{},window)
         assert dialog.checked()["alpha"]==1.
@@ -170,3 +170,42 @@ def test_old_buffered_project_requires_explicit_group_selection():
     assert migrated=={"validation_method":"BufferedGroupKFold","group_column":"","buffer_size":2000.}
     assert old["validation_method"]=="BufferedKFold"
     assert migrate_ml_controls(migrated)==migrated
+
+
+def test_ml_model_panel_layout(qt_application_lifetime):
+    from geogarmodel.app import MainWindow
+    from PyQt5.QtWidgets import QPushButton
+    window=MainWindow()
+    try:
+        window.resize(1280,800)
+        window.show()
+        window.tabs.setCurrentIndex(1)
+        window.training_workflow.setCurrentIndex(1)
+        assert window.model_choice.findText("MLP (pytorch)")>=0
+        assert window.model_choice.findText("MLP")==-1
+        assert window.model_choice.findText("MLP (legacy CUDA)")==-1
+        buttons=window.model_group.findChildren(QPushButton)
+        assert not any("default" in b.text().lower() for b in buttons)
+        for method in ("BlockKFold","BufferedGroupKFold","GroupKFold","KFold","BufferedGroupKFold"):
+            window.validation_method.setCurrentText(method)
+            qt_application_lifetime.processEvents()
+            a,b=window.parameter_editor_button,window.parameter_import_button
+            assert a.isVisible() and b.isVisible()
+            assert a.height()>=a.minimumHeight() and b.height()>=b.minimumHeight()
+            assert a.geometry().bottom()<b.geometry().top()
+            assert window.validation_rows[window.group_column].isHidden()==(method not in ("GroupKFold","BufferedGroupKFold"))
+            assert window.validation_rows[window.buffer_size].isHidden()==(method!="BufferedGroupKFold")
+    finally:
+        window.close()
+
+
+def test_migrate_old_mlp_settings():
+    from geogarmodel.parameter_files import migrate_model_selection
+    from geogarmodel.mlp_config import validate_config
+    name,params,search=migrate_model_selection("MLP (legacy CUDA)",{"width":16,"layers":2,"dropout":.2},{"width":[16,32]})
+    assert name=="MLP (pytorch)"
+    assert [s["type"] for s in params["layer_specs"]]==["Dense","Activation","Dropout"]*2
+    assert not search
+    validate_config(params)
+    assert migrate_model_selection("MLP",{"alpha":.1})[0]=="MLP (sklearn)"
+    assert migrate_model_selection("MLP",{"epochs":2})[0]=="MLP (pytorch)"

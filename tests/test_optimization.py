@@ -50,7 +50,7 @@ def test_search_schema_and_device_parameters():
     assert device_parameters("CatBoost", "gpu", 1)["devices"] == "1"
     assert device_parameters("LightGBM", "gpu")["device_type"] == "gpu"
     assert device_parameters("Transformer", "gpu")["device"] == "cuda:0"
-    for name in ("Ridge", "MLP", "Transformer", "LightGBM"):
+    for name in ("Ridge", "MLP (pytorch)", "Transformer", "LightGBM"):
         assert default_space(name)
 
 

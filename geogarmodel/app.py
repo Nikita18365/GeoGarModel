@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QTabWidget, QVB
     QHBoxLayout, QFormLayout, QPushButton, QComboBox, QLineEdit, QCheckBox, QLabel,
     QFileDialog, QMessageBox, QListWidget, QPlainTextEdit, QDoubleSpinBox,
     QSpinBox, QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem,
-    QScrollArea, QGroupBox, QProgressBar, QGridLayout, QSizePolicy, QBoxLayout,QInputDialog)
+    QScrollArea, QGroupBox, QProgressBar, QGridLayout, QSizePolicy, QBoxLayout,QInputDialog,QLayout)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from .grids import load_grid, points_to_grid
@@ -27,7 +27,7 @@ from .dashboard import TrainingDashboard
 from .theme_ui import ThemeController
 from .compute import GPU_MODELS, ComputationCancelled
 from .optimization import default_space
-from .parameter_files import validate_parameters, read_parameters, best_snapshot
+from .parameter_files import validate_parameters, read_parameters, best_snapshot, migrate_model_selection
 from .window_theme import apply_window_theme
 from .ui_layout import Disclosure,ParameterSplitter,details,form_details,workflow_sections,quiet_button,prepare_forms
 from .maps_ui import MapWorkspace,LayerList
@@ -298,7 +298,11 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             form.addRow(label, widget)
         panel.addWidget(data_group)
         model_group = QGroupBox("02 · Модель и контроль")
-        model_form = QFormLayout(model_group)
+        self.model_group = model_group
+        model_group.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Minimum)
+        model_form = QVBoxLayout(model_group)
+        model_form.setSpacing(8)
+        self.validation_rows = {}
         self.spatial.setText("Пространственные блоки")
         self.model_choice = QComboBox()
         self.model_choice.addItems(MODEL_NAMES)
@@ -330,7 +334,22 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                               ("", self.device_hint), ("Валидация", self.validation_method), ("Количество фолдов", self.folds),
                               ("Столбец групп", self.group_column), ("Размер блока, м", self.block), ("Буфер, м", self.buffer_size),
                               ("", self.validation_hint), ("Seed", self.seed)]:
-            model_form.addRow(label, widget)
+            # Actual stacked widgets, not hidden QFormLayout rows: their complete
+            # height is removed/reinstated on validation changes.
+            if label:
+                row = QWidget(model_group)
+                rows = QVBoxLayout(row)
+                rows.setContentsMargins(0,0,0,0)
+                rows.setSpacing(4)
+                caption = QLabel(label)
+                caption.setWordWrap(True)
+                rows.addWidget(caption)
+                rows.addWidget(widget)
+                self.validation_rows[widget] = row
+                model_form.addWidget(row)
+            else:
+                widget.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Minimum)
+                model_form.addWidget(widget)
         panel.addWidget(model_group)
         # Keep the JSON state for old project files and the existing training API.
         # Only the dedicated editor/import actions are exposed to users.
@@ -340,10 +359,11 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         parameter_actions = QVBoxLayout(parameter_panel)
         parameter_actions.setContentsMargins(0, 0, 0, 0)
         parameter_actions.setSpacing(8)
-        self.button("Использовать default параметры…", lambda: self.edit_parameters(True), parameter_actions)
-        self.button("Редактор параметров…", self.edit_parameters, parameter_actions)
-        self.button("Загрузить параметры JSON…", self.import_parameters, parameter_actions)
-        model_form.addRow(parameter_panel)
+        self.parameter_editor_button = self.button("Редактор параметров…", self.edit_parameters, parameter_actions)
+        self.parameter_import_button = self.button("Загрузить параметры JSON…", self.import_parameters, parameter_actions)
+        parameter_panel.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed)
+        parameter_actions.setSizeConstraint(QLayout.SetMinimumSize)
+        model_form.addWidget(parameter_panel)
         optimization = QGroupBox("03 · Optuna TPE")
         opt_form = QFormLayout(optimization)
         self.optimize_check = QCheckBox("Включить оптимизацию")
@@ -400,7 +420,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(10)
             combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        for item_form in (form, model_form, opt_form):
+        for item_form in (form, opt_form):
             item_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
             item_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         scroll = QScrollArea()
@@ -431,8 +451,13 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         prepare_forms(controls)
         for button in controls.findChildren(QPushButton): quiet_button(button)
         for button in parameter_panel.findChildren(QPushButton):
-            button.setMinimumHeight(max(40, button.sizeHint().height()+4))
+            button.setMinimumHeight(max(44, button.sizeHint().height()+8, button.fontMetrics().height()+24))
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for label in (self.validation_hint,self.device_hint):
+            label.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Minimum)
+        model_form.setSizeConstraint(QLayout.SetMinimumSize)
+        model_page = self.training_workflow.widget(1).widget()
+        model_page.layout().setSizeConstraint(QLayout.SetMinimumSize)
         layout.addWidget(ParameterSplitter(left,right))
         self.validation_method.currentTextChanged.connect(self.update_validation_controls)
         self.group_column.currentTextChanged.connect(self.update_features)
@@ -459,27 +484,27 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             text = "GPU: CUDA-совместимая сборка библиотеки и NVIDIA GPU; ID нумеруется с 0."
         if name not in available_models():
             text = f"Не установлен пакет {OPTIONAL[name]}. Установите дополнительные зависимости и перезапустите программу. " + text
-        elif name == "MLP":
+        elif name == "MLP (pytorch)":
             text = "MLP: единый PyTorch-конструктор слоёв для CPU и CUDA. Настройте архитектуру в редакторе параметров."
         self.device_hint.setText(text)
 
     def update_validation_controls(self, *args):
         method = self.validation_method.currentText()
         self.spatial.setChecked(method in SPATIAL_METHODS or method == "GroupKFold")
-        form = self.validation_method.parentWidget().layout()
         for widget, visible in ((self.group_column, method in GROUP_METHODS),
                                 (self.block, method == "BlockKFold"),
                                 (self.buffer_size, method == "BufferedGroupKFold")):
             widget.setVisible(visible)
-            label = form.labelForField(widget)
-            if label is not None:
-                label.setVisible(visible)
+            self.validation_rows[widget].setVisible(visible)
         hints = {"GroupKFold": "Целые группы (например, профили) исключаются из обучения.",
                  "BlockKFold": "Целые пространственные блоки попадают в контроль.",
                  "BufferedGroupKFold": "Контроль целыми группами; обучающие точки в пределах буфера вокруг контрольных точек исключаются. Без блоков.",
                  "KFold": "Последовательные фолды без перемешивания.",
                  "ShuffleKFold": "KFold со случайным перемешиванием и воспроизводимым seed."}
         self.validation_hint.setText(hints[method] + " При Optuna применяется вложенная CV.")
+        self.validation_hint.updateGeometry()
+        self.model_group.layout().invalidate()
+        self.model_group.updateGeometry()
         self.update_features()
 
     def selected_grid(self):
@@ -933,12 +958,12 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                  "fold_rmse": json.dumps(r["fold_rmse"])} for r in history]
         self.save_csv(pd.DataFrame(rows), "История Optuna")
 
-    def edit_parameters(self, defaults=False):
+    def edit_parameters(self):
         if self.worker:
             raise ValueError("Редактирование доступно после окончания расчёта.")
         name = self.model_choice.currentText()
-        overrides = {} if defaults else json.loads(self.parameters.text())
-        dialog = MLPDialog(self.seed.value(), overrides, self) if name == "MLP" else ParameterDialog(
+        overrides = json.loads(self.parameters.text())
+        dialog = MLPDialog(self.seed.value(), overrides, self) if name == "MLP (pytorch)" else ParameterDialog(
             name, self.seed.value(), self.device_choice.currentData(), self.gpu_id.value(), overrides, self)
         apply_window_theme(dialog)
         if dialog.exec_():
@@ -951,7 +976,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         if not path:
             return
         model, params = read_parameters(json.loads(Path(path).read_text(encoding="utf-8-sig")))
-        model = model or self.model_choice.currentText()
+        model, params, _ = migrate_model_selection(model or self.model_choice.currentText(), params)
         if model not in available_models():
             raise ValueError(f"Модель {model} недоступна. Установите её зависимости.")
         make_model(model, params)

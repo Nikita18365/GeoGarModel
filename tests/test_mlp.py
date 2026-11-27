@@ -7,14 +7,14 @@ def test_mlp_config_validation():
     cfg=validate_config({"optimizer_name":"SGD","loss_name":"Huber"})
     assert cfg["optimizer_params"]["momentum"]==0.
     assert cfg["loss_params"]["delta"]==1.
-    assert model_defaults("MLP")==model_defaults("MLP",device="gpu")
+    assert model_defaults("MLP (pytorch)")==model_defaults("MLP (pytorch)",device="gpu")
     with pytest.raises(ValueError):
         validate_config({"layer_specs":[{"type":"Dropout","rate":1.}]})
     with pytest.raises(ValueError):
         validate_config({"layer_specs":[{"type":"Dense","units":0}]})
     with pytest.raises(ValueError):
         validate_config({"optimizer_name":"SGD","optimizer_params":{"nesterov":True}})
-    scores=evaluation_scores([1.,2.,3.],[1.,3.,5.],"MLP",{"evaluation_metrics":["MedianAE","ExplainedVariance"]})
+    scores=evaluation_scores([1.,2.,3.],[1.,3.,5.],"MLP (pytorch)",{"evaluation_metrics":["MedianAE","ExplainedVariance"]})
     assert scores["MedianAE"]==1.
     assert "ExplainedVariance" in scores
 
@@ -43,7 +43,7 @@ def test_mlp_order_penalty_training_and_clone(optimizer):
 def test_mlp_losses(loss):
     pytest.importorskip("torch")
     x=np.arange(24,dtype=float).reshape(12,2)/24
-    model=make_model("MLP",{"epochs":1,"loss_name":loss,"layer_specs":[{"type":"Dense","units":4}]})
+    model=make_model("MLP (pytorch)",{"epochs":1,"loss_name":loss,"layer_specs":[{"type":"Dense","units":4}]})
     model.fit(x,x[:,0])
     assert np.isfinite(model.predict(x)).all()
 
@@ -75,7 +75,7 @@ def test_batchnorm_and_separate_activation_roundtrip():
            {"type":"Dense","units":4,"activation":"linear"},
            {"type":"Activation","activation":"tanh"}]
     x=np.arange(34,dtype=np.float32).reshape(17,2)/34
-    model=make_model("MLP",{"layer_specs":specs,"epochs":2,"batch_size":8})
+    model=make_model("MLP (pytorch)",{"layer_specs":specs,"epochs":2,"batch_size":8})
     model.fit(x,x[:,0])
     net=model.regressor_.steps[-1][1].network_
     bn=net[2]

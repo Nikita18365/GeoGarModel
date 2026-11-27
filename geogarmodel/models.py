@@ -19,8 +19,8 @@ from .validation import make_splits, SPATIAL_METHODS, GROUP_METHODS
 from .work_progress import report
 
 MODEL_NAMES = ["Ridge", "Linear", "Lasso", "Random Forest", "Extra Trees", "Gradient Boosting",
-               "Histogram Boosting", "MLP", "MLP (sklearn)", "MLP (legacy CUDA)", "XGBoost", "LightGBM", "CatBoost", "ResNet", "Transformer"]
-OPTIONAL = {"MLP": "torch", "MLP (legacy CUDA)": "torch", "XGBoost": "xgboost", "LightGBM": "lightgbm", "CatBoost": "catboost",
+               "Histogram Boosting", "MLP (pytorch)", "MLP (sklearn)", "XGBoost", "LightGBM", "CatBoost", "ResNet", "Transformer"]
+OPTIONAL = {"MLP (pytorch)": "torch", "XGBoost": "xgboost", "LightGBM": "lightgbm", "CatBoost": "catboost",
             "ResNet": "torch", "Transformer": "torch"}
 
 
@@ -44,13 +44,10 @@ def make_model(name, parameters=None, seed=42, device="cpu", gpu_id=0):
         "Histogram Boosting": lambda: HistGradientBoostingRegressor(random_state=seed, early_stopping=False),
         "MLP (sklearn)": lambda: MLPRegressor(hidden_layer_sizes=(128, 64, 32), max_iter=500, random_state=seed),
     }
-    if name == "MLP":
+    if name == "MLP (pytorch)":
         from .mlp import ConfigurableMLP
         params = validate_mlp_config(params, seed)
         estimator = ConfigurableMLP()
-    elif name == "MLP (legacy CUDA)":
-        from .neural import TorchRegressor
-        estimator = TorchRegressor(architecture="mlp", width=128, layers=3, epochs=100, random_state=seed)
     elif name in factories:
         estimator = factories[name]()
     elif name == "XGBoost":
@@ -68,7 +65,7 @@ def make_model(name, parameters=None, seed=42, device="cpu", gpu_id=0):
         estimator = TorchRegressor(architecture=name.lower(), random_state=seed)
     else:
         raise ValueError(f"Неизвестная модель: {name}")
-    if name in {"MLP", "MLP (legacy CUDA)", "ResNet", "Transformer"} and "architecture" in params:
+    if name in {"MLP (pytorch)", "ResNet", "Transformer"} and "architecture" in params:
         raise ValueError("Архитектура определяется выбранной моделью.")
     estimator.set_params(**params)
     estimator.set_params(**compute)
@@ -126,7 +123,7 @@ def evaluation_scores(observed, predicted, name, parameters):
     mse = float(mean_squared_error(observed, predicted))
     scores = dict(MAE=float(mean_absolute_error(observed,predicted)), RMSE=float(np.sqrt(mse)),
                   MSE=mse, R2=float(r2_score(observed,predicted)))
-    if name == "MLP":
+    if name == "MLP (pytorch)":
         selected = validate_mlp_config(parameters or {})["evaluation_metrics"]
         if "MedianAE" in selected:
             scores["MedianAE"] = float(median_absolute_error(observed,predicted))
@@ -311,7 +308,7 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
 
 
 def model_defaults(name, seed=42, device="cpu", gpu_id=0):
-    if name == "MLP":
+    if name == "MLP (pytorch)":
         return mlp_defaults(seed)
     estimator = make_model(name, seed=seed, device=device, gpu_id=gpu_id).regressor.steps[-1][1]
     result = {}
