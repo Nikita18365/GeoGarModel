@@ -8,7 +8,8 @@ from .project_archive import write_project,read_project
 from .model_workspace import ModelEntry
 
 ML_CONTROLS=('x_column','y_column','target','spatial','block','test_fraction','seed','parameters','search',
-    'table_crs','north_first','model_choice','device_choice','gpu_id','optimize_check','trials','folds','timeout')
+    'table_crs','north_first','model_choice','device_choice','gpu_id','optimize_check','trials','folds','timeout',
+    'validation_method','group_column','buffer_size')
 INV_CONTROLS=('mode','east','north','height','value','error','crs','height_constant','sigma','stride','nx','ny','nz',
     'top','bottom','padding','cache','memory_policy','field','inc','dec','lower','upper','initial','iterations','damping',
     'smooth','depth_index','target','step','offset','device','gpu','early_stop','early_tolerance','early_patience',
@@ -73,9 +74,10 @@ class ProjectWorkspace:
         self._project_loading=True
         try:
             self.training=self.prediction=self.result=self.output=None; self.optimization_context=None
-            for w in (self.x_column,self.y_column,self.target): w.clear()
+            for w in (self.x_column,self.y_column,self.target,self.group_column): w.clear()
+            self.group_column.addItem("")
             self.feature_panel.search.clear(); self.feature_list.clear(); apply_controls(self,self._ml_defaults)
-            self.update_device_controls(); self.training_workflow.setCurrentIndex(0)
+            self.update_device_controls(); self.update_validation_controls(); self.training_workflow.setCurrentIndex(0)
             self.dashboard.reset(); self.log.clear(); self.progress_bar.setValue(0)
             self.best_trial_label.setText('Лучший trial: ещё нет завершённых результатов')
             self.table_info.setText('Загрузите обучающую и прогнозную таблицы.')
@@ -164,7 +166,10 @@ class ProjectWorkspace:
                 apply_controls(self,state.get('transform_controls',{})); self.update_transform_parameters()
                 self.training=data['tables'].get('training'); self.prediction=data['tables'].get('prediction'); self.output=data['tables'].get('output')
                 if self.training is not None: self.configure_columns()
-                apply_controls(self,state['ml_controls']); self.update_features()
+                ml_controls = dict(state['ml_controls'])
+                if 'validation_method' not in ml_controls:
+                    ml_controls['validation_method'] = 'BlockKFold' if ml_controls.get('spatial', True) else 'ShuffleKFold'
+                apply_controls(self,ml_controls); self.update_validation_controls(); self.update_features()
                 for i in range(self.feature_list.count()):
                     item=self.feature_list.item(i); item.setCheckState(Qt.Checked if item.text() in state['features'] else Qt.Unchecked)
                 self.update_device_controls(); self.optimization_context=state['optimization_context']

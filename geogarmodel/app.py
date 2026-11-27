@@ -15,7 +15,9 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from .grids import load_grid, points_to_grid
 from .fields import TRANSFORMS, transform
-from .models import read_table, available_models, train_horizon, make_model
+from .models import read_table, available_models, train_horizon, make_model, MODEL_NAMES, OPTIONAL
+from .validation import METHODS, SPATIAL_METHODS
+from .ml_settings_ui import ParameterDialog
 from .plotting import draw_map
 from .coordinates import validate_crs
 from .training_data_ui import FeaturePanel, TableCRSSelector
@@ -298,7 +300,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         model_form = QFormLayout(model_group)
         self.spatial.setText("Пространственные блоки")
         self.model_choice = QComboBox()
-        self.model_choice.addItems(available_models())
+        self.model_choice.addItems(MODEL_NAMES)
         self.model_choice.setCurrentText("Histogram Boosting")
         self.device_choice = QComboBox()
         self.device_choice.addItem("CPU", "cpu")
@@ -308,13 +310,29 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.device_hint = QLabel()
         self.device_hint.setWordWrap(True)
         self.device_hint.setObjectName("muted")
+        self.validation_method = QComboBox()
+        self.validation_method.addItems(METHODS)
+        self.validation_method.setCurrentText("BlockKFold")
+        self.group_column = QComboBox()
+        self.group_column.addItem("")
+        self.buffer_size = QDoubleSpinBox()
+        self.buffer_size.setRange(0, 1e9)
+        self.buffer_size.setValue(1000)
+        self.folds = QSpinBox()
+        self.folds.setRange(2, 50)
+        self.folds.setValue(3)
+        self.validation_hint = QLabel()
+        self.validation_hint.setWordWrap(True)
+        self.validation_hint.setObjectName("muted")
         self.parameters.setToolTip('Фиксированные параметры модели, например {"max_iter": 200}')
         for label, widget in [("Метод", self.model_choice), ("Вычисления", self.device_choice), ("GPU ID", self.gpu_id),
-                              ("", self.device_hint), ("Валидация", self.spatial), ("Размер блока, м", self.block),
-                              ("Доля контроля", self.test_fraction), ("Seed", self.seed), ("Параметры · JSON", self.parameters)]:
+                              ("", self.device_hint), ("Валидация", self.validation_method), ("Количество фолдов", self.folds),
+                              ("Столбец групп", self.group_column), ("Размер блока, м", self.block), ("Буфер, м", self.buffer_size),
+                              ("", self.validation_hint), ("Seed", self.seed), ("Параметры · JSON", self.parameters)]:
             model_form.addRow(label, widget)
         panel.addWidget(model_group)
         parameter_actions = QHBoxLayout()
+        self.button("Использовать default параметры…", lambda: self.edit_parameters(True), parameter_actions)
         self.button("Редактор параметров…", self.edit_parameters, parameter_actions)
         self.button("Загрузить параметры JSON…", self.import_parameters, parameter_actions)
         model_form.addRow(parameter_actions)
@@ -324,18 +342,15 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.trials = QSpinBox()
         self.trials.setRange(1, 10000)
         self.trials.setValue(30)
-        self.folds = QSpinBox()
-        self.folds.setRange(2, 10)
-        self.folds.setValue(3)
         self.timeout = QSpinBox()
         self.timeout.setRange(0, 86400)
         self.timeout.setSpecialValueText("Без ограничения")
         self.search.setToolTip('Пустой объект {} = диапазоны для выбранной модели. Пример: {"alpha": {"type":"float","low":0.001,"high":10,"log":true}}')
-        for label, widget in [("Поиск", self.optimize_check), ("Trials", self.trials), ("CV фолды", self.folds),
+        for label, widget in [("Поиск", self.optimize_check), ("Trials на подбор", self.trials),
                               ("Лимит времени, с", self.timeout), ("Диапазоны · JSON", self.search)]:
             opt_form.addRow(label, widget)
         preset = QPushButton("Заполнить диапазоны для модели")
-        preset.clicked.connect(lambda: self.search.setText(json.dumps(default_space(self.model_choice.currentText()))))
+        preset.clicked.connect(lambda: self.search.setText(json.dumps(default_space(self.model_choice.currentText(), self.device_choice.currentData()))))
         opt_form.addRow(preset)
         self.best_export = QPushButton("Сохранить лучший trial · JSON…")
         self.best_export.clicked.connect(lambda: self.guard(self.export_best_parameters))
@@ -372,7 +387,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.training_workflow=workflow_sections(panel,[('1 · Данные',[data_group]),('2 · Модель',[model_group]),
             ('3 · Подбор',[optimization]),('4 · Файл',[export])])
         parameter_actions.setDirection(QBoxLayout.TopToBottom)
-        form_details(model_form,[self.device_hint,self.seed,self.parameters],'Дополнительные параметры')
+        form_details(model_form,[self.parameters],'Дополнительные параметры')
         form_details(opt_form,[self.timeout,self.search],'Диапазоны и лимит времени')
         panel.addStretch()
         for combo in controls.findChildren(QComboBox):
@@ -410,9 +425,12 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         prepare_forms(controls)
         for button in controls.findChildren(QPushButton): quiet_button(button)
         layout.addWidget(ParameterSplitter(left,right))
+        self.validation_method.currentTextChanged.connect(self.update_validation_controls)
+        self.group_column.currentTextChanged.connect(self.update_features)
         self.model_choice.currentTextChanged.connect(self.update_device_controls)
         self.device_choice.currentIndexChanged.connect(self.update_device_controls)
         self.update_device_controls()
+        self.update_validation_controls()
         self.tabs.addTab(tab, "02  ·  Прогноз и оптимизация")
 
     def update_device_controls(self):
@@ -430,7 +448,33 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             text = "GPU: OpenCL-сборка LightGBM и подходящий драйвер. CPU доступен в обычной установке."
         else:
             text = "GPU: CUDA-совместимая сборка библиотеки и NVIDIA GPU; ID нумеруется с 0."
+        if name not in available_models():
+            text = f"Не установлен пакет {OPTIONAL[name]}. Установите дополнительные зависимости и перезапустите программу. " + text
+        elif name == "MLP" and gpu:
+            from importlib.util import find_spec
+            text = "GPU MLP: PyTorch CUDA. Параметры отличаются от sklearn MLP; используйте default параметры."
+            if find_spec("torch") is None:
+                text += " Не установлен пакет torch."
         self.device_hint.setText(text)
+
+    def update_validation_controls(self, *args):
+        method = self.validation_method.currentText()
+        self.spatial.setChecked(method in SPATIAL_METHODS or method == "GroupKFold")
+        form = self.validation_method.parentWidget().layout()
+        for widget, visible in ((self.group_column, method == "GroupKFold"),
+                                (self.block, method in SPATIAL_METHODS),
+                                (self.buffer_size, method == "BufferedKFold")):
+            widget.setVisible(visible)
+            label = form.labelForField(widget)
+            if label is not None:
+                label.setVisible(visible)
+        hints = {"GroupKFold": "Целые группы (например, профили) исключаются из обучения.",
+                 "BlockKFold": "Целые пространственные блоки попадают в контроль.",
+                 "BufferedKFold": "Дополнительно исключаются обучающие точки в пределах буфера от контроля.",
+                 "KFold": "Последовательные фолды без перемешивания.",
+                 "ShuffleKFold": "KFold со случайным перемешиванием и воспроизводимым seed."}
+        self.validation_hint.setText(hints[method] + " При Optuna применяется вложенная CV.")
+        self.update_features()
 
     def selected_grid(self):
         return MapWorkspace.selected_grid(self)
@@ -711,6 +755,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
 
     def configure_columns(self):
         self.feature_panel.search.clear()
+        self.feature_list.clear()
         for combo in (self.x_column, self.y_column, self.target):
             combo.blockSignals(True)
             combo.clear()
@@ -720,6 +765,12 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.target.setCurrentIndex(len(self.training.columns) - 1)
         for combo in (self.x_column, self.y_column, self.target):
             combo.blockSignals(False)
+        self.group_column.blockSignals(True)
+        self.group_column.clear()
+        self.group_column.addItem("")
+        self.group_column.addItems([str(c) for c in self.training.columns])
+        self.group_column.setCurrentIndex(0)
+        self.group_column.blockSignals(False)
         self.update_features()
 
     def open_prediction(self):
@@ -730,17 +781,20 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             self.log.appendPlainText(f"Прогнозная таблица: {len(self.prediction)} строк.")
 
     def update_features(self):
+        previous = {self.feature_list.item(i).text(): self.feature_list.item(i).checkState() for i in range(self.feature_list.count())}
         self.feature_list.clear()
         if self.training is None:
             return
         excluded = {self.x_column.currentText(), self.y_column.currentText(), self.target.currentText()}
+        if self.validation_method.currentText() == "GroupKFold":
+            excluded.add(self.group_column.currentText())
         from PyQt5.QtWidgets import QListWidgetItem
         for column in self.training.columns:
             if column not in excluded:
                 item = QListWidgetItem(str(column), self.feature_list)
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setToolTip(str(column))
-                item.setCheckState(Qt.Checked)
+                item.setCheckState(previous.get(str(column), Qt.Checked))
 
     def edit_training(self):
         if self.training is None:
@@ -792,6 +846,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             raise ValueError("Параметры и диапазоны Optuna должны быть объектами JSON.")
         args = dict(target=self.target.currentText(), coordinates=[self.x_column.currentText(), self.y_column.currentText()],
                     features=features, test_size=self.test_fraction.value(), spatial=self.spatial.isChecked(),
+                    validation_method=self.validation_method.currentText(), group_column=self.group_column.currentText() or None,
+                    buffer_size=self.buffer_size.value(),
                     block_size=self.block.value(), seed=self.seed.value(), parameters=params,
                     search=search if self.optimize_check.isChecked() else None,
                     optimize=self.optimize_check.isChecked(), n_trials=self.trials.value(), cv_folds=self.folds.value(),
@@ -800,15 +856,17 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         validate_parameters(params)
         make_model(name, params, self.seed.value(), self.device_choice.currentData(), self.gpu_id.value())
         crs = self.table_crs.value()
-        if self.spatial.isChecked():
-            validate_crs(crs, "m")
+        if args["validation_method"] in SPATIAL_METHODS:
+            if not validate_crs(crs, "m"):
+                raise ValueError("Укажите метрическую СК для пространственной валидации.")
         self.fitted_crs = crs
         self.fitted_north_first = self.north_first.isChecked()
         self.result = self.output = None
         self.dashboard.reset("Расчёт запущен. Контрольные точки не участвуют в подборе.")
         self.optimization_context = dict(model=name, parameters=dict(params), seed=args["seed"],
                                          device=args["device"], gpu_id=args["gpu_id"],
-                                         search=search or default_space(name), cv_folds=args["cv_folds"],
+                                         search=search or default_space(name, args["device"]), cv_folds=args["cv_folds"],
+                                         validation_method=args["validation_method"], group_column=args["group_column"], buffer_size=args["buffer_size"],
                                          spatial=args["spatial"], block_size=args["block_size"],
                                          test_size=args["test_size"], n_trials=args["n_trials"],
                                          timeout_seconds=args["timeout"], features=features,
@@ -823,7 +881,9 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.result = result
         self.log.setPlainText(json.dumps({"model": result.model_name, "metrics": result.metrics,
                                          "best_parameters": result.settings["best_parameters"]}, ensure_ascii=False, indent=2))
-        self.log.appendPlainText("Контроль: отдельные точки/блоки. Итоговая модель переобучена на всех размеченных данных.")
+        self.log.appendPlainText("Контроль: OOF-прогнозы внешних фолдов. Итоговая модель переобучена на всех размеченных данных." if result.settings.get("validation_method") else "Контроль: отдельные точки/блоки. Итоговая модель переобучена на всех размеченных данных.")
+        if result.settings.get("fold_metrics"):
+            self.log.appendPlainText(json.dumps(result.settings["fold_metrics"], ensure_ascii=False, indent=2))
         self.dashboard.show_result(result, self.fitted_north_first)
         self.progress_bar.setValue(self.progress_bar.maximum())
 
@@ -859,33 +919,15 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                  "fold_rmse": json.dumps(r["fold_rmse"])} for r in history]
         self.save_csv(pd.DataFrame(rows), "История Optuna")
 
-    def edit_parameters(self):
+    def edit_parameters(self, defaults=False):
         if self.worker:
             raise ValueError("Редактирование доступно после окончания расчёта.")
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Гиперпараметры · {self.model_choice.currentText()}")
-        dialog.resize(700, 520)
-        layout = QVBoxLayout(dialog)
-        hint = QLabel("JSON-объект параметров модели. Optuna заменяет значения, включённые в диапазоны поиска.")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        editor = QPlainTextEdit()
-        editor.setPlainText(json.dumps(json.loads(self.parameters.text()), ensure_ascii=False, indent=2))
-        layout.addWidget(editor)
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        def save():
-            def checked():
-                params = validate_parameters(json.loads(editor.toPlainText()))
-                make_model(self.model_choice.currentText(), params, self.seed.value(),
-                           self.device_choice.currentData(), self.gpu_id.value())
-                self.parameters.setText(json.dumps(params, ensure_ascii=False))
-                dialog.accept()
-            self.guard(checked)
-        buttons.accepted.connect(save)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        dialog = ParameterDialog(self.model_choice.currentText(), self.seed.value(),
+                                 self.device_choice.currentData(), self.gpu_id.value(),
+                                 {} if defaults else json.loads(self.parameters.text()), self)
         apply_window_theme(dialog)
-        dialog.exec_()
+        if dialog.exec_():
+            self.parameters.setText(json.dumps(dialog.parameters, ensure_ascii=False))
 
     def import_parameters(self):
         if self.worker:

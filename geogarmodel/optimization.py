@@ -8,7 +8,7 @@ from sklearn.metrics import mean_squared_error
 from .compute import RESERVED, check_cancel, verify_device
 
 
-def default_space(name):
+def default_space(name, device="cpu"):
     def f(low, high, log=False):
         return {"type": "float", "low": low, "high": high, "log": log}
     def i(low, high):
@@ -29,6 +29,8 @@ def default_space(name):
     }
     neural = {"width": [32, 64, 128], "layers": i(1, 4), "learning_rate": f(1e-4, .01, True), "dropout": f(0, .3)}
     spaces["ResNet"], spaces["Transformer"] = neural.copy(), neural.copy()
+    if device == "gpu":
+        spaces["MLP"] = neural.copy()
     return spaces[name]
 
 
