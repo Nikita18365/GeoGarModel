@@ -14,7 +14,7 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from .compute import device_parameters, RESERVED, check_cancel, verify_device
-from .validation import make_splits, SPATIAL_METHODS
+from .validation import make_splits, SPATIAL_METHODS, GROUP_METHODS
 from .work_progress import report
 
 MODEL_NAMES = ["Ridge", "Linear", "Lasso", "Random Forest", "Extra Trees", "Gradient Boosting",
@@ -129,7 +129,8 @@ def train_horizon(table, model_name="Histogram Boosting", *, target=None, coordi
     coordinates = list(coordinates or table.columns[:2])
     target = target or table.columns[-1]
     features = list(features if features is not None else
-                    [c for c in table.columns if c not in coordinates + [target]])
+                    [c for c in table.columns if c not in coordinates + [target]
+                     and not (validation_method in GROUP_METHODS and c == group_column)])
     if len(coordinates) != 2 or len(set(coordinates)) != 2 or target in coordinates:
         raise ValueError("Выберите два различных столбца координат и отдельную цель.")
     if not features or target in features or set(features) & set(coordinates):
@@ -215,7 +216,7 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
     Final full-data search is distinct from outer evaluation and used for deployment.
     """
     from .optimization import default_space, optimize_model
-    if method == "GroupKFold":
+    if method in GROUP_METHODS:
         if group_column not in table.columns or group_column in coordinates + [target]:
             raise ValueError("Выберите отдельный столбец идентификаторов групп.")
         if group_column in features:
@@ -284,8 +285,8 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
     verify_device(final, name, device)
     check_cancel(cancel_event)
     settings = dict(validation_method=method,
-        group_column=group_column if method=="GroupKFold" else None,
-        buffer_size=buffer_size if method=="BufferedKFold" else None,
+        group_column=group_column if method in GROUP_METHODS else None,
+        buffer_size=buffer_size if method=="BufferedGroupKFold" else None,
         spatial=method in SPATIAL_METHODS or method=="GroupKFold",
         block_size=block_size if method=="BlockKFold" else None,
         seed=seed, parameters=fixed, best_parameters=best, search=space,

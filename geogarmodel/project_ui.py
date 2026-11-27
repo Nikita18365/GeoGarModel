@@ -25,6 +25,18 @@ def controls_state(owner,names):
     return result
 
 
+def migrate_ml_controls(values):
+    """Migrate settings only; preserve historical results and their actual method."""
+    values = dict(values)
+    if 'validation_method' not in values:
+        values['validation_method'] = 'BlockKFold' if values.get('spatial', True) else 'ShuffleKFold'
+    if values['validation_method'] == 'BufferedKFold':
+        values['validation_method'] = 'BufferedGroupKFold'
+        # The old method ignored groups. Never guess a grouping column.
+        values['group_column'] = ''
+    return values
+
+
 def apply_controls(owner,values):
     blockers=[QSignalBlocker(getattr(owner,name)) for name in values]
     for name,value in values.items():
@@ -166,9 +178,7 @@ class ProjectWorkspace:
                 apply_controls(self,state.get('transform_controls',{})); self.update_transform_parameters()
                 self.training=data['tables'].get('training'); self.prediction=data['tables'].get('prediction'); self.output=data['tables'].get('output')
                 if self.training is not None: self.configure_columns()
-                ml_controls = dict(state['ml_controls'])
-                if 'validation_method' not in ml_controls:
-                    ml_controls['validation_method'] = 'BlockKFold' if ml_controls.get('spatial', True) else 'ShuffleKFold'
+                ml_controls = migrate_ml_controls(state['ml_controls'])
                 apply_controls(self,ml_controls); self.update_validation_controls(); self.update_features()
                 for i in range(self.feature_list.count()):
                     item=self.feature_list.item(i); item.setCheckState(Qt.Checked if item.text() in state['features'] else Qt.Unchecked)
@@ -181,6 +191,8 @@ class ProjectWorkspace:
                 for name,limits in state.get('ml_views',{}).items():
                     if name in self.dashboard.plots: self.dashboard.plots[name].setRange(xRange=limits[0],yRange=limits[1],padding=0)
                 self.log.setPlainText(state['training_log']); self.dashboard.tabs.setCurrentIndex(state['training_tab'])
+                if state['ml_controls'].get('validation_method') == 'BufferedKFold':
+                    self.log.appendPlainText('BufferedKFold заменён на BufferedGroupKFold. Перед новым обучением выберите столбец групп. Ранее сохранённые результаты не пересчитаны.')
                 if 'progress' in state: self.progress_bar.setRange(*state['progress'][:2]); self.progress_bar.setValue(state['progress'][2])
                 self.training_workflow.setCurrentIndex(state['training_workflow'])
                 if self.training is not None: self.table_info.setText(f'Из проекта: {len(self.training):,} обучающих строк; исходные данные встроены в файл.')

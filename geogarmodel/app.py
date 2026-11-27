@@ -16,7 +16,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationTool
 from .grids import load_grid, points_to_grid
 from .fields import TRANSFORMS, transform
 from .models import read_table, available_models, train_horizon, make_model, MODEL_NAMES, OPTIONAL
-from .validation import METHODS, SPATIAL_METHODS
+from .validation import METHODS, SPATIAL_METHODS, GROUP_METHODS
 from .ml_settings_ui import ParameterDialog
 from .plotting import draw_map
 from .coordinates import validate_crs
@@ -469,16 +469,16 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         method = self.validation_method.currentText()
         self.spatial.setChecked(method in SPATIAL_METHODS or method == "GroupKFold")
         form = self.validation_method.parentWidget().layout()
-        for widget, visible in ((self.group_column, method == "GroupKFold"),
+        for widget, visible in ((self.group_column, method in GROUP_METHODS),
                                 (self.block, method == "BlockKFold"),
-                                (self.buffer_size, method == "BufferedKFold")):
+                                (self.buffer_size, method == "BufferedGroupKFold")):
             widget.setVisible(visible)
             label = form.labelForField(widget)
             if label is not None:
                 label.setVisible(visible)
         hints = {"GroupKFold": "Целые группы (например, профили) исключаются из обучения.",
                  "BlockKFold": "Целые пространственные блоки попадают в контроль.",
-                 "BufferedKFold": "Последовательные KFold без блоков; из обучения исключаются точки на расстоянии не больше буфера от контроля.",
+                 "BufferedGroupKFold": "Контроль целыми группами; обучающие точки в пределах буфера вокруг контрольных точек исключаются. Без блоков.",
                  "KFold": "Последовательные фолды без перемешивания.",
                  "ShuffleKFold": "KFold со случайным перемешиванием и воспроизводимым seed."}
         self.validation_hint.setText(hints[method] + " При Optuna применяется вложенная CV.")
@@ -794,7 +794,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         if self.training is None:
             return
         excluded = {self.x_column.currentText(), self.y_column.currentText(), self.target.currentText()}
-        if self.validation_method.currentText() == "GroupKFold":
+        if self.validation_method.currentText() in GROUP_METHODS:
             excluded.add(self.group_column.currentText())
         from PyQt5.QtWidgets import QListWidgetItem
         for column in self.training.columns:
@@ -861,6 +861,12 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                     optimize=self.optimize_check.isChecked(), n_trials=self.trials.value(), cv_folds=self.folds.value(),
                     timeout=self.timeout.value() or None, device=self.device_choice.currentData(), gpu_id=self.gpu_id.value())
         table, name = self.training.copy(), self.model_choice.currentText()
+        if args["validation_method"] in GROUP_METHODS:
+            group = args["group_column"]
+            if group not in table.columns or group in args["coordinates"] + [args["target"]]:
+                raise ValueError("Выберите отдельный столбец идентификаторов групп.")
+            if table[group].isna().any():
+                raise ValueError("Столбец групп не должен содержать пропуски.")
         validate_parameters(params)
         make_model(name, params, self.seed.value(), self.device_choice.currentData(), self.gpu_id.value())
         crs = self.table_crs.value()
@@ -874,7 +880,9 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.optimization_context = dict(model=name, parameters=dict(params), seed=args["seed"],
                                          device=args["device"], gpu_id=args["gpu_id"],
                                          search=search or default_space(name, args["device"]), cv_folds=args["cv_folds"],
-                                         validation_method=args["validation_method"], group_column=args["group_column"], buffer_size=args["buffer_size"],
+                                         validation_method=args["validation_method"],
+                                         group_column=args["group_column"] if args["validation_method"] in GROUP_METHODS else None,
+                                         buffer_size=args["buffer_size"] if args["validation_method"] == "BufferedGroupKFold" else None,
                                          spatial=args["spatial"], block_size=args["block_size"] if args["validation_method"] == "BlockKFold" else None,
                                          test_size=args["test_size"], n_trials=args["n_trials"],
                                          timeout_seconds=args["timeout"], features=features,

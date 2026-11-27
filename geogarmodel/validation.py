@@ -4,14 +4,15 @@ import pandas as pd
 from scipy.spatial import cKDTree
 from sklearn.model_selection import GroupKFold, KFold
 
-METHODS = ("GroupKFold", "BlockKFold", "BufferedKFold", "KFold", "ShuffleKFold")
-SPATIAL_METHODS = {"BlockKFold", "BufferedKFold"}
+METHODS = ("GroupKFold", "BlockKFold", "BufferedGroupKFold", "KFold", "ShuffleKFold")
+SPATIAL_METHODS = {"BlockKFold", "BufferedGroupKFold"}
+GROUP_METHODS = {"GroupKFold", "BufferedGroupKFold"}
 
 
 def group_labels(method, xy, labels=None, block_size=10000., origin=None):
-    if method == "GroupKFold":
+    if method in GROUP_METHODS:
         if labels is None or len(labels) != len(xy) or pd.isna(labels).any():
-            raise ValueError("GroupKFold: выберите столбец групп без пропусков.")
+            raise ValueError(f"{method}: выберите столбец групп без пропусков.")
         return pd.factorize(labels, sort=False)[0]
     if method == "BlockKFold":
         if not np.isfinite(block_size) or block_size <= 0:
@@ -25,10 +26,11 @@ def group_labels(method, xy, labels=None, block_size=10000., origin=None):
 
 def make_splits(method, xy, n_splits, *, labels=None, block_size=10000.,
                 buffer_size=1000., seed=42, origin=None, inner=False):
-    """Each sample is tested once; BufferedKFold uses plain KFold then a distance filter.
+    """Each sample is tested once; BufferedGroupKFold uses GroupKFold then a distance filter.
 
-    BufferedKFold does not use square blocks, grouping, or block_size.
-    The order of input rows determines its sequential control folds.
+    Control groups are never split or changed by the buffer. Only training rows
+    within or on the buffer around any control point are excluded. Square
+    blocks and block_size are not used by this method.
     """
     xy = np.asarray(xy, dtype=float)
     if method not in METHODS:
@@ -37,7 +39,7 @@ def make_splits(method, xy, n_splits, *, labels=None, block_size=10000.,
         raise ValueError("Количество фолдов должно быть не менее 2.")
     if xy.ndim != 2 or xy.shape[1] != 2 or not np.isfinite(xy).all():
         raise ValueError("Необходимы конечные двумерные координаты.")
-    if method == "BufferedKFold" and (not np.isfinite(buffer_size) or buffer_size < 0):
+    if method == "BufferedGroupKFold" and (not np.isfinite(buffer_size) or buffer_size < 0):
         raise ValueError("Буфер должен быть неотрицательным.")
     groups = group_labels(method, xy, labels, block_size, origin)
     maximum = len(xy) // 2
@@ -53,7 +55,7 @@ def make_splits(method, xy, n_splits, *, labels=None, block_size=10000.,
         raw = GroupKFold(actual).split(xy, groups=groups)
     splits = []
     for train, valid in raw:
-        if method == "BufferedKFold":
+        if method == "BufferedGroupKFold":
             distance, _ = cKDTree(xy[valid]).query(xy[train], k=1)
             train = train[distance > buffer_size]
         if min(len(train), len(valid)) < 2:
