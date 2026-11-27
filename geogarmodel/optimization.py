@@ -25,12 +25,12 @@ def default_space(name, device="cpu"):
         "XGBoost": {**common, "n_estimators": i(100, 500), "max_depth": i(2, 8), "reg_lambda": f(1e-3, 10, True)},
         "LightGBM": {**common, "n_estimators": i(100, 500), "num_leaves": i(8, 63)},
         "CatBoost": {**common, "iterations": i(100, 500), "depth": i(3, 8), "l2_leaf_reg": f(.1, 10, True)},
-        "MLP": {"alpha": f(1e-6, .1, True), "learning_rate_init": f(1e-4, .01, True)},
+        "MLP (sklearn)": {"alpha": f(1e-6, .1, True), "learning_rate_init": f(1e-4, .01, True)},
+        "MLP": {"learning_rate": f(1e-4, .01, True), "batch_size": [32,64,128,256]},
     }
     neural = {"width": [32, 64, 128], "layers": i(1, 4), "learning_rate": f(1e-4, .01, True), "dropout": f(0, .3)}
     spaces["ResNet"], spaces["Transformer"] = neural.copy(), neural.copy()
-    if device == "gpu":
-        spaces["MLP"] = neural.copy()
+    spaces["MLP (legacy CUDA)"] = neural.copy()
     return spaces[name]
 
 

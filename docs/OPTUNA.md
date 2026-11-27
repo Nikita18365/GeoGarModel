@@ -98,18 +98,18 @@ CPU/GPU, seed, признаки и разбиение автоматически
 
 Готовые пространства учитывают алгоритм: регуляризация у линейных методов,
 глубина/листья/число деревьев у ансамблей, learning rate и регуляризация у бустингов,
-width/layers/dropout/learning rate у PyTorch-сетей. У Transformer width должен
+learning_rate/batch_size у нового MLP и width/layers/dropout/learning rate у прежних PyTorch-сетей. У Transformer width должен
 делиться на heads; готовые width 32/64/128 совместимы с heads=4.
 
 ## Поддержка устройств
 
 | Метод | CPU | GPU |
 |---|---|---|
-| Linear, Ridge, Lasso, Random Forest, Extra Trees, sklearn boosting, MLP | Да | Нет |
+| Linear, Ridge, Lasso, Random Forest, Extra Trees, sklearn boosting, MLP (sklearn) | Да | Нет |
 | XGBoost | Да | NVIDIA CUDA, `device=cuda:N`, `tree_method=hist` |
 | CatBoost | Да | NVIDIA CUDA, `task_type=GPU`, `devices=N` |
 | LightGBM 4.6 | Да | OpenCL GPU-сборка, `device_type=gpu`, ID внутри выбранной по умолчанию платформы |
-| ResNet, Transformer | Да | CUDA-сборка PyTorch и доступное `cuda:N` |
+| MLP, MLP (legacy CUDA), ResNet, Transformer | Да | CUDA-сборка PyTorch и доступное `cuda:N` |
 
 GPU-модель при отсутствии подходящей сборки/драйвера выдаёт ошибку. Для XGBoost
 после fit дополнительно проверяется конфигурация booster: тихий переход на CPU

@@ -34,6 +34,13 @@ def migrate_ml_controls(values):
         values['validation_method'] = 'BufferedGroupKFold'
         # The old method ignored groups. Never guess a grouping column.
         values['group_column'] = ''
+    if values.get("model_choice")=="MLP":
+        import json
+        params=json.loads(values.get("parameters","{}"))
+        if set(params)&{"hidden_layer_sizes","max_iter","alpha","learning_rate_init","solver"}:
+            values["model_choice"]="MLP (sklearn)"
+        elif set(params)&{"width","layers","dropout","weight_decay"}:
+            values["model_choice"]="MLP (legacy CUDA)"
     return values
 
 

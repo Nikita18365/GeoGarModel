@@ -18,6 +18,7 @@ from .fields import TRANSFORMS, transform
 from .models import read_table, available_models, train_horizon, make_model, MODEL_NAMES, OPTIONAL
 from .validation import METHODS, SPATIAL_METHODS, GROUP_METHODS
 from .ml_settings_ui import ParameterDialog
+from .mlp_ui import MLPDialog
 from .plotting import draw_map
 from .coordinates import validate_crs
 from .training_data_ui import FeaturePanel, TableCRSSelector
@@ -458,11 +459,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             text = "GPU: CUDA-совместимая сборка библиотеки и NVIDIA GPU; ID нумеруется с 0."
         if name not in available_models():
             text = f"Не установлен пакет {OPTIONAL[name]}. Установите дополнительные зависимости и перезапустите программу. " + text
-        elif name == "MLP" and gpu:
-            from importlib.util import find_spec
-            text = "GPU MLP: PyTorch CUDA. Параметры отличаются от sklearn MLP; используйте default параметры."
-            if find_spec("torch") is None:
-                text += " Не установлен пакет torch."
+        elif name == "MLP":
+            text = "MLP: единый PyTorch-конструктор слоёв для CPU и CUDA. Настройте архитектуру в редакторе параметров."
         self.device_hint.setText(text)
 
     def update_validation_controls(self, *args):
@@ -938,9 +936,10 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
     def edit_parameters(self, defaults=False):
         if self.worker:
             raise ValueError("Редактирование доступно после окончания расчёта.")
-        dialog = ParameterDialog(self.model_choice.currentText(), self.seed.value(),
-                                 self.device_choice.currentData(), self.gpu_id.value(),
-                                 {} if defaults else json.loads(self.parameters.text()), self)
+        name = self.model_choice.currentText()
+        overrides = {} if defaults else json.loads(self.parameters.text())
+        dialog = MLPDialog(self.seed.value(), overrides, self) if name == "MLP" else ParameterDialog(
+            name, self.seed.value(), self.device_choice.currentData(), self.gpu_id.value(), overrides, self)
         apply_window_theme(dialog)
         if dialog.exec_():
             self.parameters.setText(json.dumps(dialog.parameters, ensure_ascii=False))

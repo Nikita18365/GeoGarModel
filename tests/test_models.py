@@ -44,7 +44,7 @@ def test_inner_search_and_scaling_no_holdout_leakage(table):
 
 @pytest.mark.parametrize("name,params", [("Random Forest", {"n_estimators": 5}),
     ("Extra Trees", {"n_estimators": 5}), ("Gradient Boosting", {"n_estimators": 5}),
-    ("Histogram Boosting", {"max_iter": 5}), ("Lasso", {}), ("MLP", {"max_iter": 5})])
+    ("Histogram Boosting", {"max_iter": 5}), ("Lasso", {}), ("MLP (sklearn)", {"max_iter": 5})])
 def test_base_estimators(table, name, params):
     result = train_horizon(table, name, parameters=params, spatial=False)
     assert np.isfinite(result.predict(table)["horizon_pred"]).all()

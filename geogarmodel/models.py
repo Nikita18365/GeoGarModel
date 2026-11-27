@@ -8,7 +8,8 @@ from sklearn.compose import TransformedTargetRegressor
 from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, HistGradientBoostingRegressor, GradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, median_absolute_error, explained_variance_score
+from .mlp_config import defaults as mlp_defaults, validate_config as validate_mlp_config
 from sklearn.model_selection import GroupShuffleSplit, GroupKFold, KFold, train_test_split
 from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
@@ -18,8 +19,8 @@ from .validation import make_splits, SPATIAL_METHODS, GROUP_METHODS
 from .work_progress import report
 
 MODEL_NAMES = ["Ridge", "Linear", "Lasso", "Random Forest", "Extra Trees", "Gradient Boosting",
-               "Histogram Boosting", "MLP", "XGBoost", "LightGBM", "CatBoost", "ResNet", "Transformer"]
-OPTIONAL = {"XGBoost": "xgboost", "LightGBM": "lightgbm", "CatBoost": "catboost",
+               "Histogram Boosting", "MLP", "MLP (sklearn)", "MLP (legacy CUDA)", "XGBoost", "LightGBM", "CatBoost", "ResNet", "Transformer"]
+OPTIONAL = {"MLP": "torch", "MLP (legacy CUDA)": "torch", "XGBoost": "xgboost", "LightGBM": "lightgbm", "CatBoost": "catboost",
             "ResNet": "torch", "Transformer": "torch"}
 
 
@@ -41,11 +42,13 @@ def make_model(name, parameters=None, seed=42, device="cpu", gpu_id=0):
         "Extra Trees": lambda: ExtraTreesRegressor(n_estimators=300, min_samples_leaf=2, n_jobs=-1, random_state=seed),
         "Gradient Boosting": lambda: GradientBoostingRegressor(random_state=seed),
         "Histogram Boosting": lambda: HistGradientBoostingRegressor(random_state=seed, early_stopping=False),
-        "MLP": lambda: MLPRegressor(hidden_layer_sizes=(128, 64, 32), max_iter=500, random_state=seed),
+        "MLP (sklearn)": lambda: MLPRegressor(hidden_layer_sizes=(128, 64, 32), max_iter=500, random_state=seed),
     }
-    if name == "MLP" and device == "gpu":
-        if find_spec("torch") is None:
-            raise ValueError("GPU MLP требует CUDA-сборку PyTorch (пакет torch).")
+    if name == "MLP":
+        from .mlp import ConfigurableMLP
+        params = validate_mlp_config(params, seed)
+        estimator = ConfigurableMLP()
+    elif name == "MLP (legacy CUDA)":
         from .neural import TorchRegressor
         estimator = TorchRegressor(architecture="mlp", width=128, layers=3, epochs=100, random_state=seed)
     elif name in factories:
@@ -65,7 +68,7 @@ def make_model(name, parameters=None, seed=42, device="cpu", gpu_id=0):
         estimator = TorchRegressor(architecture=name.lower(), random_state=seed)
     else:
         raise ValueError(f"Неизвестная модель: {name}")
-    if name in {"MLP", "ResNet", "Transformer"} and "architecture" in params:
+    if name in {"MLP", "MLP (legacy CUDA)", "ResNet", "Transformer"} and "architecture" in params:
         raise ValueError("Архитектура определяется выбранной моделью.")
     estimator.set_params(**params)
     estimator.set_params(**compute)
@@ -116,6 +119,20 @@ class TrainingResult:
         output = coords.copy()
         output[self.target + "_pred"] = self.model.predict(values)
         return output
+
+
+def evaluation_scores(observed, predicted, name, parameters):
+    """Always retain standard diagnostics; optional MLP metrics are in depth units."""
+    mse = float(mean_squared_error(observed, predicted))
+    scores = dict(MAE=float(mean_absolute_error(observed,predicted)), RMSE=float(np.sqrt(mse)),
+                  MSE=mse, R2=float(r2_score(observed,predicted)))
+    if name == "MLP":
+        selected = validate_mlp_config(parameters or {})["evaluation_metrics"]
+        if "MedianAE" in selected:
+            scores["MedianAE"] = float(median_absolute_error(observed,predicted))
+        if "ExplainedVariance" in selected:
+            scores["ExplainedVariance"] = float(explained_variance_score(observed,predicted))
+    return scores
 
 
 def train_horizon(table, model_name="Histogram Boosting", *, target=None, coordinates=None,
@@ -186,10 +203,8 @@ def train_horizon(table, model_name="Histogram Boosting", *, target=None, coordi
     model.fit(x.iloc[train], y.iloc[train])
     verify_device(model, model_name, device)
     predicted = model.predict(x.iloc[test])
-    mse = mean_squared_error(y.iloc[test], predicted)
-    metrics = {"MAE": float(mean_absolute_error(y.iloc[test], predicted)), "RMSE": float(np.sqrt(mse)),
-               "MSE": float(mse), "R2": float(r2_score(y.iloc[test], predicted)),
-               "train_rows": len(train), "test_rows": len(test)}
+    metrics = evaluation_scores(y.iloc[test], predicted, model_name, {**(parameters or {}), **best})
+    metrics.update(train_rows=len(train), test_rows=len(test))
     validation = table.iloc[test][coordinates].copy()
     validation["observed"] = y.iloc[test].to_numpy()
     validation["predicted"] = predicted
@@ -218,7 +233,7 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
     from .optimization import default_space, optimize_model
     if method in GROUP_METHODS:
         if group_column not in table.columns or group_column in coordinates + [target]:
-            raise ValueError("Выберите отдельный столбец идентификаторов групп.")
+            raise ValueError("Выберите отдельный столбец групп (идентификаторы профилей).")
         if group_column in features:
             raise ValueError("Исключите столбец групп из предикторов.")
         labels = table[group_column].to_numpy()
@@ -257,17 +272,14 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
         pred = estimator.predict(x.iloc[valid])
         oof[valid] = pred
         fold_ids[valid] = i + 1
+        fold_scores = evaluation_scores(y.iloc[valid], pred, name, {**fixed, **best})
         scores.append(dict(fold=i+1, train_rows=len(train), test_rows=len(valid),
                            excluded_rows=len(x)-len(train)-len(valid),
-                           rmse=float(np.sqrt(mean_squared_error(y.iloc[valid], pred))),
-                           mae=float(mean_absolute_error(y.iloc[valid], pred)),
-                           r2=float(r2_score(y.iloc[valid], pred)), parameters=best,
+                           **{key.lower(): value for key,value in fold_scores.items()}, parameters=best,
                            inner_folds=len(inner_splits[i]) if do_search else 0))
     check_cancel(cancel_event)
-    mse = mean_squared_error(y, oof)
-    metrics = dict(MAE=float(mean_absolute_error(y, oof)), RMSE=float(np.sqrt(mse)),
-                   MSE=float(mse), R2=float(r2_score(y, oof)),
-                   train_rows=len(x), test_rows=len(x))
+    metrics = evaluation_scores(y, oof, name, fixed)
+    metrics.update(train_rows=len(x), test_rows=len(x))
     validation = table[coordinates].copy()
     validation["observed"] = y.to_numpy()
     validation["predicted"] = oof
@@ -299,6 +311,8 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
 
 
 def model_defaults(name, seed=42, device="cpu", gpu_id=0):
+    if name == "MLP":
+        return mlp_defaults(seed)
     estimator = make_model(name, seed=seed, device=device, gpu_id=gpu_id).regressor.steps[-1][1]
     result = {}
     for key, value in estimator.get_params(deep=False).items():

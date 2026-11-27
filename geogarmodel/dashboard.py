@@ -93,6 +93,18 @@ class TrainingDashboard(QWidget):
         self.loss_plot = plot_widget("Обучение итоговой сети", "Эпоха", "MSE · нормированная цель")
         for title,widget in zip(('Прогноз','Невязки','Смещение','Обучение'),(self.crossplot,self.histogram,self.residual_plot,self.loss_plot)):
             diagnostic_pages.addTab(widget,title)
+        training_page=QWidget()
+        training_layout=QVBoxLayout(training_page)
+        self.training_metric_choice=QComboBox()
+        self.training_curves={}
+        self.training_metric_choice.currentTextChanged.connect(self.draw_training_metric)
+        training_layout.addWidget(self.training_metric_choice)
+        self.training_metric_plot=plot_widget("Метрики итоговой сети · train", "Эпоха", "Нормированная цель")
+        training_layout.addWidget(self.training_metric_plot,1)
+        self.evaluation_summary=QLabel()
+        self.evaluation_summary.setWordWrap(True)
+        training_layout.addWidget(self.evaluation_summary)
+        diagnostic_pages.addTab(training_page,"Метрики")
         self.tabs.addTab(diagnostics, "Диагностика")
         maps = QWidget()
         map_layout = QVBoxLayout(maps)
@@ -117,6 +129,7 @@ class TrainingDashboard(QWidget):
         self.plots = {"История Optuna": self.history_plot, "Длительность trials": self.duration_plot,
                       "Прогноз / наблюдения": self.crossplot, "Гистограмма невязок": self.histogram,
                       "Смещение": self.residual_plot, "Обучение сети": self.loss_plot,
+                      "Метрики обучения сети": self.training_metric_plot,
                       "Параметр / ошибка": self.parameter_plot}
         self.plots.update({f"Карта {i + 1}": p for i, p in enumerate(self.map_plots)})
 
@@ -125,6 +138,10 @@ class TrainingDashboard(QWidget):
         self.trials_table.setRowCount(0)
         self.parameter_table.setRowCount(0)
         self.parameter_choice.clear()
+        self.training_curves={}
+        self.training_metric_choice.clear()
+        self.training_metric_plot.clear()
+        self.evaluation_summary.clear()
         self.clear_map_items()
         for plot in (self.crossplot, self.histogram, self.residual_plot, self.loss_plot, self.parameter_plot, *self.map_plots):
             plot.clear()
@@ -183,8 +200,19 @@ class TrainingDashboard(QWidget):
         self.loss_plot.clear()
         estimator = result.model.regressor_.steps[-1][1]
         losses = getattr(estimator, "loss_curve_", [])
+        self.loss_plot.setLabel("left",getattr(estimator,"loss_label_","Loss · нормированная цель"))
         if len(losses):
             self.loss_plot.plot(np.arange(1, len(losses) + 1), losses, pen=pg.mkPen(GREEN, width=1))
+        self.training_curves=dict(getattr(estimator,"metric_curves_",{}))
+        data_loss=getattr(estimator,"data_loss_curve_",[])
+        if len(data_loss):
+            self.training_curves["Data loss"]=data_loss
+        self.training_metric_choice.clear()
+        self.training_metric_choice.addItems(list(self.training_curves))
+        self.draw_training_metric()
+        self.evaluation_summary.setText("Контроль: "+ "  ·  ".join(
+            f"{key}: {value:.6g}" for key,value in result.metrics.items()
+            if key not in ("train_rows","test_rows")))
         self.clear_map_items()
         limits = (float(min(observed.min(), predicted.min())), float(max(observed.max(), predicted.max())))
         error_limit = max(float(np.max(np.abs(residual))), 1e-9)
@@ -213,6 +241,14 @@ class TrainingDashboard(QWidget):
                             f"устройство: {result.settings.get('device', 'cpu').upper()}. Метрики и экспорт — по всем точкам.")
         self.draw_parameter()
         self.tabs.setCurrentIndex(1)
+
+    def draw_training_metric(self,*args):
+        name=self.training_metric_choice.currentText()
+        values=self.training_curves.get(name,[])
+        self.training_metric_plot.clear()
+        self.training_metric_plot.setLabel("left",name+" · train (нормированная цель)")
+        if len(values):
+            self.training_metric_plot.plot(np.arange(1,len(values)+1),values,pen=pg.mkPen(GREEN,width=2))
 
     def clear_map_items(self):
         for plot, _, bar in self.map_items:

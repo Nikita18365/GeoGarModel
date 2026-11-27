@@ -104,12 +104,15 @@ def test_validation_rejects_impossible_splits(survey):
 
 def test_defaults_and_mlp_device():
     assert model_defaults("Ridge")["alpha"]==1.
-    assert model_defaults("MLP")["hidden_layer_sizes"]==[128,64,32]
+    assert [s["units"] for s in model_defaults("MLP")["layer_specs"] if s["type"]=="Dense"]==[128,64,32]
+    assert model_defaults("MLP")==model_defaults("MLP",device="gpu")
     assert device_parameters("MLP","gpu",1)["device"]=="cuda:1"
-    assert "width" in default_space("MLP","gpu")
-    assert "alpha" in default_space("MLP","cpu")
+    assert "learning_rate" in default_space("MLP","gpu")
+    assert default_space("MLP","cpu")==default_space("MLP","gpu")
     assert "device" not in model_defaults("MLP")
-    make_model("MLP",model_defaults("MLP"))
+    make_model("MLP (sklearn)",model_defaults("MLP (sklearn)"))
+    if "MLP" in __import__("geogarmodel.models",fromlist=["available_models"]).available_models():
+        make_model("MLP",model_defaults("MLP"))
 
 def test_torch_mlp_architecture_cpu():
     pytest.importorskip("torch")

@@ -43,8 +43,12 @@ def dump_pipeline(model):
         metadata['engine']=engine
     elif module.startswith('lightgbm.'):
         metadata['engine']='lightgbm'; blobs['native']=estimator.booster_.model_to_string().encode('utf-8')
-    elif module=='geogarmodel.neural':
-        metadata.update(engine='torch',parameters=estimator.get_params(),features=int(estimator.n_features_in_))
+    elif module in ('geogarmodel.neural','geogarmodel.mlp'):
+        metadata.update(engine='configurable_mlp' if module=='geogarmodel.mlp' else 'torch',
+                        parameters=estimator.get_params(),features=int(estimator.n_features_in_),
+                        metric_curves=getattr(estimator,'metric_curves_',{}),
+                        data_loss_curve=getattr(estimator,'data_loss_curve_',[]),
+                        loss_label=getattr(estimator,'loss_label_','MSE · нормированная цель'))
         stream=BytesIO(); np.savez_compressed(stream,**{key:value.detach().cpu().numpy() for key,value in estimator.network_.state_dict().items()}); blobs['native']=stream.getvalue()
     else: raise ValueError('Этот тип обученной модели не поддерживает сохранение в проект.')
     return metadata,blobs
@@ -61,7 +65,8 @@ class StoredPipeline:
     """Delay optional imports until prediction; preserve original bytes on resave."""
     def __init__(self,metadata,blobs):
         self.metadata=metadata; self.blobs=blobs; self._pipeline=None
-        self.regressor_=SimpleNamespace(steps=[('estimator',SimpleNamespace(loss_curve_=metadata.get('loss_curve',[])))])
+        self.regressor_=SimpleNamespace(steps=[('estimator',SimpleNamespace(loss_curve_=metadata.get('loss_curve',[]),metric_curves_=metadata.get('metric_curves',{}),
+            data_loss_curve_=metadata.get('data_loss_curve',[]),loss_label_=metadata.get('loss_label','MSE · нормированная цель')))])
 
     def predict(self,X):
         if self._pipeline is None:
@@ -84,15 +89,20 @@ class StoredPipeline:
                 else:
                     from catboost import CatBoostRegressor
                     estimator=CatBoostRegressor(); estimator.load_model(str(path))
-        elif engine=='torch':
+        elif engine in ('torch','configurable_mlp'):
             import torch
             from .neural import TorchRegressor
-            estimator=TorchRegressor(**{**self.metadata['parameters'],'device':'cpu'})
+            from .mlp import ConfigurableMLP
+            cls=ConfigurableMLP if engine=='configurable_mlp' else TorchRegressor
+            estimator=cls(**{**self.metadata['parameters'],'device':'cpu'})
             estimator.n_features_in_=self.metadata['features']; estimator.device_=torch.device('cpu')
             estimator.network_=estimator.build_network(estimator.n_features_in_)
             with np.load(BytesIO(self.blobs['native']),allow_pickle=False) as data:
                 estimator.network_.load_state_dict({key:torch.from_numpy(data[key].copy()) for key in data.files})
             estimator.network_.eval(); estimator.loss_curve_=self.metadata.get('loss_curve',[])
+            estimator.metric_curves_=self.metadata.get('metric_curves',{})
+            estimator.data_loss_curve_=self.metadata.get('data_loss_curve',[])
+            estimator.loss_label_=self.metadata.get('loss_label','MSE · нормированная цель')
         else: raise ValueError('Неизвестный формат обученной модели.')
         pipeline.regressor_.steps[-1]=(pipeline.regressor_.steps[-1][0],estimator)
         return pipeline
