@@ -283,13 +283,16 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
     final = factory({**fixed, **best}).fit(x, y)
     verify_device(final, name, device)
     check_cancel(cancel_event)
-    settings = dict(validation_method=method, group_column=group_column, buffer_size=buffer_size,
-        spatial=method in SPATIAL_METHODS or method=="GroupKFold", block_size=block_size,
+    settings = dict(validation_method=method,
+        group_column=group_column if method=="GroupKFold" else None,
+        buffer_size=buffer_size if method=="BufferedKFold" else None,
+        spatial=method in SPATIAL_METHODS or method=="GroupKFold",
+        block_size=block_size if method=="BlockKFold" else None,
         seed=seed, parameters=fixed, best_parameters=best, search=space,
         cv_folds=folds, fold_metrics=scores, optimizer="Optuna TPE" if do_search else None,
         best_cv_rmse=best_cv, device=device, gpu_id=gpu_id, n_trials=trials,
         timeout_seconds=timeout, evaluation="nested_oof" if do_search else "oof",
-        block_origin=origin.tolist(), final_train_rows=len(x),
+        block_origin=origin.tolist() if method=="BlockKFold" else None, final_train_rows=len(x),
         fold_splits=[dict(train=train.tolist(), test=valid.tolist()) for train, valid in splits])
     return TrainingResult(final, features, target, coordinates, name, metrics, validation, settings, history)
 

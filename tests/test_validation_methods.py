@@ -24,7 +24,7 @@ def test_folds_and_oof(survey, method):
         assert not set(train)&set(test)
         if method=="GroupKFold":
             assert not set(labels[train])&set(labels[test])
-        if method in ("BlockKFold","BufferedKFold"):
+        if method=="BlockKFold":
             blocks=np.floor(xy/3000).astype(int)
             assert not set(map(tuple,blocks[train]))&set(map(tuple,blocks[test]))
         if method=="BufferedKFold":
@@ -35,6 +35,27 @@ def test_folds_and_oof(survey, method):
     assert result.metrics["RMSE"]<1e-8
     assert set(result.validation.fold)=={1,2,3}
     assert len(result.settings["fold_metrics"])==3
+
+def test_buffered_kfold_independent_of_block_size(survey):
+    from sklearn.model_selection import KFold
+    xy=survey[["X","Y"]].to_numpy()
+    first=make_splits("BufferedKFold",xy,3,block_size=0,buffer_size=1500.)
+    second=make_splits("BufferedKFold",xy,3,block_size=1e9,buffer_size=1500.)
+    plain=list(KFold(3).split(xy))
+    for (train,test),(other_train,other_test),(raw_train,raw_test) in zip(first,second,plain):
+        np.testing.assert_array_equal(test,raw_test)
+        np.testing.assert_array_equal(train,other_train)
+        np.testing.assert_array_equal(test,other_test)
+        expected=raw_train[cdist(xy[raw_train],xy[raw_test]).min(axis=1)>1500.]
+        np.testing.assert_array_equal(train,expected)
+        assert len(train)<len(raw_train)
+    result=train_horizon(survey,"Linear",features=["feature"],validation_method="BufferedKFold",
+        block_size=0,buffer_size=1500.,cv_folds=3)
+    assert result.settings["block_size"] is None
+    assert result.settings["block_origin"] is None
+    assert result.settings["buffer_size"]==1500.
+    assert result.metrics["RMSE"]<1e-8
+
 
 def test_nested_validation_outer_labels_do_not_leak(survey):
     args=dict(model_name="Ridge",features=["feature"],validation_method="BlockKFold",
@@ -87,10 +108,23 @@ def test_validation_ui_and_parameter_editor(qt_application_lifetime):
         assert "line" not in [window.feature_list.item(i).text() for i in range(window.feature_list.count())]
         window.validation_method.setCurrentText("BufferedKFold")
         assert not window.buffer_size.isHidden()
+        assert window.block.isHidden()
+        assert window.parameters.isHidden()
+        window.validation_method.setCurrentText("BlockKFold")
+        assert not window.block.isHidden()
+        assert window.buffer_size.isHidden()
         window.model_choice.setCurrentText("MLP")
         assert window.device_choice.model().item(1).isEnabled()
         dialog=ParameterDialog("Ridge",42,"cpu",0,{},window)
         assert dialog.checked()["alpha"]==1.
+        dialog.show()
+        qt_application_lifetime.processEvents()
+        dialog.help.resizeRowsToContents()
+        assert dialog.help.verticalHeader().isHidden()
+        assert all(dialog.help.rowHeight(i)>=dialog.help.fontMetrics().height()+14
+                   for i in range(dialog.help.rowCount()))
+        assert all(dialog.help.item(i,2).toolTip()==dialog.help.item(i,2).text()
+                   for i in range(dialog.help.rowCount()))
         dialog.editor.setPlainText('{"alpha":0.25}')
         dialog.apply()
         assert dialog.parameters=={"alpha":0.25}

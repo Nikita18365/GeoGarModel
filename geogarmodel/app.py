@@ -328,14 +328,21 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         for label, widget in [("Метод", self.model_choice), ("Вычисления", self.device_choice), ("GPU ID", self.gpu_id),
                               ("", self.device_hint), ("Валидация", self.validation_method), ("Количество фолдов", self.folds),
                               ("Столбец групп", self.group_column), ("Размер блока, м", self.block), ("Буфер, м", self.buffer_size),
-                              ("", self.validation_hint), ("Seed", self.seed), ("Параметры · JSON", self.parameters)]:
+                              ("", self.validation_hint), ("Seed", self.seed)]:
             model_form.addRow(label, widget)
         panel.addWidget(model_group)
-        parameter_actions = QHBoxLayout()
+        # Keep the JSON state for old project files and the existing training API.
+        # Only the dedicated editor/import actions are exposed to users.
+        self.parameters.setParent(model_group)
+        self.parameters.hide()
+        parameter_panel = QWidget(model_group)
+        parameter_actions = QVBoxLayout(parameter_panel)
+        parameter_actions.setContentsMargins(0, 0, 0, 0)
+        parameter_actions.setSpacing(8)
         self.button("Использовать default параметры…", lambda: self.edit_parameters(True), parameter_actions)
         self.button("Редактор параметров…", self.edit_parameters, parameter_actions)
         self.button("Загрузить параметры JSON…", self.import_parameters, parameter_actions)
-        model_form.addRow(parameter_actions)
+        model_form.addRow(parameter_panel)
         optimization = QGroupBox("03 · Optuna TPE")
         opt_form = QFormLayout(optimization)
         self.optimize_check = QCheckBox("Включить оптимизацию")
@@ -386,8 +393,6 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         panel.addWidget(export)
         self.training_workflow=workflow_sections(panel,[('1 · Данные',[data_group]),('2 · Модель',[model_group]),
             ('3 · Подбор',[optimization]),('4 · Файл',[export])])
-        parameter_actions.setDirection(QBoxLayout.TopToBottom)
-        form_details(model_form,[self.parameters],'Дополнительные параметры')
         form_details(opt_form,[self.timeout,self.search],'Диапазоны и лимит времени')
         panel.addStretch()
         for combo in controls.findChildren(QComboBox):
@@ -424,6 +429,9 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         details(right_layout,self.log,'Журнал расчёта')
         prepare_forms(controls)
         for button in controls.findChildren(QPushButton): quiet_button(button)
+        for button in parameter_panel.findChildren(QPushButton):
+            button.setMinimumHeight(max(40, button.sizeHint().height()+4))
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout.addWidget(ParameterSplitter(left,right))
         self.validation_method.currentTextChanged.connect(self.update_validation_controls)
         self.group_column.currentTextChanged.connect(self.update_features)
@@ -462,7 +470,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.spatial.setChecked(method in SPATIAL_METHODS or method == "GroupKFold")
         form = self.validation_method.parentWidget().layout()
         for widget, visible in ((self.group_column, method == "GroupKFold"),
-                                (self.block, method in SPATIAL_METHODS),
+                                (self.block, method == "BlockKFold"),
                                 (self.buffer_size, method == "BufferedKFold")):
             widget.setVisible(visible)
             label = form.labelForField(widget)
@@ -470,7 +478,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                 label.setVisible(visible)
         hints = {"GroupKFold": "Целые группы (например, профили) исключаются из обучения.",
                  "BlockKFold": "Целые пространственные блоки попадают в контроль.",
-                 "BufferedKFold": "Дополнительно исключаются обучающие точки в пределах буфера от контроля.",
+                 "BufferedKFold": "Последовательные KFold без блоков; из обучения исключаются точки на расстоянии не больше буфера от контроля.",
                  "KFold": "Последовательные фолды без перемешивания.",
                  "ShuffleKFold": "KFold со случайным перемешиванием и воспроизводимым seed."}
         self.validation_hint.setText(hints[method] + " При Optuna применяется вложенная CV.")
@@ -867,7 +875,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                                          device=args["device"], gpu_id=args["gpu_id"],
                                          search=search or default_space(name, args["device"]), cv_folds=args["cv_folds"],
                                          validation_method=args["validation_method"], group_column=args["group_column"], buffer_size=args["buffer_size"],
-                                         spatial=args["spatial"], block_size=args["block_size"],
+                                         spatial=args["spatial"], block_size=args["block_size"] if args["validation_method"] == "BlockKFold" else None,
                                          test_size=args["test_size"], n_trials=args["n_trials"],
                                          timeout_seconds=args["timeout"], features=features,
                                          target=args["target"], coordinates=args["coordinates"])

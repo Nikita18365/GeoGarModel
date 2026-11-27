@@ -13,7 +13,7 @@ def group_labels(method, xy, labels=None, block_size=10000., origin=None):
         if labels is None or len(labels) != len(xy) or pd.isna(labels).any():
             raise ValueError("GroupKFold: выберите столбец групп без пропусков.")
         return pd.factorize(labels, sort=False)[0]
-    if method in SPATIAL_METHODS:
+    if method == "BlockKFold":
         if not np.isfinite(block_size) or block_size <= 0:
             raise ValueError("Размер блока должен быть > 0.")
         blocks = np.floor((xy - (xy.min(axis=0) if origin is None else origin)) / block_size)
@@ -25,7 +25,11 @@ def group_labels(method, xy, labels=None, block_size=10000., origin=None):
 
 def make_splits(method, xy, n_splits, *, labels=None, block_size=10000.,
                 buffer_size=1000., seed=42, origin=None, inner=False):
-    """Each sample is tested once; buffer rows are excluded from training only."""
+    """Each sample is tested once; BufferedKFold uses plain KFold then a distance filter.
+
+    BufferedKFold does not use square blocks, grouping, or block_size.
+    The order of input rows determines its sequential control folds.
+    """
     xy = np.asarray(xy, dtype=float)
     if method not in METHODS:
         raise ValueError("Неизвестный метод валидации.")
@@ -54,7 +58,7 @@ def make_splits(method, xy, n_splits, *, labels=None, block_size=10000.,
             train = train[distance > buffer_size]
         if min(len(train), len(valid)) < 2:
             raise ValueError(f"{method}: фолд {len(splits)+1} содержит менее двух точек "
-                             "обучения/контроля. Измените число фолдов, группы, блок или буфер.")
+                             "обучения/контроля. Измените число фолдов или параметры выбранной схемы.")
         splits.append((train, valid))
     if not np.array_equal(np.sort(np.concatenate([v for _, v in splits])), np.arange(len(xy))):
         raise RuntimeError("Нарушено покрытие контрольных фолдов.")

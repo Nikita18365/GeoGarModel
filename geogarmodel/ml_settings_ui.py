@@ -3,8 +3,9 @@ import json
 from pathlib import Path
 from PyQt5.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QLabel,QPlainTextEdit,
     QTableWidget,QTableWidgetItem,QHeaderView,QAbstractItemView,QDialogButtonBox,
-    QPushButton,QFileDialog,QMessageBox,QSplitter)
-from PyQt5.QtCore import Qt
+    QPushButton,QFileDialog,QMessageBox,QSplitter,QStyledItemDelegate,QStyleOptionViewItem)
+from PyQt5.QtCore import Qt,QSize,QRect,QTimer
+from PyQt5.QtGui import QFontMetrics
 from .models import model_defaults, make_model
 from .parameter_files import validate_parameters
 
@@ -72,6 +73,20 @@ HELP = {
 }
 
 
+class ParameterHelpDelegate(QStyledItemDelegate):
+    """Reserve room for every wrapped line, even with application-wide QSS."""
+    def sizeHint(self, option, index):
+        hint = super().sizeHint(option, index)
+        styled = QStyleOptionViewItem(option)
+        self.initStyleOption(styled, index)
+        metrics = QFontMetrics(styled.font)
+        table = self.parent()
+        width = max(20, table.columnWidth(index.column()) - 18)
+        rect = metrics.boundingRect(QRect(0, 0, width, 100000),
+                                    Qt.TextWordWrap | Qt.AlignLeft, styled.text)
+        return QSize(hint.width(), max(hint.height(), metrics.height()+14, rect.height()+14))
+
+
 class ParameterDialog(QDialog):
     def __init__(self, name, seed, device, gpu_id, overrides, parent=None):
         super().__init__(parent)
@@ -79,7 +94,8 @@ class ParameterDialog(QDialog):
         self.defaults = model_defaults(name, seed, device, gpu_id)
         self.parameters = None
         self.setWindowTitle(f"Гиперпараметры · {name} · {device.upper()}")
-        self.resize(1040, 720)
+        self.resize(1220, 760)
+        self.setMinimumSize(720, 480)
         layout = QVBoxLayout(self)
         hint = QLabel("Default — настройки конструктора GeoGarModel и значения, возвращённые библиотекой. "
                       "Редактируйте JSON слева; null означает автоматическое значение, если поддерживается моделью. "
@@ -95,17 +111,38 @@ class ParameterDialog(QDialog):
         self.help.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.help.setAlternatingRowColors(True)
         self.help.setWordWrap(True)
-        self.help.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.help.setColumnWidth(0, 145)
-        self.help.setColumnWidth(1, 100)
+        self.help.setTextElideMode(Qt.ElideRight)
+        self.help.verticalHeader().hide()
+        self.help.setItemDelegate(ParameterHelpDelegate(self.help))
+        self.help.ensurePolished()
+        row_height = max(36, self.help.fontMetrics().height() + 16)
+        vertical = self.help.verticalHeader()
+        vertical.setMinimumSectionSize(row_height)
+        vertical.setDefaultSectionSize(row_height)
+        vertical.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header = self.help.horizontalHeader()
+        header.setMinimumHeight(max(34, header.fontMetrics().height() + 16))
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setMinimumSectionSize(85)
+        self.help.setColumnWidth(0, 205)
+        self.help.setColumnWidth(1, 145)
         self.help.setRowCount(len(self.defaults))
         for row, (key, value) in enumerate(sorted(self.defaults.items())):
             for col, item in enumerate((key, json.dumps(value, ensure_ascii=False),
                     HELP.get(key, "Дополнительный параметр библиотеки; см. документацию класса модели."))):
-                self.help.setItem(row, col, QTableWidgetItem(item))
-        self.help.resizeRowsToContents()
+                cell = QTableWidgetItem(item)
+                cell.setToolTip(item)
+                cell.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                self.help.setItem(row, col, cell)
         splitter.addWidget(self.help)
-        splitter.setSizes([410, 610])
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([420, 760])
+        self._row_timer = QTimer(self)
+        self._row_timer.setSingleShot(True)
+        self._row_timer.timeout.connect(self.help.resizeRowsToContents)
+        header.sectionResized.connect(lambda *_: self._row_timer.start(50))
         layout.addWidget(splitter, 1)
         row = QHBoxLayout()
         reset = QPushButton("Восстановить default")
@@ -120,6 +157,10 @@ class ParameterDialog(QDialog):
         buttons.accepted.connect(self.apply)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._row_timer.start(0)
 
     def checked(self):
         params = validate_parameters(json.loads(self.editor.toPlainText()))
