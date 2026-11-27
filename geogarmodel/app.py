@@ -17,7 +17,9 @@ from .grids import load_grid, points_to_grid
 from .fields import TRANSFORMS, transform
 from .models import read_table, available_models, train_horizon, make_model
 from .plotting import draw_map
-from .coordinates import gsk2011_zones, validate_crs
+from .coordinates import validate_crs
+from .training_data_ui import FeaturePanel, TableCRSSelector
+from .training_statistics import StatisticsDialog
 from .dashboard import TrainingDashboard
 from .theme_ui import ThemeController
 from .compute import GPU_MODELS, ComputationCancelled
@@ -129,8 +131,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.progress_bar.setValue(0)
         self.configure_columns()
         self.block.setValue(3000)
-        self.table_crs.setCurrentText("EPSG:20910 | GSK-2011 / Gauss-Kruger zone 10")
-        self.table_crs.lineEdit().setCursorPosition(0)
+        self.table_crs.setValue("EPSG:20910")
         self.north_first.setChecked(True)
         self.table_info.setText("DEMO: 320 обучающих точек, 1280 прогнозных; глубина в метрах")
         self.add_grid(grid)
@@ -265,8 +266,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         form = QFormLayout()
         data_layout.addLayout(form)
         self.x_column, self.y_column, self.target = QComboBox(), QComboBox(), QComboBox()
-        self.feature_list = QListWidget()
-        self.feature_list.setFixedHeight(100)
+        self.feature_panel = FeaturePanel()
+        self.feature_list = self.feature_panel.items
         self.target.currentTextChanged.connect(self.update_features)
         self.x_column.currentTextChanged.connect(self.update_features)
         self.y_column.currentTextChanged.connect(self.update_features)
@@ -283,17 +284,13 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.seed.setRange(0, 2147483647)
         self.seed.setValue(42)
         self.parameters, self.search = QLineEdit("{}"), QLineEdit("{}")
-        self.table_crs = QComboBox()
-        self.table_crs.setEditable(True)
-        for code, name in gsk2011_zones():
-            self.table_crs.addItem(f"{code} | {name}")
-        self.table_crs.setCurrentText("EPSG:20910 | GSK-2011 / Gauss-Kruger zone 10")
+        self.table_crs = TableCRSSelector("EPSG:20910")
         self.north_first = QCheckBox("Таблица: X = север, Y = восток (геодезический порядок)")
         self.north_first.setText("X — север, Y — восток")
         self.north_first.setToolTip("Геодезический порядок таблиц: X=Northing, Y=Easting. Снимите флажок для X=Easting, Y=Northing.")
         self.north_first.setChecked(True)
         for label, widget in [("X", self.x_column), ("Y", self.y_column), ("Глубина / горизонт", self.target),
-                              ("Признаки", self.feature_list), ("CRS таблиц", self.table_crs),
+                              ("Признаки", self.feature_panel), ("СК таблиц", self.table_crs),
                               ("Порядок координат", self.north_first)]:
             form.addRow(label, widget)
         panel.addWidget(data_group)
@@ -713,6 +710,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             self.table_info.setText(f"{Path(path).name}: {data.shape[0]} строк, {data.shape[1]} столбцов")
 
     def configure_columns(self):
+        self.feature_panel.search.clear()
         for combo in (self.x_column, self.y_column, self.target):
             combo.blockSignals(True)
             combo.clear()
@@ -741,6 +739,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             if column not in excluded:
                 item = QListWidgetItem(str(column), self.feature_list)
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setToolTip(str(column))
                 item.setCheckState(Qt.Checked)
 
     def edit_training(self):
@@ -772,9 +771,14 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             self.progress_bar.setValue(0)
 
     def show_statistics(self):
-        if self.training is None:
-            raise ValueError("Загрузите обучающую таблицу.")
-        self.log.setPlainText(self.training.describe().to_string())
+        sources = {name: frame for name, frame in (
+            ("Обучающая таблица", self.training), ("Прогнозная таблица", self.prediction),
+            ("Результат прогноза", self.output)) if frame is not None}
+        if not sources:
+            raise ValueError("Загрузите обучающую или прогнозную таблицу.")
+        dialog = StatisticsDialog(sources, self)
+        apply_window_theme(dialog)
+        dialog.exec_()
 
     def fit(self):
         if self.worker is not None:
@@ -795,9 +799,10 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         table, name = self.training.copy(), self.model_choice.currentText()
         validate_parameters(params)
         make_model(name, params, self.seed.value(), self.device_choice.currentData(), self.gpu_id.value())
+        crs = self.table_crs.value()
         if self.spatial.isChecked():
-            validate_crs(self.table_crs.currentText().split("|")[0].strip(), "m")
-        self.fitted_crs = self.table_crs.currentText().split("|")[0].strip()
+            validate_crs(crs, "m")
+        self.fitted_crs = crs
         self.fitted_north_first = self.north_first.isChecked()
         self.result = self.output = None
         self.dashboard.reset("Расчёт запущен. Контрольные точки не участвуют в подборе.")
@@ -830,7 +835,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
 
     def predicted(self, output):
         self.output = output
-        self.log.appendPlainText(f"Получен прогноз: {len(output)} точек.\n{output.describe().to_string()}")
+        self.log.appendPlainText(f"Получен прогноз: {len(output)} точек. Статистика доступна в разделе «Данные» → «Статистика».")
 
     def save_csv(self, data, title):
         if data is None:

@@ -46,6 +46,7 @@ class ProjectWorkspace:
             signal=w.currentTextChanged if isinstance(w,QComboBox) else w.toggled if isinstance(w,QCheckBox) else w.textChanged if isinstance(w,(QLineEdit,QPlainTextEdit)) else w.valueChanged if isinstance(w,(QSpinBox,QDoubleSpinBox)) else w.clicked if isinstance(w,QPushButton) else w.currentChanged
             signal.connect(self.mark_project_dirty)
         self.feature_list.itemChanged.connect(self.mark_project_dirty)
+        self.table_crs.valueChanged.connect(self.mark_project_dirty)
         self._project_dirty=False
 
     def mark_project_dirty(self,*args):
@@ -73,7 +74,7 @@ class ProjectWorkspace:
         try:
             self.training=self.prediction=self.result=self.output=None; self.optimization_context=None
             for w in (self.x_column,self.y_column,self.target): w.clear()
-            self.feature_list.clear(); apply_controls(self,self._ml_defaults)
+            self.feature_panel.search.clear(); self.feature_list.clear(); apply_controls(self,self._ml_defaults)
             self.update_device_controls(); self.training_workflow.setCurrentIndex(0)
             self.dashboard.reset(); self.log.clear(); self.progress_bar.setValue(0)
             self.best_trial_label.setText('Лучший trial: ещё нет завершённых результатов')
