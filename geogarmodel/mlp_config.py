@@ -3,6 +3,10 @@ import math
 from copy import deepcopy
 
 ACTIVATIONS = ("relu", "leaky_relu", "gelu", "elu", "selu", "tanh", "sigmoid", "softplus", "linear")
+NORMALIZATION = {
+    "BatchNorm": {"eps": 1e-5, "momentum": .1, "affine": True, "track_running_stats": True},
+    "LayerNorm": {"eps": 1e-5, "elementwise_affine": True, "bias": True},
+}
 OPTIMIZERS = {
     "Adam": {"betas": [.9, .999], "eps": 1e-8, "weight_decay": 0.},
     "AdamW": {"betas": [.9, .999], "eps": 1e-8, "weight_decay": 0.},
@@ -18,10 +22,13 @@ EVAL_METRICS = ("MSE", "RMSE", "MAE", "R2", "MedianAE", "ExplainedVariance")
 
 def defaults(seed=42):
     return dict(layer_specs=[
-        dict(type="Dense", units=128, activation="relu", l1=0., l2=0.),
+        dict(type="Dense", units=128, activation="linear", l1=0., l2=0.),
+        dict(type="Activation", activation="relu"),
         dict(type="Dropout", rate=.1),
-        dict(type="Dense", units=64, activation="relu", l1=0., l2=0.),
-        dict(type="Dense", units=32, activation="relu", l1=0., l2=0.)],
+        dict(type="Dense", units=64, activation="linear", l1=0., l2=0.),
+        dict(type="Activation", activation="relu"),
+        dict(type="Dense", units=32, activation="linear", l1=0., l2=0.),
+        dict(type="Activation", activation="relu")],
         output_l1=0., output_l2=0., optimizer_name="AdamW",
         optimizer_params=deepcopy(OPTIMIZERS["AdamW"]), loss_name="MSE",
         loss_params={}, epochs=100, batch_size=128, learning_rate=.001,
@@ -86,9 +93,24 @@ def validate_config(parameters, seed=42):
             layer["rate"]=number(layer.get("rate"),f"Dropout {i}: rate",high=1.)
             if layer["rate"]>=1.:
                 raise ValueError("Dropout rate должен быть меньше 1.")
-        elif kind=="LayerNorm":
-            if set(layer)-{"type"}:
-                raise ValueError(f"LayerNorm {i}: неизвестные параметры.")
+        elif kind=="Activation":
+            if set(layer)-{"type","activation"} or layer.get("activation") not in ACTIVATIONS:
+                raise ValueError(f"Activation {i}: выберите допустимую активацию.")
+        elif kind in NORMALIZATION:
+            if set(layer)-{"type",*NORMALIZATION[kind]}:
+                raise ValueError(f"{kind} {i}: неизвестные параметры.")
+            for key,value in NORMALIZATION[kind].items():
+                layer.setdefault(key,value)
+            layer["eps"]=number(layer["eps"],f"{kind} {i}: eps",strict=True)
+            flags=("affine","track_running_stats") if kind=="BatchNorm" else ("elementwise_affine","bias")
+            for key in flags:
+                if not isinstance(layer[key],bool):
+                    raise ValueError(f"{kind} {i}: {key} — true или false.")
+            if kind=="BatchNorm":
+                if layer["momentum"] is not None:
+                    layer["momentum"]=number(layer["momentum"],f"BatchNorm {i}: momentum",high=1.)
+                if not layer["track_running_stats"]:
+                    raise ValueError("BatchNorm: track_running_stats должен быть true для независимого прогноза точек.")
         else:
             raise ValueError(f"Слой {i}: неизвестный тип {kind}.")
     if not dense:
@@ -98,6 +120,8 @@ def validate_config(parameters, seed=42):
     config["learning_rate"]=number(config["learning_rate"],"learning_rate",strict=True)
     for key in ("epochs","batch_size"):
         integer(config[key],key)
+    if any(layer["type"]=="BatchNorm" for layer in layers) and config["batch_size"]<2:
+        raise ValueError("BatchNorm требует batch_size >= 2.")
     integer(config["random_state"],"random_state",0,2147483647)
     if not isinstance(config["shuffle"],bool):
         raise ValueError("shuffle: true или false.")

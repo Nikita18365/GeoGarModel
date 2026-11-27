@@ -8,6 +8,31 @@ from .mlp_config import defaults, validate_config
 from .work_progress import report
 
 
+class NonSingletonBatches:
+    """Combine a singleton tail with the preceding batch; preserve every index."""
+    def __init__(self, batches):
+        self.batches=batches
+
+    def __iter__(self):
+        pending=None
+        for batch in self.batches:
+            if pending is not None:
+                if len(batch)==1:
+                    yield pending+batch
+                    pending=None
+                    continue
+                yield pending
+            pending=batch
+        if pending is not None:
+            yield pending
+
+    def __len__(self):
+        count=len(self.batches)
+        if len(self.batches.sampler)%self.batches.batch_size==1 and count>1:
+            return count-1
+        return count
+
+
 class ConfigurableMLP(RegressorMixin, BaseEstimator):
     # Store constructor parameters unchanged for sklearn.clone.
     def __init__(self, layer_specs=None, output_l1=0., output_l2=0.,
@@ -53,8 +78,14 @@ class ConfigurableMLP(RegressorMixin, BaseEstimator):
                 width=spec["units"]
             elif spec["type"]=="Dropout":
                 layers.append(nn.Dropout(spec["rate"]))
+            elif spec["type"]=="Activation":
+                layers.append(activation[spec["activation"]]())
+            elif spec["type"]=="BatchNorm":
+                layers.append(nn.BatchNorm1d(width,eps=spec["eps"],momentum=spec["momentum"],
+                                             affine=spec["affine"],track_running_stats=True))
             elif spec["type"]=="LayerNorm":
-                layers.append(nn.LayerNorm(width))
+                layers.append(nn.LayerNorm(width,eps=spec["eps"],
+                                           elementwise_affine=spec["elementwise_affine"],bias=spec["bias"]))
         output=nn.Linear(width,1)
         self.regularized_.append((output,config["output_l1"],config["output_l2"]))
         layers.extend([output,nn.Flatten(0)])
@@ -107,7 +138,16 @@ class ConfigurableMLP(RegressorMixin, BaseEstimator):
         optimizer=optimizers[self.optimizer_name](self.network_.parameters(),lr=self.learning_rate,**kwargs)
         generator=torch.Generator().manual_seed(self.random_state)
         dataset=torch.utils.data.TensorDataset(torch.from_numpy(X.copy()),torch.from_numpy(y.copy()))
-        loader=torch.utils.data.DataLoader(dataset,batch_size=self.batch_size,shuffle=self.shuffle,generator=generator)
+        has_batch_norm=any(spec["type"]=="BatchNorm" for spec in self.config_["layer_specs"])
+        if has_batch_norm:
+            if len(dataset)<2:
+                raise ValueError("BatchNorm требует не менее двух обучающих наблюдений.")
+            sampler=(torch.utils.data.RandomSampler(dataset,generator=generator) if self.shuffle
+                     else torch.utils.data.SequentialSampler(dataset))
+            batches=torch.utils.data.BatchSampler(sampler,self.batch_size,drop_last=False)
+            loader=torch.utils.data.DataLoader(dataset,batch_sampler=NonSingletonBatches(batches))
+        else:
+            loader=torch.utils.data.DataLoader(dataset,batch_size=self.batch_size,shuffle=self.shuffle,generator=generator)
         self.loss_curve_=[]
         self.data_loss_curve_=[]
         self.metric_curves_={name:[] for name in self.config_["training_metrics"]}
