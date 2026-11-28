@@ -95,6 +95,7 @@ class ProjectWorkspace:
             for w in (self.x_column,self.y_column,self.target,self.group_column): w.clear()
             self.group_column.addItem("")
             self.feature_panel.search.clear(); self.feature_list.clear(); apply_controls(self,self._ml_defaults)
+            self._parameter_model=self.model_choice.currentText()
             self.update_device_controls(); self.update_validation_controls(); self.training_workflow.setCurrentIndex(0)
             self.dashboard.reset(); self.log.clear(); self.progress_bar.setValue(0)
             self.best_trial_label.setText('Лучший trial: ещё нет завершённых результатов')
@@ -185,7 +186,8 @@ class ProjectWorkspace:
                 self.training=data['tables'].get('training'); self.prediction=data['tables'].get('prediction'); self.output=data['tables'].get('output')
                 if self.training is not None: self.configure_columns()
                 ml_controls = migrate_ml_controls(state['ml_controls'])
-                apply_controls(self,ml_controls); self.update_validation_controls(); self.update_features()
+                apply_controls(self,ml_controls); self._parameter_model=self.model_choice.currentText()
+                self.update_validation_controls(); self.update_features()
                 for i in range(self.feature_list.count()):
                     item=self.feature_list.item(i); item.setCheckState(Qt.Checked if item.text() in state['features'] else Qt.Unchecked)
                 self.update_device_controls(); self.optimization_context=state['optimization_context']

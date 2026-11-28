@@ -461,11 +461,21 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         layout.addWidget(ParameterSplitter(left,right))
         self.validation_method.currentTextChanged.connect(self.update_validation_controls)
         self.group_column.currentTextChanged.connect(self.update_features)
-        self.model_choice.currentTextChanged.connect(self.update_device_controls)
+        self._parameter_model = self.model_choice.currentText()
+        self.model_choice.currentTextChanged.connect(self.model_changed)
         self.device_choice.currentIndexChanged.connect(self.update_device_controls)
         self.update_device_controls()
         self.update_validation_controls()
         self.tabs.addTab(tab, "02  ·  Прогноз и оптимизация")
+
+    def model_changed(self, name):
+        # Fixed parameters and search ranges belong to exactly one estimator.
+        # A fresh selection starts with the constructor defaults, not another model's JSON.
+        if name != self._parameter_model:
+            self.parameters.setText("{}")
+            self.search.setText("{}")
+            self._parameter_model = name
+        self.update_device_controls()
 
     def update_device_controls(self):
         name = self.model_choice.currentText()
