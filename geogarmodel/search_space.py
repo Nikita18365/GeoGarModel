@@ -2,7 +2,8 @@
 from copy import deepcopy
 import math
 from .compute import RESERVED,device_parameters
-from .mlp_config import validate_config, ACTIVATIONS
+from .mlp_config import validate_config, ACTIVATIONS, OPTIMIZERS, LOSSES
+from .conditional_search import conditional_domains, conditional_value, active_condition
 
 def integer(low,high,step=1):
     return dict(type="int",low=low,high=high,step=step)
@@ -97,6 +98,7 @@ def recommended_space(name,device="cpu",fixed=None):
     if name=="XGBoost" and p.get("booster") not in (None,"gbtree","dart"):
         for key in ("max_depth","min_child_weight","gamma","subsample","colsample_bytree","colsample_bylevel","colsample_bynode","max_bin"):
             spaces[name].pop(key,None)
+    spaces[name].update(conditional_domains(name,device,p))
     return {k:v for k,v in spaces[name].items() if k not in device_parameters(name,device)}
 
 def get_path(values,path):
@@ -137,7 +139,7 @@ def search_rows(name,fixed,device="cpu"):
     rows={k:deepcopy(v) for k,v in fixed.items() if k not in blocked}
     for key in domains:
         if "." in key:
-            rows[key]=get_path(fixed,key)
+            rows[key]=conditional_value(name,fixed,key)
         else:
             rows.setdefault(key,None)
     return rows,domains
@@ -162,6 +164,10 @@ def validate_space(space,name,fixed,device="cpu"):
     for key,spec in space.items():
         if key not in domains:
             raise ValueError(f"{key}: параметр фиксированный или не поддерживается для подбора этой модели.")
+        if isinstance(spec,dict) and spec.get("type")=="fixed":
+            if not key.startswith(("optimizer_branches.","loss_branches.")) or set(spec)!={"type","value"}:
+                raise ValueError(f"{key}: фиксированное значение ветки некорректно.")
+            spec=[spec["value"]]
         if isinstance(spec,list):
             if not spec:
                 raise ValueError(f"{key}: пустой список.")
@@ -192,7 +198,7 @@ def validate_space(space,name,fixed,device="cpu"):
         positive={"learning_rate","learning_rate_init","tol","n_estimators","iterations","max_iter","epochs",
                   "batch_size","width","units","layers","depth","max_depth","max_leaf_nodes","num_leaves",
                   "min_child_samples","min_samples_leaf","min_samples_split","max_bins","max_bin","border_count"}
-        if leaf in positive and any(v<=0 for v in numeric):
+        if leaf in positive and any(v<=0 for v in numeric) and not (name=="LightGBM" and leaf=="max_depth" and all(v==-1 or v>0 for v in numeric)):
             raise ValueError(f"{key}: значения должны быть положительными.")
         if leaf in ("subsample","colsample_bytree","colsample_bylevel","colsample_bynode","max_features") and any(v<=0 or v>1 for v in numeric):
             raise ValueError(f"{key}: допустимая доля (0, 1].")
@@ -214,16 +220,28 @@ def validate_space(space,name,fixed,device="cpu"):
             raise ValueError("Gradient Boosting: alpha должна быть между 0 и 1.")
         if name=="MLP (pytorch)" and leaf=="batch_size" and any(layer["type"]=="BatchNorm" for layer in fixed["layer_specs"]) and any(v<2 for v in numeric):
             raise ValueError("BatchNorm требует batch_size >= 2.")
-        if name=="Transformer" and key=="width":
-            if not isinstance(spec,list) or any(not isinstance(v,int) or v<=0 or v%fixed.get("heads",4) for v in spec):
-                raise ValueError("Transformer: ширина должна делиться на фиксированное число heads.")
+        if name=="Transformer" and key in ("width","heads"):
+            if not isinstance(spec,list) or any(not isinstance(v,int) or isinstance(v,bool) or v<=0 for v in spec):
+                raise ValueError("Transformer: задайте список положительных целых чисел.")
+        if key.startswith("optimizer_branches.") and leaf=="alpha" and any(v>1 for v in numeric):
+            raise ValueError(f"{key}: значение должно быть <= 1.")
+        if leaf in ("eps","delta","epsilon") and any(v<=0 for v in numeric):
+            raise ValueError(f"{key}: значение должно быть > 0.")
+        if (leaf in ("momentum","dampening","beta_1","beta_2") or ".betas." in key) and any(v<0 or v>=1 for v in numeric):
+            raise ValueError(f"{key}: допустимый диапазон [0, 1).")
+    if name=="Transformer":
+        widths=space.get("width",[fixed.get("width",32)])
+        heads=space.get("heads",[fixed.get("heads",4)])
+        if any(not any(w%h==0 for h in heads) for w in widths):
+            raise ValueError("Transformer: для каждой ширины нужен совместимый heads.")
     if space:
-        initial={k:v[0] if isinstance(v,list) else v.get("low") for k,v in space.items()}
+        actual={k:v for k,v in space.items() if not (isinstance(v,dict) and v.get("type")=="fixed")}
+        initial={k:v[0] if isinstance(v,list) else v.get("low") for k,v in actual.items()}
         try:
-            suggest_parameters(FixedTrial(initial),space)
+            if actual: suggest_parameters(FixedTrial(initial),actual)
             # Validate actual distribution objects, including step/log constraints.
             from optuna.distributions import IntDistribution, FloatDistribution
-            for spec in space.values():
+            for spec in actual.values():
                 if isinstance(spec,dict):
                     dist=IntDistribution if spec["type"]=="int" else FloatDistribution
                     dist(spec["low"],spec["high"],log=spec.get("log",False),**({"step":spec["step"]} if "step" in spec else {}))

@@ -116,3 +116,52 @@ def test_search_editor_roundtrip(qt_application_lifetime):
         assert fixed["alpha"]==3.5 and "alpha" not in space
     finally:
         d.close()
+
+
+@pytest.mark.parametrize("optimizer",["Adam","AdamW","SGD","RMSprop","Adagrad"])
+def test_conditional_mlp_optimizer(optimizer):
+    from geogarmodel.conditional_search import sample_configuration
+    from geogarmodel.mlp_config import defaults,OPTIMIZERS
+    base=defaults()
+    space={"optimizer_name":[optimizer],"loss_name":["Huber"],
+           "optimizer_branches.Adam.betas.0":[.85],
+           "optimizer_branches.SGD.momentum":[.5],
+           "optimizer_branches.SGD.nesterov":[True],
+           "optimizer_branches.SGD.dampening":[.4],
+           "loss_branches.Huber.delta":{"type":"fixed","value":2.}}
+    trial=FixedTrial({"optimizer_name":optimizer,"loss_name":"Huber",
+                     "optimizer_branches.Adam.betas.0":.85,
+                     "optimizer_branches.SGD.momentum":.5,"optimizer_branches.SGD.nesterov":True})
+    cfg=sample_configuration(trial,"MLP (pytorch)","cpu",base,space,suggest_parameters)
+    assert cfg["optimizer_name"]==optimizer and cfg["loss_params"]["delta"]==2.
+    assert set(cfg["optimizer_params"])==set(OPTIMIZERS[optimizer])
+    if optimizer=="SGD":
+        assert cfg["optimizer_params"]["dampening"]==0.
+        assert cfg["optimizer_params"]["nesterov"]
+        assert "optimizer_branches.SGD.dampening" not in trial.params
+    if optimizer!="Adam": assert "optimizer_branches.Adam.betas.0" not in trial.params
+    assert base["optimizer_name"]=="AdamW"
+
+
+def test_conditional_editor_mlp(qt_application_lifetime):
+    from geogarmodel.search_space_ui import SearchDialog
+    d=SearchDialog("MLP (pytorch)",42,"cpu",0,{},None)
+    try:
+        fixed,space=d.collect()
+        assert "optimizer_name" in space and "loss_name" in space
+        assert "optimizer_branches.SGD.nesterov" in space
+        d.select(False)
+        assert d.collect()[1]=={}
+    finally:
+        d.close()
+
+
+def test_conditional_transformer_and_forest():
+    from geogarmodel.conditional_search import sample_configuration
+    trial=FixedTrial({"width":48,"heads@width=48":3})
+    result=sample_configuration(trial,"Transformer","cpu",{},{"width":[48],"heads":[3,5]},suggest_parameters)
+    assert result["width"]==48 and result["heads"]==3
+    trial=FixedTrial({"bootstrap":False})
+    result=sample_configuration(trial,"Random Forest","cpu",{},{"bootstrap":[False],"max_samples":[.8],"oob_score":[True]},suggest_parameters)
+    assert result["max_samples"] is None and result["oob_score"] is False
+    assert "max_samples" not in trial.params

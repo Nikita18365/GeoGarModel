@@ -7,6 +7,7 @@ from optuna.trial import TrialState
 from sklearn.metrics import mean_squared_error
 from .compute import RESERVED, check_cancel, verify_device
 from .search_space import merge_suggestions, changed_parameters
+from .conditional_search import sample_configuration
 
 
 def default_space(name, device="cpu", fixed=None):
@@ -53,8 +54,9 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
         raise ValueError("Число trials и лимит времени должны быть > 0.")
     # Validate the distribution schema before starting expensive trials.
     try:
-        initial = {key: (value[0] if isinstance(value, list) else value["low"]) for key, value in space.items()}
-        suggest_parameters(optuna.trial.FixedTrial(initial), space)
+        actual={k:v for k,v in space.items() if not (isinstance(v,dict) and v.get("type")=="fixed")}
+        initial = {key: (value[0] if isinstance(value, list) else value["low"]) for key, value in actual.items()}
+        suggest_parameters(optuna.trial.FixedTrial(initial), actual)
     except (KeyError, IndexError, TypeError, AttributeError) as exc:
         raise ValueError("Некорректное пространство Optuna: используйте список или объект type/low/high.") from exc
     study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed),
@@ -64,7 +66,8 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
 
     def objective(trial):
         check_cancel(cancel_event)
-        params = merge_suggestions(fixed or {}, suggest_parameters(trial, space))
+        params = sample_configuration(trial,model_name,device,fixed or {},space,suggest_parameters)
+        trial.set_user_attr("effective_parameters",params)
         squared, count, fold_scores = 0., 0, []
         for step, (train, valid) in enumerate(splits):
             check_cancel(cancel_event)
@@ -92,7 +95,7 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
                   "seconds": trial.duration.total_seconds() if trial.duration else 0.,
                   "elapsed_seconds": time.monotonic() - started, "parameters": dict(trial.params),
                   "fold_rmse": trial.user_attrs.get("fold_rmse", []),
-                  "effective_parameters": changed_parameters(fixed or {}, dict(trial.params))}
+                  "effective_parameters": trial.user_attrs.get("effective_parameters",{})}
         history.append(record)
         if progress:
             progress(dict(record))
@@ -100,4 +103,4 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
     study.optimize(objective, n_trials=n_trials, timeout=timeout, n_jobs=1,
                    callbacks=[callback], gc_after_trial=True)
     check_cancel(cancel_event)
-    return changed_parameters(fixed or {}, study.best_params), history, float(study.best_value)
+    return {k:v for k,v in study.best_trial.user_attrs["effective_parameters"].items() if k not in (fixed or {}) or v!=(fixed or {})[k]}, history, float(study.best_value)

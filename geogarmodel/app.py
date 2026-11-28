@@ -29,6 +29,7 @@ from .compute import GPU_MODELS, ComputationCancelled
 from .optimization import default_space
 from .search_space import resolved_fixed,validate_space,unpack_space
 from .search_space_ui import SearchDialog
+from .conditional_search import has_search,is_fixed
 from .parameter_files import validate_parameters, read_parameters, best_snapshot, migrate_model_selection
 from .window_theme import apply_window_theme
 from .ui_layout import Disclosure,ParameterSplitter,details,form_details,workflow_sections,quiet_button,prepare_forms
@@ -904,7 +905,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                 search=default_space(name,device,params)
             fixed=resolved_fixed(name,params,self.seed.value(),device,self.gpu_id.value())
             search=validate_space(search,name,fixed,device)
-            if not search:
+            if not has_search(search):
                 raise ValueError("Включите хотя бы один гиперпараметр или выключите Optuna.")
             if any("." in key for key in search):
                 params=fixed
@@ -996,7 +997,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             payload=json.loads(self.search.text())
             space=unpack_space(payload)
             explicit=payload.get("format")=="geogarmodel.search-space.v1"
-            self.search_summary.setText(f"Зафиксировано диапазонов: {len(space)}" if explicit or space else "Рекомендуемые диапазоны выбранной модели")
+            self.search_summary.setText(f"Зафиксировано диапазонов: {sum(not is_fixed(v) for v in space.values())}" if explicit or space else "Рекомендуемые диапазоны выбранной модели")
         except Exception:
             self.search_summary.setText("Некорректный JSON диапазонов")
 
@@ -1012,7 +1013,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         if dialog.exec_():
             self.parameters.setText(json.dumps(dialog.parameters,ensure_ascii=False))
             self.search.setText(json.dumps(dict(format="geogarmodel.search-space.v1",space=dialog.space),ensure_ascii=False))
-            self.optimize_check.setChecked(bool(dialog.space))
+            self.optimize_check.setChecked(has_search(dialog.space))
 
     def import_search_space(self):
         if self.worker: raise ValueError("Загрузка доступна после расчёта.")
@@ -1035,7 +1036,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         make_model(name,fixed,self.seed.value(),device,self.gpu_id.value())
         self.parameters.setText(json.dumps(fixed if name=="MLP (pytorch)" else params,ensure_ascii=False))
         self.search.setText(json.dumps(dict(format="geogarmodel.search-space.v1",space=space),ensure_ascii=False))
-        self.optimize_check.setChecked(bool(space))
+        self.optimize_check.setChecked(has_search(space))
 
     def edit_parameters(self):
         if self.worker:
