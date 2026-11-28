@@ -25,7 +25,7 @@ from .training_data_ui import FeaturePanel, TableCRSSelector
 from .training_statistics import StatisticsDialog
 from .dashboard import TrainingDashboard
 from .theme_ui import ThemeController
-from .compute import GPU_MODELS, ComputationCancelled
+from .compute import GPU_MODELS, ComputationCancelled, device_parameters
 from .optimization import default_space
 from .search_space import resolved_fixed,validate_space,unpack_space
 from .search_space_ui import SearchDialog
@@ -1040,7 +1040,11 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             params=json.loads(self.parameters.text())
         fixed=resolved_fixed(name,params,self.seed.value(),device,self.gpu_id.value())
         space=validate_space(unpack_space(payload),name,fixed,device)
-        make_model(name,fixed,self.seed.value(),device,self.gpu_id.value())
+        if name=="MLP (pytorch)":
+            # resolved_fixed already validates the pure-Python MLP schema.
+            device_parameters(name,device,self.gpu_id.value())
+        else:
+            make_model(name,fixed,self.seed.value(),device,self.gpu_id.value())
         self.parameters.setText(json.dumps(fixed if name=="MLP (pytorch)" else params,ensure_ascii=False))
         self.search.setText(json.dumps(dict(format="geogarmodel.search-space.v1",space=space),ensure_ascii=False))
         self.optimize_check.setChecked(has_search(space))

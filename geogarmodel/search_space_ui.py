@@ -9,6 +9,7 @@ from .search_space import resolved_fixed,search_rows,validate_space,set_path,unp
 from .conditional_search import active_condition,is_branch,is_fixed
 from .mlp_config import OPTIMIZERS,LOSSES,validate_config
 from .models import make_model
+from .compute import device_parameters
 from .ml_settings_ui import HELP
 
 class SearchDialog(QDialog):
@@ -129,7 +130,12 @@ class SearchDialog(QDialog):
                     fixed[root]["dampening"]=0.
             fixed=validate_config(fixed,self.seed)
         space=validate_space(space,self.name,fixed,self.device)
-        make_model(self.name,fixed,self.seed,self.device,self.gpu_id)
+        # MLP configuration validation is deliberately independent of optional torch.
+        # The actual estimator and backend are checked when training begins.
+        if self.name=="MLP (pytorch)":
+            device_parameters(self.name,self.device,self.gpu_id)
+        else:
+            make_model(self.name,fixed,self.seed,self.device,self.gpu_id)
         # Keep only explicit parameters and changed fixed values, except nested MLP config.
         if self.name!="MLP (pytorch)":
             baseline=resolved_fixed(self.name,self.original,self.seed,self.device,self.gpu_id)

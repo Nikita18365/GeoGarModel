@@ -143,8 +143,11 @@ def test_conditional_mlp_optimizer(optimizer):
     assert base["optimizer_name"]=="AdamW"
 
 
-def test_conditional_editor_mlp(qt_application_lifetime):
+def test_conditional_editor_mlp(qt_application_lifetime,monkeypatch):
     from geogarmodel.search_space_ui import SearchDialog
+    from geogarmodel import models
+    original_find_spec=models.find_spec
+    monkeypatch.setattr(models,"find_spec",lambda name: None if name=="torch" else original_find_spec(name))
     d=SearchDialog("MLP (pytorch)",42,"cpu",0,{},None)
     try:
         fixed,space=d.collect()
@@ -152,6 +155,14 @@ def test_conditional_editor_mlp(qt_application_lifetime):
         assert "optimizer_branches.SGD.nesterov" in space
         d.select(False)
         assert d.collect()[1]=={}
+        # Editing must work without torch; training must still reject its absence.
+        with pytest.raises(ValueError,match="установите пакет torch"):
+            models.make_model("MLP (pytorch)",fixed)
+        for r in range(d.table.rowCount()):
+            if d.table.item(r,1).text()=="learning_rate":
+                d.table.item(r,2).setText("-1")
+        with pytest.raises(ValueError):
+            d.collect()
     finally:
         d.close()
 
