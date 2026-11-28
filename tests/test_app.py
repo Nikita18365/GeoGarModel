@@ -94,7 +94,7 @@ def test_optuna_ui_stream_and_device_controls(tmp_path, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a: (str(saved), "JSON"))
     exported = []
     def save_during_search(record):
-        if record["state"] == "COMPLETE" and not exported:
+        if record.get("stage","final")!="inner" and record["state"] == "COMPLETE" and not exported:
             assert window.worker is not None
             window.export_best_parameters()
             exported.append(json.loads(saved.read_text(encoding="utf-8")))
@@ -111,6 +111,11 @@ def test_optuna_ui_stream_and_device_controls(tmp_path, monkeypatch):
     assert window.result is not None
     assert window.dashboard.trials_table.rowCount() == 3
     assert len(window.result.optimization_history) == 3
+    assert len(window.dashboard.history) == (window.folds.value()+1)*3
+    assert any(r.get("stage")=="inner" for r in window.dashboard.history)
+    assert window.dashboard.stage_choice.findData("inner:1")>=0
+    window.dashboard.stage_choice.setCurrentIndex(window.dashboard.stage_choice.findData("inner:1"))
+    assert len(window.dashboard.trial_curve.getData()[0])>0
     assert not window.stop_button.isEnabled()
     assert len(window.dashboard.map_items) == 4
     assert exported[0]["completed_trials"] == 1

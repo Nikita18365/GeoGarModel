@@ -739,7 +739,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.worker.result.connect(lambda value: self.guard(lambda: self.activity.deliver(worker,callback,value)))
         self.worker.failed.connect(self.job_failed)
         self.worker.cancelled.connect(self.job_cancelled)
-        self.worker.progress.connect(self.trial_progress)
+        self.worker.progress.connect(self.trial_progress, Qt.QueuedConnection)
         self.worker.finished.connect(self.job_finished)
         for widget in (self.fit_button, self.predict_button, self.transform_button, self.grid_calculator_button, self.train_load, self.pred_load):
             widget.setEnabled(False)
@@ -749,16 +749,18 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
 
     def trial_progress(self, record):
         self.dashboard.update_trial(record)
-        if self.optimization_context:
+        stage = f"Внешний фолд {record['outer_fold']}" if record.get("stage")=="inner" else "Итоговый подбор"
+        if self.optimization_context and record.get("stage")!="inner":
             try:
                 snapshot = best_snapshot(self.optimization_context, self.dashboard.history)
                 self.best_trial_label.setText(f"Лучший trial: {snapshot['best_trial'] + 1} · CV RMSE {snapshot['best_cv_rmse']:.6g}")
             except ValueError:
                 pass
+        completed=record.get("global_trial",record["trial"])+1
         if self.worker is not None:
-            self.activity.update(self.worker.activity_key,'Optuna · trials',min(99,100*(record['trial']+1)//max(1,self.progress_bar.maximum())))
-        self.progress_bar.setValue(record["trial"] + 1)
-        self.log.appendPlainText(f"Trial {record['trial'] + 1} · {record['state']} · CV RMSE={record['rmse']}\n"
+            self.activity.update(self.worker.activity_key,stage+' · Optuna',min(99,100*completed//max(1,self.progress_bar.maximum())))
+        self.progress_bar.setValue(completed)
+        self.log.appendPlainText(f"{stage} · Trial {record['trial'] + 1} · {record['state']} · CV RMSE={record['rmse']}\n"
                                  + json.dumps(record["parameters"], ensure_ascii=False))
 
     def job_failed(self, message):
@@ -945,7 +947,9 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                                          timeout_seconds=args["timeout"], features=features,
                                          target=args["target"], coordinates=args["coordinates"])
         self.best_trial_label.setText("Лучший trial: ещё нет завершённых результатов")
-        self.progress_bar.setRange(0, self.trials.value() if self.optimize_check.isChecked() else 1)
+        total=self.trials.value()*(self.folds.value()+1 if args["validation_method"] else 1)
+        self.progress_bar.setRange(0,total if args["optimize"] else 1)
+        if args["optimize"]: self.dashboard.tabs.setCurrentIndex(0)
         self.progress_bar.setValue(0)
         self.run_job(lambda progress, cancel: train_horizon(table, name, **args, progress=progress, cancel_event=cancel),
                      self.trained, with_context=True,title='Обучение модели')
@@ -985,7 +989,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
 
     def export_trials(self):
         import pandas as pd
-        history = self.result.optimization_history if self.result is not None else self.dashboard.history
+        history = self.dashboard.history or (self.result.optimization_history if self.result is not None else [])
         if not history:
             raise ValueError("Нет истории Optuna. Включите оптимизацию и выполните расчёт.")
         rows = [{**r, "parameters": json.dumps(r["parameters"], ensure_ascii=False),

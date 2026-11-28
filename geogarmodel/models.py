@@ -248,6 +248,15 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
     oof = np.full(len(x), np.nan)
     fold_ids = np.zeros(len(x), dtype=int)
     scores = []
+    live_history = []
+    def stream(stage, outer_fold=None):
+        def publish(record):
+            item = dict(record, stage=stage, outer_fold=outer_fold,
+                        global_trial=len(live_history))
+            live_history.append(item)
+            if progress:
+                progress(dict(item))
+        return publish
     # Preflight all inner splits before any expensive fits.
     inner_splits = [make_splits(method, xy[train], folds,
                        labels=None if labels is None else labels[train],
@@ -264,7 +273,7 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
         if do_search:
             best, _, _ = optimize_model(factory, x.iloc[train], y.iloc[train], inner_splits[i],
                 model_name=name, device=device, space=space, fixed=fixed, n_trials=trials,
-                timeout=timeout, seed=seed, cancel_event=cancel_event)
+                timeout=timeout, seed=seed, progress=stream("inner",i+1), cancel_event=cancel_event)
         estimator = factory({**fixed, **best})
         estimator.fit(x.iloc[train], y.iloc[train])
         verify_device(estimator, name, device)
@@ -289,7 +298,7 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
         report(0, trials, "Optuna · итоговый подбор на всех данных")
         best, history, best_cv = optimize_model(factory, x, y, splits,
             model_name=name, device=device, space=space, fixed=fixed, n_trials=trials,
-            timeout=timeout, seed=seed, progress=progress, cancel_event=cancel_event)
+            timeout=timeout, seed=seed, progress=stream("final"), cancel_event=cancel_event)
     check_cancel(cancel_event)
     report(0, 1, "Обучение итоговой модели")
     final = factory({**fixed, **best}).fit(x, y)
@@ -301,7 +310,7 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
         spatial=method in SPATIAL_METHODS or method=="GroupKFold",
         block_size=block_size if method=="BlockKFold" else None,
         seed=seed, parameters=fixed, best_parameters=best, search=space,
-        cv_folds=folds, fold_metrics=scores, optimizer="Optuna TPE" if do_search else None,
+        cv_folds=folds, fold_metrics=scores, trial_history=live_history, optimizer="Optuna TPE" if do_search else None,
         best_cv_rmse=best_cv, device=device, gpu_id=gpu_id, n_trials=trials,
         timeout_seconds=timeout, evaluation="nested_oof" if do_search else "oof",
         block_origin=origin.tolist() if method=="BlockKFold" else None, final_train_rows=len(x),

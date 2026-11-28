@@ -57,10 +57,11 @@ def read_parameters(payload):
 
 
 def best_snapshot(context, history):
+    history = [r for r in history if r.get("stage","final") != "inner"]
     completed = [r for r in history if r["state"] == "COMPLETE" and
                  r.get("rmse") is not None and math.isfinite(r["rmse"])]
     if not completed:
-        raise ValueError("Пока нет завершённых trials. Экспорт доступен после первого COMPLETE trial.")
+        raise ValueError("Пока нет завершённых trials итогового подбора. Экспорт доступен после первого COMPLETE trial этого этапа.")
     best = min(completed, key=lambda r: (r["rmse"], r["trial"]))
     return {"format": "geogarmodel.optuna-best.v1", "model": context["model"],
             "parameters": {**context["parameters"], **best.get("effective_parameters", best["parameters"])},
