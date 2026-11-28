@@ -27,6 +27,8 @@ from .dashboard import TrainingDashboard
 from .theme_ui import ThemeController
 from .compute import GPU_MODELS, ComputationCancelled
 from .optimization import default_space
+from .search_space import resolved_fixed,validate_space,unpack_space
+from .search_space_ui import SearchDialog
 from .parameter_files import validate_parameters, read_parameters, best_snapshot, migrate_model_selection
 from .window_theme import apply_window_theme
 from .ui_layout import Disclosure,ParameterSplitter,details,form_details,workflow_sections,quiet_button,prepare_forms
@@ -373,13 +375,20 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.timeout = QSpinBox()
         self.timeout.setRange(0, 86400)
         self.timeout.setSpecialValueText("Без ограничения")
-        self.search.setToolTip('Пустой объект {} = диапазоны для выбранной модели. Пример: {"alpha": {"type":"float","low":0.001,"high":10,"log":true}}')
+        self.search.setParent(optimization)
+        self.search.hide()
         for label, widget in [("Поиск", self.optimize_check), ("Trials на подбор", self.trials),
-                              ("Лимит времени, с", self.timeout), ("Диапазоны · JSON", self.search)]:
+                              ("Лимит времени, с", self.timeout)]:
             opt_form.addRow(label, widget)
-        preset = QPushButton("Заполнить диапазоны для модели")
-        preset.clicked.connect(lambda: self.search.setText(json.dumps(default_space(self.model_choice.currentText(), self.device_choice.currentData()))))
-        opt_form.addRow(preset)
+        self.search_summary=QLabel("Рекомендуемые диапазоны выбранной модели")
+        self.search_summary.setWordWrap(True)
+        opt_form.addRow(self.search_summary)
+        for title,fn in (("Редактор диапазонов Optuna…",self.edit_search_space),
+                         ("Загрузка диапазонов JSON…",self.import_search_space)):
+            button=QPushButton(title)
+            button.clicked.connect(lambda checked=False,action=fn:self.guard(action))
+            opt_form.addRow(button)
+        self.search.textChanged.connect(self.update_search_summary)
         self.best_export = QPushButton("Сохранить лучший trial · JSON…")
         self.best_export.clicked.connect(lambda: self.guard(self.export_best_parameters))
         self.best_export.setToolTip("Доступно после первого завершённого trial, в том числе во время поиска и после остановки.")
@@ -412,9 +421,8 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             button.clicked.connect(lambda checked=False, fn=function: self.guard(fn))
             export_layout.addWidget(button, n // 2, n % 2)
         panel.addWidget(export)
-        self.training_workflow=workflow_sections(panel,[('1 · Данные',[data_group]),('2 · Модель',[model_group]),
-            ('3 · Подбор',[optimization]),('4 · Файл',[export])])
-        form_details(opt_form,[self.timeout,self.search],'Диапазоны и лимит времени')
+        self.training_workflow=workflow_sections(panel,[('1. Работа с признаками модели',[data_group]),('2. Выбор модели машинного обучения',[model_group]),
+            ('3. Подбор базовой модели',[optimization]),('4 · Файл',[export])], vertical=True)
         panel.addStretch()
         for combo in controls.findChildren(QComboBox):
             combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -476,6 +484,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
             self.search.setText("{}")
             self._parameter_model = name
         self.update_device_controls()
+        self.update_search_summary()
 
     def update_device_controls(self):
         name = self.model_choice.currentText()
@@ -885,6 +894,20 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         params, search = json.loads(self.parameters.text()), json.loads(self.search.text())
         if not isinstance(params, dict) or not isinstance(search, dict):
             raise ValueError("Параметры и диапазоны Optuna должны быть объектами JSON.")
+        if self.optimize_check.isChecked():
+            name=self.model_choice.currentText()
+            device=self.device_choice.currentData()
+            # A versioned wrapper distinguishes an explicit empty selection from default {}.
+            explicit=search.get("format")=="geogarmodel.search-space.v1"
+            search=unpack_space(search)
+            if not explicit and not search:
+                search=default_space(name,device,params)
+            fixed=resolved_fixed(name,params,self.seed.value(),device,self.gpu_id.value())
+            search=validate_space(search,name,fixed,device)
+            if not search:
+                raise ValueError("Включите хотя бы один гиперпараметр или выключите Optuna.")
+            if any("." in key for key in search):
+                params=fixed
         args = dict(target=self.target.currentText(), coordinates=[self.x_column.currentText(), self.y_column.currentText()],
                     features=features, test_size=self.test_fraction.value(), spatial=self.spatial.isChecked(),
                     validation_method=self.validation_method.currentText(), group_column=self.group_column.currentText() or None,
@@ -912,7 +935,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.dashboard.reset("Расчёт запущен. Контрольные точки не участвуют в подборе.")
         self.optimization_context = dict(model=name, parameters=dict(params), seed=args["seed"],
                                          device=args["device"], gpu_id=args["gpu_id"],
-                                         search=search or default_space(name, args["device"]), cv_folds=args["cv_folds"],
+                                         search=search if args["optimize"] else {}, cv_folds=args["cv_folds"],
                                          validation_method=args["validation_method"],
                                          group_column=args["group_column"] if args["validation_method"] in GROUP_METHODS else None,
                                          buffer_size=args["buffer_size"] if args["validation_method"] == "BufferedGroupKFold" else None,
@@ -968,6 +991,52 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                  "fold_rmse": json.dumps(r["fold_rmse"])} for r in history]
         self.save_csv(pd.DataFrame(rows), "История Optuna")
 
+    def update_search_summary(self,*args):
+        try:
+            payload=json.loads(self.search.text())
+            space=unpack_space(payload)
+            explicit=payload.get("format")=="geogarmodel.search-space.v1"
+            self.search_summary.setText(f"Зафиксировано диапазонов: {len(space)}" if explicit or space else "Рекомендуемые диапазоны выбранной модели")
+        except Exception:
+            self.search_summary.setText("Некорректный JSON диапазонов")
+
+    def edit_search_space(self):
+        if self.worker: raise ValueError("Редактирование доступно после расчёта.")
+        name=self.model_choice.currentText()
+        payload=json.loads(self.search.text())
+        space=unpack_space(payload)
+        explicit=payload.get("format")=="geogarmodel.search-space.v1"
+        dialog=SearchDialog(name,self.seed.value(),self.device_choice.currentData(),self.gpu_id.value(),
+                            json.loads(self.parameters.text()),space if explicit or space else None,self)
+        apply_window_theme(dialog)
+        if dialog.exec_():
+            self.parameters.setText(json.dumps(dialog.parameters,ensure_ascii=False))
+            self.search.setText(json.dumps(dict(format="geogarmodel.search-space.v1",space=dialog.space),ensure_ascii=False))
+            self.optimize_check.setChecked(bool(dialog.space))
+
+    def import_search_space(self):
+        if self.worker: raise ValueError("Загрузка доступна после расчёта.")
+        path,_=QFileDialog.getOpenFileName(self,"Загрузка диапазонов JSON","","JSON (*.json)")
+        if not path: return
+        payload=json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        name=self.model_choice.currentText()
+        device=self.device_choice.currentData()
+        if not isinstance(payload,dict): raise ValueError("Нужен объект JSON.")
+        if payload.get("format")=="geogarmodel.search-space.v1":
+            if payload.get("model") not in (None,name):
+                raise ValueError("Файл диапазонов относится к другой модели. Сначала выберите её.")
+            if payload.get("device") not in (None,device):
+                raise ValueError("Файл диапазонов относится к другому устройству.")
+            params=payload.get("parameters",json.loads(self.parameters.text()))
+        else:
+            params=json.loads(self.parameters.text())
+        fixed=resolved_fixed(name,params,self.seed.value(),device,self.gpu_id.value())
+        space=validate_space(unpack_space(payload),name,fixed,device)
+        make_model(name,fixed,self.seed.value(),device,self.gpu_id.value())
+        self.parameters.setText(json.dumps(fixed if name=="MLP (pytorch)" else params,ensure_ascii=False))
+        self.search.setText(json.dumps(dict(format="geogarmodel.search-space.v1",space=space),ensure_ascii=False))
+        self.optimize_check.setChecked(bool(space))
+
     def edit_parameters(self):
         if self.worker:
             raise ValueError("Редактирование доступно после окончания расчёта.")
@@ -978,6 +1047,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         apply_window_theme(dialog)
         if dialog.exec_():
             self.parameters.setText(json.dumps(dialog.parameters, ensure_ascii=False))
+            self.search.setText("{}")
 
     def import_parameters(self):
         if self.worker:
@@ -992,6 +1062,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         make_model(model, params)
         self.model_choice.setCurrentText(model)
         self.parameters.setText(json.dumps(params, ensure_ascii=False))
+        self.search.setText("{}")
         self.optimize_check.setChecked(False)
         self.statusBar().showMessage("Параметры загружены. Optuna выключена; CPU/GPU и разбиение проверьте перед обучением.")
 

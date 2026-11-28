@@ -80,3 +80,39 @@ def test_real_xgboost_gpu_optuna():
     estimator = result.model.regressor_.steps[-1][1]
     assert json.loads(estimator.get_booster().save_config())["learner"]["generic_param"]["device"].startswith("cuda")
     assert np.isfinite(result.predict(prediction).to_numpy()).all()
+
+
+def test_nested_mlp_search_and_export():
+    from geogarmodel.search_space import merge_suggestions,changed_parameters,resolved_fixed,validate_space
+    from geogarmodel.parameter_files import best_snapshot
+    fixed=resolved_fixed("MLP (pytorch)",{"epochs":2})
+    space={"layer_specs.0.units":[16,32],"optimizer_params.weight_decay":[0.,.001]}
+    validate_space(space,"MLP (pytorch)",fixed)
+    choices={"layer_specs.0.units":16,"optimizer_params.weight_decay":.001}
+    effective=changed_parameters(fixed,choices)
+    assert merge_suggestions(fixed,choices)["layer_specs"][0]["units"]==16
+    assert fixed["layer_specs"][0]["units"]==128
+    snapshot=best_snapshot({"model":"MLP (pytorch)","parameters":fixed},
+        [dict(state="COMPLETE",trial=0,rmse=1.,parameters=choices,effective_parameters=effective)])
+    assert snapshot["parameters"]["layer_specs"][0]["units"]==16
+    assert "layer_specs.0.units" not in snapshot["parameters"]
+
+
+def test_search_editor_roundtrip(qt_application_lifetime):
+    from geogarmodel.search_space_ui import SearchDialog
+    from PyQt5.QtCore import Qt
+    d=SearchDialog("Ridge",42,"cpu",0,{"alpha":2.},None)
+    try:
+        d.select(False)
+        fixed,space=d.collect()
+        assert fixed["alpha"]==2. and space=={}
+        d.restore()
+        assert "alpha" in d.collect()[1]
+        for r in range(d.table.rowCount()):
+            if d.table.item(r,1).text()=="alpha":
+                d.table.item(r,0).setCheckState(Qt.Unchecked)
+                d.table.item(r,2).setText("3.5")
+        fixed,space=d.collect()
+        assert fixed["alpha"]==3.5 and "alpha" not in space
+    finally:
+        d.close()

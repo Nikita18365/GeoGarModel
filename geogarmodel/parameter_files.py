@@ -63,7 +63,7 @@ def best_snapshot(context, history):
         raise ValueError("Пока нет завершённых trials. Экспорт доступен после первого COMPLETE trial.")
     best = min(completed, key=lambda r: (r["rmse"], r["trial"]))
     return {"format": "geogarmodel.optuna-best.v1", "model": context["model"],
-            "parameters": {**context["parameters"], **best["parameters"]},
+            "parameters": {**context["parameters"], **best.get("effective_parameters", best["parameters"])},
             "suggested_parameters": dict(best["parameters"]), "best_trial": best["trial"],
             "best_cv_rmse": best["rmse"], "completed_trials": len(completed),
             "recorded_trials": len(history), "settings": context,

@@ -6,31 +6,13 @@ import optuna
 from optuna.trial import TrialState
 from sklearn.metrics import mean_squared_error
 from .compute import RESERVED, check_cancel, verify_device
+from .search_space import merge_suggestions, changed_parameters
 
 
-def default_space(name, device="cpu"):
-    def f(low, high, log=False):
-        return {"type": "float", "low": low, "high": high, "log": log}
-    def i(low, high):
-        return {"type": "int", "low": low, "high": high}
-    common = {"learning_rate": f(.01, .2, True)}
-    spaces = {
-        "Linear": {"fit_intercept": [True, False]},
-        "Ridge": {"alpha": f(1e-4, 1e3, True)},
-        "Lasso": {"alpha": f(1e-5, 1., True)},
-        "Random Forest": {"n_estimators": i(100, 500), "max_depth": [None, 5, 10, 20], "min_samples_leaf": i(1, 10)},
-        "Extra Trees": {"n_estimators": i(100, 500), "max_depth": [None, 5, 10, 20], "min_samples_leaf": i(1, 10)},
-        "Gradient Boosting": {**common, "n_estimators": i(100, 500), "max_depth": i(2, 6)},
-        "Histogram Boosting": {**common, "max_iter": i(100, 500), "max_leaf_nodes": i(8, 63), "l2_regularization": f(1e-5, 10, True)},
-        "XGBoost": {**common, "n_estimators": i(100, 500), "max_depth": i(2, 8), "reg_lambda": f(1e-3, 10, True)},
-        "LightGBM": {**common, "n_estimators": i(100, 500), "num_leaves": i(8, 63)},
-        "CatBoost": {**common, "iterations": i(100, 500), "depth": i(3, 8), "l2_leaf_reg": f(.1, 10, True)},
-        "MLP (sklearn)": {"alpha": f(1e-6, .1, True), "learning_rate_init": f(1e-4, .01, True)},
-        "MLP (pytorch)": {"learning_rate": f(1e-4, .01, True), "batch_size": [32,64,128,256]},
-    }
-    neural = {"width": [32, 64, 128], "layers": i(1, 4), "learning_rate": f(1e-4, .01, True), "dropout": f(0, .3)}
-    spaces["ResNet"], spaces["Transformer"] = neural.copy(), neural.copy()
-    return spaces[name]
+def default_space(name, device="cpu", fixed=None):
+    """Conservative search domains, not the unrestricted library API."""
+    from .search_space import recommended_space
+    return recommended_space(name, device, fixed or {})
 
 
 def suggest_parameters(trial, space):
@@ -38,7 +20,7 @@ def suggest_parameters(trial, space):
         raise ValueError("Нужно непустое пространство параметров Optuna.")
     result = {}
     for name, spec in space.items():
-        if name in RESERVED or "__" in name:
+        if name.split(".")[0] in RESERVED or "__" in name:
             raise ValueError(f"Параметр {name} управляется выбором устройства / конвейером.")
         if isinstance(spec, list):
             if not spec or any(not isinstance(v, (str, int, float, bool, type(None))) for v in spec):
@@ -47,7 +29,7 @@ def suggest_parameters(trial, space):
         elif isinstance(spec, dict) and spec.get("type") in {"int", "float"}:
             kind = spec["type"]
             low, high = spec["low"], spec["high"]
-            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (low, high)) or low > high:
+            if not all(isinstance(v, (int, float)) and not isinstance(v,bool) and math.isfinite(v) for v in (low, high)) or low > high:
                 raise ValueError(f"{name}: некорректные границы.")
             log = bool(spec.get("log", False))
             if log and low <= 0:
@@ -82,7 +64,7 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
 
     def objective(trial):
         check_cancel(cancel_event)
-        params = {**(fixed or {}), **suggest_parameters(trial, space)}
+        params = merge_suggestions(fixed or {}, suggest_parameters(trial, space))
         squared, count, fold_scores = 0., 0, []
         for step, (train, valid) in enumerate(splits):
             check_cancel(cancel_event)
@@ -109,7 +91,8 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
                   "best_rmse": min(complete) if complete else None,
                   "seconds": trial.duration.total_seconds() if trial.duration else 0.,
                   "elapsed_seconds": time.monotonic() - started, "parameters": dict(trial.params),
-                  "fold_rmse": trial.user_attrs.get("fold_rmse", [])}
+                  "fold_rmse": trial.user_attrs.get("fold_rmse", []),
+                  "effective_parameters": changed_parameters(fixed or {}, dict(trial.params))}
         history.append(record)
         if progress:
             progress(dict(record))
@@ -117,4 +100,4 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
     study.optimize(objective, n_trials=n_trials, timeout=timeout, n_jobs=1,
                    callbacks=[callback], gc_after_trial=True)
     check_cancel(cancel_event)
-    return study.best_params, history, float(study.best_value)
+    return changed_parameters(fixed or {}, study.best_params), history, float(study.best_value)

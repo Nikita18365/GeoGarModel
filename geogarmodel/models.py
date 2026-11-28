@@ -138,6 +138,8 @@ def train_horizon(table, model_name="Histogram Boosting", *, target=None, coordi
                   cv_folds=3, device="cpu", gpu_id=0, progress=None, cancel_event=None,
                   validation_method=None, group_column=None, buffer_size=1000.):
     check_cancel(cancel_event)
+    if model_name=="MLP (pytorch)" and (optimize or search):
+        parameters=validate_mlp_config(parameters or {},seed)
     if table.columns.duplicated().any() or not table.index.is_unique:
         raise ValueError("Имена столбцов и индексы должны быть уникальны.")
     coordinates = list(coordinates or table.columns[:2])
@@ -193,7 +195,7 @@ def train_horizon(table, model_name="Histogram Boosting", *, target=None, coordi
         splits = list(cv.split(inner_x, inner_y, groups=None if groups is None else groups[train]))
         best, history, best_cv = optimize_model(
             lambda p: make_model(model_name, p, seed, device, gpu_id), inner_x, inner_y, splits,
-            model_name=model_name, device=device, space=search or default_space(model_name, device), fixed=parameters,
+            model_name=model_name, device=device, space=search or default_space(model_name, device, parameters), fixed=parameters,
             n_trials=n_trials, timeout=timeout, seed=seed, progress=progress, cancel_event=cancel_event)
         model = make_model(model_name, {**(parameters or {}), **best}, seed, device, gpu_id)
     check_cancel(cancel_event)
@@ -242,7 +244,7 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
     do_search = bool(optimize or search)
     factory = lambda p: make_model(name, p, seed, device, gpu_id)
     fixed = dict(parameters or {})
-    space = search or default_space(name, device) if do_search else {}
+    space = (search or default_space(name, device, fixed)) if do_search else {}
     oof = np.full(len(x), np.nan)
     fold_ids = np.zeros(len(x), dtype=int)
     scores = []

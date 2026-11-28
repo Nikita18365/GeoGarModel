@@ -4,10 +4,11 @@ from PyQt5.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QStackedWidget,QScro
 
 class Workflow(QWidget):
     """Explicit navigation buttons avoid native QToolBox title clipping on Windows."""
-    def __init__(self):
+    def __init__(self,vertical=False):
         super().__init__()
         self.rows=QVBoxLayout(self); self.rows.setContentsMargins(0,0,0,0)
-        self.navigation=QHBoxLayout(); self.navigation.setSpacing(4); self.rows.addLayout(self.navigation)
+        self.navigation=QVBoxLayout() if vertical else QHBoxLayout(); self.navigation.setSpacing(4); self.rows.addLayout(self.navigation)
+        self.vertical=vertical
         self.buttons=[]; self.pages=QStackedWidget()
 
     def addItem(self,page,title):
@@ -15,7 +16,7 @@ class Workflow(QWidget):
         button=QPushButton(title); button.setObjectName('workflowStep')
         button.setToolTip(title)
         button.setProperty('workflowNavigation',True); button.setCheckable(True)
-        button.setMinimumHeight(button.fontMetrics().height()+24)
+        button.setMinimumHeight(button.fontMetrics().height()+24 if not self.vertical else 48)
         button.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Minimum)
         button.clicked.connect(lambda checked=False,i=index:self.setCurrentIndex(i))
         button.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Minimum)
