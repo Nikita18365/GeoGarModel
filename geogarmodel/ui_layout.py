@@ -110,9 +110,9 @@ def form_details(form,widgets,title):
     return section
 
 
-def workflow_sections(layout,sections):
+def workflow_sections(layout,sections,vertical=False):
     from .inversion_workflow_ui import Workflow
-    workflow=Workflow()
+    workflow=Workflow(vertical=vertical)
     for title,widgets in sections:
         page=QWidget(); rows=QVBoxLayout(page); rows.setContentsMargins(0,12,0,0)
         for widget in widgets:

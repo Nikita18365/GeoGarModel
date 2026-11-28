@@ -7,7 +7,7 @@ from geogarmodel.model_persistence import dump_pipeline,StoredPipeline,load_skop
 @pytest.mark.parametrize('name,params,package',[
     ('Linear',{},None),('Ridge',{},None),('Lasso',{},None),('Random Forest',{'n_estimators':2},None),
     ('Extra Trees',{'n_estimators':2},None),('Gradient Boosting',{'n_estimators':2},None),
-    ('Histogram Boosting',{'max_iter':2},None),('MLP',{'max_iter':2},None),
+    ('Histogram Boosting',{'max_iter':2},None),('MLP (sklearn)',{'max_iter':2},None),('MLP (pytorch)',{'epochs':2,'layer_specs':[{'type':'Dense','units':8},{'type':'Dropout','rate':.2}]},'torch'),
     ('XGBoost',{'n_estimators':2},'xgboost'),('LightGBM',{'n_estimators':2},'lightgbm'),
     ('CatBoost',{'iterations':2},'catboost'),('ResNet',{'epochs':1,'width':8,'layers':1},'torch'),
     ('Transformer',{'epochs':1,'width':8,'layers':1},'torch')])

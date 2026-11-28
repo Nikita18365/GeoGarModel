@@ -50,7 +50,7 @@ def test_search_schema_and_device_parameters():
     assert device_parameters("CatBoost", "gpu", 1)["devices"] == "1"
     assert device_parameters("LightGBM", "gpu")["device_type"] == "gpu"
     assert device_parameters("Transformer", "gpu")["device"] == "cuda:0"
-    for name in ("Ridge", "MLP", "Transformer", "LightGBM"):
+    for name in ("Ridge", "MLP (pytorch)", "Transformer", "LightGBM"):
         assert default_space(name)
 
 
@@ -80,3 +80,99 @@ def test_real_xgboost_gpu_optuna():
     estimator = result.model.regressor_.steps[-1][1]
     assert json.loads(estimator.get_booster().save_config())["learner"]["generic_param"]["device"].startswith("cuda")
     assert np.isfinite(result.predict(prediction).to_numpy()).all()
+
+
+def test_nested_mlp_search_and_export():
+    from geogarmodel.search_space import merge_suggestions,changed_parameters,resolved_fixed,validate_space
+    from geogarmodel.parameter_files import best_snapshot
+    fixed=resolved_fixed("MLP (pytorch)",{"epochs":2})
+    space={"layer_specs.0.units":[16,32],"optimizer_params.weight_decay":[0.,.001]}
+    validate_space(space,"MLP (pytorch)",fixed)
+    choices={"layer_specs.0.units":16,"optimizer_params.weight_decay":.001}
+    effective=changed_parameters(fixed,choices)
+    assert merge_suggestions(fixed,choices)["layer_specs"][0]["units"]==16
+    assert fixed["layer_specs"][0]["units"]==128
+    snapshot=best_snapshot({"model":"MLP (pytorch)","parameters":fixed},
+        [dict(state="COMPLETE",trial=0,rmse=1.,parameters=choices,effective_parameters=effective)])
+    assert snapshot["parameters"]["layer_specs"][0]["units"]==16
+    assert "layer_specs.0.units" not in snapshot["parameters"]
+
+
+def test_search_editor_roundtrip(qt_application_lifetime):
+    from geogarmodel.search_space_ui import SearchDialog
+    from PyQt5.QtCore import Qt
+    d=SearchDialog("Ridge",42,"cpu",0,{"alpha":2.},None)
+    try:
+        d.select(False)
+        fixed,space=d.collect()
+        assert fixed["alpha"]==2. and space=={}
+        d.restore()
+        assert "alpha" in d.collect()[1]
+        for r in range(d.table.rowCount()):
+            if d.table.item(r,1).text()=="alpha":
+                d.table.item(r,0).setCheckState(Qt.Unchecked)
+                d.table.item(r,2).setText("3.5")
+        fixed,space=d.collect()
+        assert fixed["alpha"]==3.5 and "alpha" not in space
+    finally:
+        d.close()
+
+
+@pytest.mark.parametrize("optimizer",["Adam","AdamW","SGD","RMSprop","Adagrad"])
+def test_conditional_mlp_optimizer(optimizer):
+    from geogarmodel.conditional_search import sample_configuration
+    from geogarmodel.mlp_config import defaults,OPTIMIZERS
+    base=defaults()
+    space={"optimizer_name":[optimizer],"loss_name":["Huber"],
+           "optimizer_branches.Adam.betas.0":[.85],
+           "optimizer_branches.SGD.momentum":[.5],
+           "optimizer_branches.SGD.nesterov":[True],
+           "optimizer_branches.SGD.dampening":[.4],
+           "loss_branches.Huber.delta":{"type":"fixed","value":2.}}
+    trial=FixedTrial({"optimizer_name":optimizer,"loss_name":"Huber",
+                     "optimizer_branches.Adam.betas.0":.85,
+                     "optimizer_branches.SGD.momentum":.5,"optimizer_branches.SGD.nesterov":True})
+    cfg=sample_configuration(trial,"MLP (pytorch)","cpu",base,space,suggest_parameters)
+    assert cfg["optimizer_name"]==optimizer and cfg["loss_params"]["delta"]==2.
+    assert set(cfg["optimizer_params"])==set(OPTIMIZERS[optimizer])
+    if optimizer=="SGD":
+        assert cfg["optimizer_params"]["dampening"]==0.
+        assert cfg["optimizer_params"]["nesterov"]
+        assert "optimizer_branches.SGD.dampening" not in trial.params
+    if optimizer!="Adam": assert "optimizer_branches.Adam.betas.0" not in trial.params
+    assert base["optimizer_name"]=="AdamW"
+
+
+def test_conditional_editor_mlp(qt_application_lifetime,monkeypatch):
+    from geogarmodel.search_space_ui import SearchDialog
+    from geogarmodel import models
+    original_find_spec=models.find_spec
+    monkeypatch.setattr(models,"find_spec",lambda name: None if name=="torch" else original_find_spec(name))
+    d=SearchDialog("MLP (pytorch)",42,"cpu",0,{},None)
+    try:
+        fixed,space=d.collect()
+        assert "optimizer_name" in space and "loss_name" in space
+        assert "optimizer_branches.SGD.nesterov" in space
+        d.select(False)
+        assert d.collect()[1]=={}
+        # Editing must work without torch; training must still reject its absence.
+        with pytest.raises(ValueError,match="установите пакет torch"):
+            models.make_model("MLP (pytorch)",fixed)
+        for r in range(d.table.rowCount()):
+            if d.table.item(r,1).text()=="learning_rate":
+                d.table.item(r,2).setText("-1")
+        with pytest.raises(ValueError):
+            d.collect()
+    finally:
+        d.close()
+
+
+def test_conditional_transformer_and_forest():
+    from geogarmodel.conditional_search import sample_configuration
+    trial=FixedTrial({"width":48,"heads@width=48":3})
+    result=sample_configuration(trial,"Transformer","cpu",{},{"width":[48],"heads":[3,5]},suggest_parameters)
+    assert result["width"]==48 and result["heads"]==3
+    trial=FixedTrial({"bootstrap":False})
+    result=sample_configuration(trial,"Random Forest","cpu",{},{"bootstrap":[False],"max_samples":[.8],"oob_score":[True]},suggest_parameters)
+    assert result["max_samples"] is None and result["oob_score"] is False
+    assert "max_samples" not in trial.params

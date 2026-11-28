@@ -51,7 +51,7 @@ class TorchRegressor(RegressorMixin, BaseEstimator):
         X, y = check_X_y(X, y, dtype=np.float32)
         if self.epochs < 1 or self.batch_size < 1 or self.layers < 1 or self.width < 1:
             raise ValueError("epochs, batch_size, layers и width должны быть > 0.")
-        if self.heads < 1 or self.width % self.heads:
+        if self.architecture == 'transformer' and (self.heads < 1 or self.width % self.heads):
             raise ValueError("width должен делиться на heads.")
         torch.manual_seed(self.random_state)
         if self.device != "cpu" and not self.device.startswith("cuda:"):
@@ -88,6 +88,11 @@ class TorchRegressor(RegressorMixin, BaseEstimator):
         return self
 
     def build_network(self,features):
+        if self.architecture=='mlp':
+            blocks = [nn.Linear(features, self.width), nn.ReLU(), nn.Dropout(self.dropout)]
+            for _ in range(self.layers - 1):
+                blocks.extend([nn.Linear(self.width, self.width), nn.ReLU(), nn.Dropout(self.dropout)])
+            return nn.Sequential(*blocks, nn.Linear(self.width, 1), nn.Flatten(0))
         if self.architecture=='transformer': return FeatureTransformer(features,self.width,self.layers,self.heads,self.dropout)
         if self.architecture=='resnet': return nn.Sequential(nn.Linear(features,self.width),*[ResidualBlock(self.width,self.dropout) for _ in range(self.layers)],nn.LayerNorm(self.width),nn.Linear(self.width,1),nn.Flatten(0))
         raise ValueError('Неизвестная нейросетевая архитектура.')

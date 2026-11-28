@@ -8,7 +8,8 @@ from .project_archive import write_project,read_project
 from .model_workspace import ModelEntry
 
 ML_CONTROLS=('x_column','y_column','target','spatial','block','test_fraction','seed','parameters','search',
-    'table_crs','north_first','model_choice','device_choice','gpu_id','optimize_check','trials','folds','timeout')
+    'table_crs','north_first','model_choice','device_choice','gpu_id','optimize_check','trials','folds','timeout',
+    'validation_method','group_column','buffer_size')
 INV_CONTROLS=('mode','east','north','height','value','error','crs','height_constant','sigma','stride','nx','ny','nz',
     'top','bottom','padding','cache','memory_policy','field','inc','dec','lower','upper','initial','iterations','damping',
     'smooth','depth_index','target','step','offset','device','gpu','early_stop','early_tolerance','early_patience',
@@ -22,6 +23,24 @@ def controls_state(owner,names):
         w=getattr(owner,name)
         result[name]=w.currentText() if isinstance(w,QComboBox) else w.isChecked() if isinstance(w,QCheckBox) else w.text() if isinstance(w,QLineEdit) else w.value()
     return result
+
+
+def migrate_ml_controls(values):
+    """Migrate settings only; preserve historical results and their actual method."""
+    values = dict(values)
+    if 'validation_method' not in values:
+        values['validation_method'] = 'BlockKFold' if values.get('spatial', True) else 'ShuffleKFold'
+    if values['validation_method'] == 'BufferedKFold':
+        values['validation_method'] = 'BufferedGroupKFold'
+        # The old method ignored groups. Never guess a grouping column.
+        values['group_column'] = ''
+    if values.get("model_choice") in ("MLP","MLP (legacy CUDA)"):
+        import json
+        from .parameter_files import migrate_model_selection
+        name, params, search = migrate_model_selection(values["model_choice"],
+            json.loads(values.get("parameters","{}")),json.loads(values.get("search","{}")))
+        values.update(model_choice=name, parameters=json.dumps(params), search=json.dumps(search))
+    return values
 
 
 def apply_controls(owner,values):
@@ -46,6 +65,7 @@ class ProjectWorkspace:
             signal=w.currentTextChanged if isinstance(w,QComboBox) else w.toggled if isinstance(w,QCheckBox) else w.textChanged if isinstance(w,(QLineEdit,QPlainTextEdit)) else w.valueChanged if isinstance(w,(QSpinBox,QDoubleSpinBox)) else w.clicked if isinstance(w,QPushButton) else w.currentChanged
             signal.connect(self.mark_project_dirty)
         self.feature_list.itemChanged.connect(self.mark_project_dirty)
+        self.table_crs.valueChanged.connect(self.mark_project_dirty)
         self._project_dirty=False
 
     def mark_project_dirty(self,*args):
@@ -72,9 +92,11 @@ class ProjectWorkspace:
         self._project_loading=True
         try:
             self.training=self.prediction=self.result=self.output=None; self.optimization_context=None
-            for w in (self.x_column,self.y_column,self.target): w.clear()
-            self.feature_list.clear(); apply_controls(self,self._ml_defaults)
-            self.update_device_controls(); self.training_workflow.setCurrentIndex(0)
+            for w in (self.x_column,self.y_column,self.target,self.group_column): w.clear()
+            self.group_column.addItem("")
+            self.feature_panel.search.clear(); self.feature_list.clear(); apply_controls(self,self._ml_defaults)
+            self._parameter_model=self.model_choice.currentText()
+            self.update_device_controls(); self.update_validation_controls(); self.training_workflow.setCurrentIndex(0)
             self.dashboard.reset(); self.log.clear(); self.progress_bar.setValue(0)
             self.best_trial_label.setText('Лучший trial: ещё нет завершённых результатов')
             self.table_info.setText('Загрузите обучающую и прогнозную таблицы.')
@@ -163,7 +185,9 @@ class ProjectWorkspace:
                 apply_controls(self,state.get('transform_controls',{})); self.update_transform_parameters()
                 self.training=data['tables'].get('training'); self.prediction=data['tables'].get('prediction'); self.output=data['tables'].get('output')
                 if self.training is not None: self.configure_columns()
-                apply_controls(self,state['ml_controls']); self.update_features()
+                ml_controls = migrate_ml_controls(state['ml_controls'])
+                apply_controls(self,ml_controls); self._parameter_model=self.model_choice.currentText()
+                self.update_validation_controls(); self.update_features()
                 for i in range(self.feature_list.count()):
                     item=self.feature_list.item(i); item.setCheckState(Qt.Checked if item.text() in state['features'] else Qt.Unchecked)
                 self.update_device_controls(); self.optimization_context=state['optimization_context']
@@ -175,6 +199,8 @@ class ProjectWorkspace:
                 for name,limits in state.get('ml_views',{}).items():
                     if name in self.dashboard.plots: self.dashboard.plots[name].setRange(xRange=limits[0],yRange=limits[1],padding=0)
                 self.log.setPlainText(state['training_log']); self.dashboard.tabs.setCurrentIndex(state['training_tab'])
+                if state['ml_controls'].get('validation_method') == 'BufferedKFold':
+                    self.log.appendPlainText('BufferedKFold заменён на BufferedGroupKFold. Перед новым обучением выберите столбец групп. Ранее сохранённые результаты не пересчитаны.')
                 if 'progress' in state: self.progress_bar.setRange(*state['progress'][:2]); self.progress_bar.setValue(state['progress'][2])
                 self.training_workflow.setCurrentIndex(state['training_workflow'])
                 if self.training is not None: self.table_info.setText(f'Из проекта: {len(self.training):,} обучающих строк; исходные данные встроены в файл.')

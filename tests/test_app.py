@@ -94,7 +94,7 @@ def test_optuna_ui_stream_and_device_controls(tmp_path, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a: (str(saved), "JSON"))
     exported = []
     def save_during_search(record):
-        if record["state"] == "COMPLETE" and not exported:
+        if record.get("stage","final")!="inner" and record["state"] == "COMPLETE" and not exported:
             assert window.worker is not None
             window.export_best_parameters()
             exported.append(json.loads(saved.read_text(encoding="utf-8")))
@@ -111,6 +111,10 @@ def test_optuna_ui_stream_and_device_controls(tmp_path, monkeypatch):
     assert window.result is not None
     assert window.dashboard.trials_table.rowCount() == 3
     assert len(window.result.optimization_history) == 3
+    assert len(window.dashboard.history) == 3
+    assert window.progress_bar.maximum()==3
+    assert window.dashboard.stage_choice.findData("inner:1")==-1
+    assert len(window.dashboard.trial_curve.getData()[0])>0
     assert not window.stop_button.isEnabled()
     assert len(window.dashboard.map_items) == 4
     assert exported[0]["completed_trials"] == 1
@@ -123,3 +127,30 @@ def test_optuna_ui_stream_and_device_controls(tmp_path, monkeypatch):
     assert not window.optimize_check.isChecked()
     window.close()
     app.processEvents()
+
+
+def test_model_switch_clears_parameters_and_search(qt_application_lifetime):
+    from geogarmodel.app import MainWindow
+    window=MainWindow()
+    try:
+        window.model_choice.setCurrentText("XGBoost")
+        window.parameters.setText('{"max_depth": 6, "n_estimators": 200}')
+        window.search.setText('{"max_depth": [3, 6]}')
+        window.model_choice.setCurrentText("ResNet")
+        assert window.parameters.text()=="{}"
+        assert window.search.text()=="{}"
+        window.parameters.setText('{"epochs": 5}')
+        window.search.setText('{"width": [32, 64]}')
+        window.model_choice.setCurrentText("ResNet")
+        assert window.parameters.text()=='{"epochs": 5}'
+        assert window.search.text()=='{"width": [32, 64]}'
+        window.model_choice.setCurrentText("MLP (pytorch)")
+        assert window.parameters.text()=="{}"
+        assert window.search.text()=="{}"
+        window.model_choice.setCurrentText("Ridge")
+        window.parameters.setText('{"alpha": 2}')
+        window.model_choice.setCurrentText("XGBoost")
+        assert window.parameters.text()=="{}"
+        assert window.search.text()=="{}"
+    finally:
+        window.close()

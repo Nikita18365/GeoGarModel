@@ -1,7 +1,7 @@
 """Explicit compute policy. GPU selection must never silently become CPU training."""
 import json
 
-GPU_MODELS = {"XGBoost", "LightGBM", "CatBoost", "ResNet", "Transformer"}
+GPU_MODELS = {"MLP (pytorch)", "XGBoost", "LightGBM", "CatBoost", "ResNet", "Transformer"}
 RESERVED = {"device", "device_type", "task_type", "devices", "gpu_device_id", "gpu_platform_id"}
 
 
@@ -16,7 +16,7 @@ def device_parameters(name, device="cpu", gpu_id=0):
         return {"task_type": "GPU", "devices": str(gpu_id)} if device == "gpu" else {"task_type": "CPU"}
     if name == "LightGBM":
         return {"device_type": "gpu", "gpu_device_id": gpu_id, "force_col_wise": False} if device == "gpu" else {"device_type": "cpu"}
-    if name in {"ResNet", "Transformer"}:
+    if name in {"MLP (pytorch)", "ResNet", "Transformer"}:
         return {"device": f"cuda:{gpu_id}" if device == "gpu" else "cpu"}
     return {}
 

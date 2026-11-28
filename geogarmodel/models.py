@@ -8,16 +8,19 @@ from sklearn.compose import TransformedTargetRegressor
 from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, HistGradientBoostingRegressor, GradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, median_absolute_error, explained_variance_score
+from .mlp_config import defaults as mlp_defaults, validate_config as validate_mlp_config
 from sklearn.model_selection import GroupShuffleSplit, GroupKFold, KFold, train_test_split
 from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from .compute import device_parameters, RESERVED, check_cancel, verify_device
+from .validation import make_splits, SPATIAL_METHODS, GROUP_METHODS
+from .work_progress import report
 
 MODEL_NAMES = ["Ridge", "Linear", "Lasso", "Random Forest", "Extra Trees", "Gradient Boosting",
-               "Histogram Boosting", "MLP", "XGBoost", "LightGBM", "CatBoost", "ResNet", "Transformer"]
-OPTIONAL = {"XGBoost": "xgboost", "LightGBM": "lightgbm", "CatBoost": "catboost",
+               "Histogram Boosting", "MLP (pytorch)", "MLP (sklearn)", "XGBoost", "LightGBM", "CatBoost", "ResNet", "Transformer"]
+OPTIONAL = {"MLP (pytorch)": "torch", "XGBoost": "xgboost", "LightGBM": "lightgbm", "CatBoost": "catboost",
             "ResNet": "torch", "Transformer": "torch"}
 
 
@@ -39,9 +42,13 @@ def make_model(name, parameters=None, seed=42, device="cpu", gpu_id=0):
         "Extra Trees": lambda: ExtraTreesRegressor(n_estimators=300, min_samples_leaf=2, n_jobs=-1, random_state=seed),
         "Gradient Boosting": lambda: GradientBoostingRegressor(random_state=seed),
         "Histogram Boosting": lambda: HistGradientBoostingRegressor(random_state=seed, early_stopping=False),
-        "MLP": lambda: MLPRegressor(hidden_layer_sizes=(128, 64, 32), max_iter=500, random_state=seed),
+        "MLP (sklearn)": lambda: MLPRegressor(hidden_layer_sizes=(128, 64, 32), max_iter=500, random_state=seed),
     }
-    if name in factories:
+    if name == "MLP (pytorch)":
+        from .mlp import ConfigurableMLP
+        params = validate_mlp_config(params, seed)
+        estimator = ConfigurableMLP()
+    elif name in factories:
         estimator = factories[name]()
     elif name == "XGBoost":
         from xgboost import XGBRegressor
@@ -58,6 +65,8 @@ def make_model(name, parameters=None, seed=42, device="cpu", gpu_id=0):
         estimator = TorchRegressor(architecture=name.lower(), random_state=seed)
     else:
         raise ValueError(f"Неизвестная модель: {name}")
+    if name in {"MLP (pytorch)", "ResNet", "Transformer"} and "architecture" in params:
+        raise ValueError("Архитектура определяется выбранной моделью.")
     estimator.set_params(**params)
     estimator.set_params(**compute)
     # Imputation/scaling is fitted within each fold, never to the prediction area.
@@ -109,17 +118,35 @@ class TrainingResult:
         return output
 
 
+def evaluation_scores(observed, predicted, name, parameters):
+    """Always retain standard diagnostics; optional MLP metrics are in depth units."""
+    mse = float(mean_squared_error(observed, predicted))
+    scores = dict(MAE=float(mean_absolute_error(observed,predicted)), RMSE=float(np.sqrt(mse)),
+                  MSE=mse, R2=float(r2_score(observed,predicted)))
+    if name == "MLP (pytorch)":
+        selected = validate_mlp_config(parameters or {})["evaluation_metrics"]
+        if "MedianAE" in selected:
+            scores["MedianAE"] = float(median_absolute_error(observed,predicted))
+        if "ExplainedVariance" in selected:
+            scores["ExplainedVariance"] = float(explained_variance_score(observed,predicted))
+    return scores
+
+
 def train_horizon(table, model_name="Histogram Boosting", *, target=None, coordinates=None,
                   features=None, test_size=.2, spatial=True, block_size=10000., seed=42,
                   parameters=None, search=None, optimize=False, n_trials=30, timeout=None,
-                  cv_folds=3, device="cpu", gpu_id=0, progress=None, cancel_event=None):
+                  cv_folds=3, device="cpu", gpu_id=0, progress=None, cancel_event=None,
+                  validation_method=None, group_column=None, buffer_size=1000.):
     check_cancel(cancel_event)
+    if model_name=="MLP (pytorch)" and (optimize or search):
+        parameters=validate_mlp_config(parameters or {},seed)
     if table.columns.duplicated().any() or not table.index.is_unique:
         raise ValueError("Имена столбцов и индексы должны быть уникальны.")
     coordinates = list(coordinates or table.columns[:2])
     target = target or table.columns[-1]
     features = list(features if features is not None else
-                    [c for c in table.columns if c not in coordinates + [target]])
+                    [c for c in table.columns if c not in coordinates + [target]
+                     and not (validation_method in GROUP_METHODS and c == group_column)])
     if len(coordinates) != 2 or len(set(coordinates)) != 2 or target in coordinates:
         raise ValueError("Выберите два различных столбца координат и отдельную цель.")
     if not features or target in features or set(features) & set(coordinates):
@@ -129,6 +156,10 @@ def train_horizon(table, model_name="Histogram Boosting", *, target=None, coordi
     xy = table[coordinates].apply(pd.to_numeric, errors="raise").to_numpy(dtype=float)
     if len(table) < 10 or not np.isfinite(y).all() or not np.isfinite(xy).all():
         raise ValueError("Нужно ≥ 10 строк с конечными координатами и глубинами.")
+    if validation_method is not None:
+        return cross_validate_horizon(table, x, y, xy, model_name, features, target, coordinates,
+            validation_method, group_column, block_size, buffer_size, cv_folds, seed,
+            parameters, search, optimize, n_trials, timeout, device, gpu_id, progress, cancel_event)
     if not 0 < test_size < 1:
         raise ValueError("Доля контроля должна быть между 0 и 1.")
     groups = None
@@ -164,17 +195,15 @@ def train_horizon(table, model_name="Histogram Boosting", *, target=None, coordi
         splits = list(cv.split(inner_x, inner_y, groups=None if groups is None else groups[train]))
         best, history, best_cv = optimize_model(
             lambda p: make_model(model_name, p, seed, device, gpu_id), inner_x, inner_y, splits,
-            model_name=model_name, device=device, space=search or default_space(model_name), fixed=parameters,
+            model_name=model_name, device=device, space=search or default_space(model_name, device, parameters), fixed=parameters,
             n_trials=n_trials, timeout=timeout, seed=seed, progress=progress, cancel_event=cancel_event)
         model = make_model(model_name, {**(parameters or {}), **best}, seed, device, gpu_id)
     check_cancel(cancel_event)
     model.fit(x.iloc[train], y.iloc[train])
     verify_device(model, model_name, device)
     predicted = model.predict(x.iloc[test])
-    mse = mean_squared_error(y.iloc[test], predicted)
-    metrics = {"MAE": float(mean_absolute_error(y.iloc[test], predicted)), "RMSE": float(np.sqrt(mse)),
-               "MSE": float(mse), "R2": float(r2_score(y.iloc[test], predicted)),
-               "train_rows": len(train), "test_rows": len(test)}
+    metrics = evaluation_scores(y.iloc[test], predicted, model_name, {**(parameters or {}), **best})
+    metrics.update(train_rows=len(train), test_rows=len(test))
     validation = table.iloc[test][coordinates].copy()
     validation["observed"] = y.iloc[test].to_numpy()
     validation["predicted"] = predicted
@@ -191,3 +220,100 @@ def train_horizon(table, model_name="Histogram Boosting", *, target=None, coordi
     verify_device(final_model, model_name, device)
     check_cancel(cancel_event)
     return TrainingResult(final_model, features, target, coordinates, model_name, metrics, validation, settings, history)
+
+
+def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
+                           method, group_column, block_size, buffer_size, folds, seed,
+                           parameters, search, optimize, trials, timeout, device, gpu_id,
+                           progress, cancel_event):
+    """Single CV study; OOF of its best trial is a selection score, not independent validation."""
+    from .optimization import default_space, optimize_model
+    if method in GROUP_METHODS:
+        if group_column not in table.columns or group_column in coordinates + [target]:
+            raise ValueError("Выберите отдельный столбец групп (идентификаторы профилей).")
+        if group_column in features:
+            raise ValueError("Исключите столбец групп из предикторов.")
+        labels = table[group_column].to_numpy()
+    else:
+        labels = None
+    origin = xy.min(axis=0)
+    options = dict(block_size=block_size, buffer_size=buffer_size, seed=seed, origin=origin)
+    splits = make_splits(method, xy, folds, labels=labels, **options)
+    do_search = bool(optimize or search)
+    factory = lambda p: make_model(name, p, seed, device, gpu_id)
+    fixed = dict(parameters or {})
+    space = (search or default_space(name, device, fixed)) if do_search else {}
+    oof = np.full(len(x), np.nan)
+    fold_ids = np.zeros(len(x), dtype=int)
+    scores = []
+    # Validate every training fold before creating the only study.
+    for i,(train,valid) in enumerate(splits):
+        if x.iloc[train].isna().all().any():
+            raise ValueError(f"Фолд {i+1}: полностью пустой обучающий признак.")
+    best, history, best_cv = {}, [], None
+    if do_search:
+        report(0, trials, "Optuna · подбор по выбранной CV")
+        best_oof = {}
+        best, history, best_cv = optimize_model(factory,x,y,splits,
+            model_name=name,device=device,space=space,fixed=fixed,n_trials=trials,
+            timeout=timeout,seed=seed,progress=progress,cancel_event=cancel_event,best_oof=best_oof)
+        oof[:] = best_oof["predicted"]
+    selected = {**fixed, **best}
+    for i,(train,valid) in enumerate(splits):
+        check_cancel(cancel_event)
+        if not do_search:
+            report(i, folds, f"Кросс-валидация · фолд {i+1}/{folds}")
+            estimator = factory(selected)
+            estimator.fit(x.iloc[train],y.iloc[train])
+            verify_device(estimator,name,device)
+            oof[valid] = estimator.predict(x.iloc[valid])
+        fold_ids[valid] = i+1
+        fold_scores = evaluation_scores(y.iloc[valid],oof[valid],name,selected)
+        scores.append(dict(fold=i+1,train_rows=len(train),test_rows=len(valid),
+                           excluded_rows=len(x)-len(train)-len(valid),
+                           **{key.lower():value for key,value in fold_scores.items()},
+                           parameters=best,inner_folds=0))
+    check_cancel(cancel_event)
+    metrics = evaluation_scores(y,oof,name,selected)
+    metrics.update(train_rows=len(x),test_rows=len(x))
+    validation = table[coordinates].copy()
+    validation["observed"] = y.to_numpy()
+    validation["predicted"] = oof
+    validation["residual_pred_minus_observed"] = oof-y.to_numpy()
+    validation["fold"] = fold_ids
+    check_cancel(cancel_event)
+    report(0, 1, "Обучение итоговой модели")
+    final = factory({**fixed, **best}).fit(x, y)
+    verify_device(final, name, device)
+    check_cancel(cancel_event)
+    settings = dict(validation_method=method,
+        group_column=group_column if method in GROUP_METHODS else None,
+        buffer_size=buffer_size if method=="BufferedGroupKFold" else None,
+        spatial=method in SPATIAL_METHODS or method=="GroupKFold",
+        block_size=block_size if method=="BlockKFold" else None,
+        seed=seed, parameters=fixed, best_parameters=best, search=space,
+        cv_folds=folds, fold_metrics=scores, trial_history=history, optimizer="Optuna TPE" if do_search else None,
+        best_cv_rmse=best_cv, device=device, gpu_id=gpu_id, n_trials=trials,
+        timeout_seconds=timeout, evaluation="selected_cv_oof" if do_search else "oof",
+        block_origin=origin.tolist() if method=="BlockKFold" else None, final_train_rows=len(x),
+        fold_splits=[dict(train=train.tolist(), test=valid.tolist()) for train, valid in splits])
+    return TrainingResult(final, features, target, coordinates, name, metrics, validation, settings, history)
+
+
+def model_defaults(name, seed=42, device="cpu", gpu_id=0):
+    if name == "MLP (pytorch)":
+        return mlp_defaults(seed)
+    estimator = make_model(name, seed=seed, device=device, gpu_id=gpu_id).regressor.steps[-1][1]
+    result = {}
+    for key, value in estimator.get_params(deep=False).items():
+        if key in RESERVED or key == "architecture" or "__" in key:
+            continue
+        if isinstance(value, tuple):
+            value = list(value)
+        if value is None or isinstance(value, (str, int, bool, list)) or (
+                isinstance(value, float) and np.isfinite(value)):
+            result[key] = value
+    if name == "CatBoost":
+        for key in ("depth", "learning_rate", "l2_leaf_reg", "random_strength", "border_count"):
+            result.setdefault(key, None)
+    return result
