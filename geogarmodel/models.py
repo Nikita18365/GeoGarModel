@@ -226,9 +226,7 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
                            method, group_column, block_size, buffer_size, folds, seed,
                            parameters, search, optimize, trials, timeout, device, gpu_id,
                            progress, cancel_event):
-    """Nested CV: external labels never enter the corresponding inner search.
-    Final full-data search is distinct from outer evaluation and used for deployment.
-    """
+    """Single CV study; OOF of its best trial is a selection score, not independent validation."""
     from .optimization import default_space, optimize_model
     if method in GROUP_METHODS:
         if group_column not in table.columns or group_column in coordinates + [target]:
@@ -248,57 +246,41 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
     oof = np.full(len(x), np.nan)
     fold_ids = np.zeros(len(x), dtype=int)
     scores = []
-    live_history = []
-    def stream(stage, outer_fold=None):
-        def publish(record):
-            item = dict(record, stage=stage, outer_fold=outer_fold,
-                        global_trial=len(live_history))
-            live_history.append(item)
-            if progress:
-                progress(dict(item))
-        return publish
-    # Preflight all inner splits before any expensive fits.
-    inner_splits = [make_splits(method, xy[train], folds,
-                       labels=None if labels is None else labels[train],
-                       inner=True, **options) for train, _ in splits] if do_search else []
-    for i, (train, valid) in enumerate(splits):
-        if do_search and any(x.iloc[train[inner_train]].isna().all().any() for inner_train, _ in inner_splits[i]):
-            raise ValueError(f"Внутренний фолд {i+1}: полностью пустой обучающий признак.")
-    for i, (train, valid) in enumerate(splits):
-        check_cancel(cancel_event)
-        report(i, folds, f"Внешняя валидация · фолд {i+1}/{folds}")
+    # Validate every training fold before creating the only study.
+    for i,(train,valid) in enumerate(splits):
         if x.iloc[train].isna().all().any():
             raise ValueError(f"Фолд {i+1}: полностью пустой обучающий признак.")
-        best = {}
-        if do_search:
-            best, _, _ = optimize_model(factory, x.iloc[train], y.iloc[train], inner_splits[i],
-                model_name=name, device=device, space=space, fixed=fixed, n_trials=trials,
-                timeout=timeout, seed=seed, progress=stream("inner",i+1), cancel_event=cancel_event)
-        estimator = factory({**fixed, **best})
-        estimator.fit(x.iloc[train], y.iloc[train])
-        verify_device(estimator, name, device)
-        pred = estimator.predict(x.iloc[valid])
-        oof[valid] = pred
-        fold_ids[valid] = i + 1
-        fold_scores = evaluation_scores(y.iloc[valid], pred, name, {**fixed, **best})
-        scores.append(dict(fold=i+1, train_rows=len(train), test_rows=len(valid),
+    best, history, best_cv = {}, [], None
+    if do_search:
+        report(0, trials, "Optuna · подбор по выбранной CV")
+        best_oof = {}
+        best, history, best_cv = optimize_model(factory,x,y,splits,
+            model_name=name,device=device,space=space,fixed=fixed,n_trials=trials,
+            timeout=timeout,seed=seed,progress=progress,cancel_event=cancel_event,best_oof=best_oof)
+        oof[:] = best_oof["predicted"]
+    selected = {**fixed, **best}
+    for i,(train,valid) in enumerate(splits):
+        check_cancel(cancel_event)
+        if not do_search:
+            report(i, folds, f"Кросс-валидация · фолд {i+1}/{folds}")
+            estimator = factory(selected)
+            estimator.fit(x.iloc[train],y.iloc[train])
+            verify_device(estimator,name,device)
+            oof[valid] = estimator.predict(x.iloc[valid])
+        fold_ids[valid] = i+1
+        fold_scores = evaluation_scores(y.iloc[valid],oof[valid],name,selected)
+        scores.append(dict(fold=i+1,train_rows=len(train),test_rows=len(valid),
                            excluded_rows=len(x)-len(train)-len(valid),
-                           **{key.lower(): value for key,value in fold_scores.items()}, parameters=best,
-                           inner_folds=len(inner_splits[i]) if do_search else 0))
+                           **{key.lower():value for key,value in fold_scores.items()},
+                           parameters=best,inner_folds=0))
     check_cancel(cancel_event)
-    metrics = evaluation_scores(y, oof, name, fixed)
-    metrics.update(train_rows=len(x), test_rows=len(x))
+    metrics = evaluation_scores(y,oof,name,selected)
+    metrics.update(train_rows=len(x),test_rows=len(x))
     validation = table[coordinates].copy()
     validation["observed"] = y.to_numpy()
     validation["predicted"] = oof
     validation["residual_pred_minus_observed"] = oof-y.to_numpy()
     validation["fold"] = fold_ids
-    best, history, best_cv = {}, [], None
-    if do_search:
-        report(0, trials, "Optuna · итоговый подбор на всех данных")
-        best, history, best_cv = optimize_model(factory, x, y, splits,
-            model_name=name, device=device, space=space, fixed=fixed, n_trials=trials,
-            timeout=timeout, seed=seed, progress=stream("final"), cancel_event=cancel_event)
     check_cancel(cancel_event)
     report(0, 1, "Обучение итоговой модели")
     final = factory({**fixed, **best}).fit(x, y)
@@ -310,9 +292,9 @@ def cross_validate_horizon(table, x, y, xy, name, features, target, coordinates,
         spatial=method in SPATIAL_METHODS or method=="GroupKFold",
         block_size=block_size if method=="BlockKFold" else None,
         seed=seed, parameters=fixed, best_parameters=best, search=space,
-        cv_folds=folds, fold_metrics=scores, trial_history=live_history, optimizer="Optuna TPE" if do_search else None,
+        cv_folds=folds, fold_metrics=scores, trial_history=history, optimizer="Optuna TPE" if do_search else None,
         best_cv_rmse=best_cv, device=device, gpu_id=gpu_id, n_trials=trials,
-        timeout_seconds=timeout, evaluation="nested_oof" if do_search else "oof",
+        timeout_seconds=timeout, evaluation="selected_cv_oof" if do_search else "oof",
         block_origin=origin.tolist() if method=="BlockKFold" else None, final_train_rows=len(x),
         fold_splits=[dict(train=train.tolist(), test=valid.tolist()) for train, valid in splits])
     return TrainingResult(final, features, target, coordinates, name, metrics, validation, settings, history)

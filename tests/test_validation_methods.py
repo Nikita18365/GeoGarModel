@@ -77,17 +77,38 @@ def test_buffered_group_kfold_matches_group_control_and_filters_training(survey)
 
 
 @pytest.mark.parametrize("method", ["BlockKFold", "BufferedGroupKFold"])
-def test_nested_validation_outer_labels_do_not_leak(survey, method):
-    args=dict(model_name="Ridge",features=["feature"],validation_method=method,
-        group_column="profile",buffer_size=600.,block_size=3000,cv_folds=3,optimize=True,n_trials=2,search={"alpha":[.01,1.]})
-    first=train_horizon(survey,**args)
-    altered=survey.copy()
-    held=first.settings["fold_splits"][0]["test"]
-    altered.iloc[held,altered.columns.get_loc("depth")]+=10000
-    second=train_horizon(altered,**args)
-    np.testing.assert_allclose(first.validation.iloc[held].predicted,second.validation.iloc[held].predicted)
-    assert first.settings["fold_metrics"][0]["parameters"]==second.settings["fold_metrics"][0]["parameters"]
-    assert len(first.optimization_history)==2
+def test_single_cv_study_and_best_oof(survey, method, monkeypatch):
+    import optuna
+    from geogarmodel import models
+    create=optuna.create_study
+    studies=[]
+    def track(*args,**kwargs):
+        study=create(*args,**kwargs); studies.append(study); return study
+    monkeypatch.setattr(optuna,"create_study",track)
+    make=models.make_model
+    fits=[]
+    def counted(*args,**kwargs):
+        model=make(*args,**kwargs)
+        original=model.fit
+        def fit(x,y,*args,**kwargs):
+            fits.append(len(x))
+            return original(x,y,*args,**kwargs)
+        model.fit=fit
+        return model
+    monkeypatch.setattr(models,"make_model",counted)
+    records=[]
+    result=train_horizon(survey,"Ridge",features=["feature"],validation_method=method,
+        group_column="profile",buffer_size=600.,block_size=3000,cv_folds=3,
+        optimize=True,n_trials=3,search={"alpha":[.01,1.]},progress=records.append)
+    assert len(studies)==1
+    assert len(records)==len(result.optimization_history)==3
+    assert [r["trial"] for r in records]==[0,1,2]
+    assert len(fits)==10
+    assert fits[-1]==len(survey)
+    assert result.settings["evaluation"]=="selected_cv_oof"
+    assert result.metrics["RMSE"]==pytest.approx(result.settings["best_cv_rmse"])
+    assert all(f["parameters"]==result.settings["best_parameters"] for f in result.settings["fold_metrics"])
+    assert set(result.validation.fold)=={1,2,3}
 
 def test_validation_rejects_impossible_splits(survey):
     xy=survey[["X","Y"]].to_numpy()

@@ -521,7 +521,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                  "BufferedGroupKFold": "Контроль целыми группами; обучающие точки в пределах буфера вокруг контрольных точек исключаются. Без блоков.",
                  "KFold": "Последовательные фолды без перемешивания.",
                  "ShuffleKFold": "KFold со случайным перемешиванием и воспроизводимым seed."}
-        self.validation_hint.setText(hints[method] + " При Optuna применяется вложенная CV.")
+        self.validation_hint.setText(hints[method] + " Optuna использует один поиск по выбранной CV; оценка после подбора не является независимой.")
         self.validation_hint.updateGeometry()
         self.model_group.layout().invalidate()
         self.model_group.updateGeometry()
@@ -935,7 +935,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.fitted_crs = crs
         self.fitted_north_first = self.north_first.isChecked()
         self.result = self.output = None
-        self.dashboard.reset("Расчёт запущен. Контрольные точки не участвуют в подборе.")
+        self.dashboard.reset("Расчёт запущен. Один поиск Optuna по выбранной CV." if args["optimize"] else "Расчёт запущен. Кросс-валидация фиксированных параметров.")
         self.optimization_context = dict(model=name, parameters=dict(params), seed=args["seed"],
                                          device=args["device"], gpu_id=args["gpu_id"],
                                          search=search if args["optimize"] else {}, cv_folds=args["cv_folds"],
@@ -947,7 +947,7 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
                                          timeout_seconds=args["timeout"], features=features,
                                          target=args["target"], coordinates=args["coordinates"])
         self.best_trial_label.setText("Лучший trial: ещё нет завершённых результатов")
-        total=self.trials.value()*(self.folds.value()+1 if args["validation_method"] else 1)
+        total=self.trials.value()
         self.progress_bar.setRange(0,total if args["optimize"] else 1)
         if args["optimize"]: self.dashboard.tabs.setCurrentIndex(0)
         self.progress_bar.setValue(0)
@@ -958,11 +958,14 @@ class MainWindow(ProjectWorkspace,MapWorkspace,MapExportMixin,GridCalculatorMixi
         self.result = result
         self.log.setPlainText(json.dumps({"model": result.model_name, "metrics": result.metrics,
                                          "best_parameters": result.settings["best_parameters"]}, ensure_ascii=False, indent=2))
-        self.log.appendPlainText("Контроль: OOF-прогнозы внешних фолдов. Итоговая модель переобучена на всех размеченных данных." if result.settings.get("validation_method") else "Контроль: отдельные точки/блоки. Итоговая модель переобучена на всех размеченных данных.")
+        if result.settings.get("evaluation")=="selected_cv_oof":
+            self.log.appendPlainText("OOF лучшего trial по выбранной CV. Метрики использовались при подборе и не являются независимой оценкой. Итоговая модель обучена на всех данных.")
+        else:
+            self.log.appendPlainText("Контроль: OOF-прогнозы фиксированной модели." if result.settings.get("validation_method") else "Контроль: отдельные точки/блоки. Итоговая модель переобучена на всех размеченных данных.")
         if result.settings.get("fold_metrics"):
             self.log.appendPlainText(json.dumps(result.settings["fold_metrics"], ensure_ascii=False, indent=2))
         self.dashboard.show_result(result, self.fitted_north_first)
-        self.progress_bar.setValue(self.progress_bar.maximum())
+        self.progress_bar.setValue(len(result.optimization_history) if result.settings.get("optimizer") else self.progress_bar.maximum())
 
     def predict(self):
         if self.result is None or self.prediction is None:

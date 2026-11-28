@@ -74,7 +74,7 @@ class TrainingDashboard(QWidget):
         self.stage_choice.currentIndexChanged.connect(self.refresh_trials)
         opt_layout.addWidget(self.stage_choice)
         row = QHBoxLayout()
-        self.history_plot = plot_widget("Optuna · ошибка по trials", "Trial", "Внутренняя CV RMSE")
+        self.history_plot = plot_widget("Optuna · ошибка по trials", "Trial", "CV RMSE")
         self.history_plot.addLegend(offset=(10, 10), labelTextColor=FOREGROUND)
         self.trial_curve = self.history_plot.plot(pen=None, symbol="o", symbolSize=6,
                                                   symbolBrush=ACCENT, symbolPen=None, name="Trial")
@@ -128,7 +128,7 @@ class TrainingDashboard(QWidget):
         self.parameter_choice = QComboBox()
         self.parameter_choice.currentTextChanged.connect(self.draw_parameter)
         parameter_layout.addWidget(self.parameter_choice)
-        self.parameter_plot = plot_widget("Параметр / ошибка", "Параметр", "Внутренняя CV RMSE")
+        self.parameter_plot = plot_widget("Параметр / ошибка", "Параметр", "CV RMSE")
         parameter_layout.addWidget(self.parameter_plot)
         self.tabs.addTab(parameters, "Параметры")
         self.plots = {"История Optuna": self.history_plot, "Длительность trials": self.duration_plot,
@@ -290,6 +290,8 @@ class TrainingDashboard(QWidget):
             self.map_items.append((plot, scatter, bar))
         self.status.setText(f"{result.model_name} · контроль: {len(data)} точек · на графиках до 25 000 точек · "
                             f"устройство: {result.settings.get('device', 'cpu').upper()}. Метрики и экспорт — по всем точкам.")
+        if result.settings.get("evaluation")=="selected_cv_oof":
+            self.status.setText(self.status.text()+" OOF лучшего trial: оценка после подбора, не независимый контроль.")
         self.draw_parameter()
         self.tabs.setCurrentIndex(0 if self.history else 1)
 

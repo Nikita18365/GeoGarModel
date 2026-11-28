@@ -49,7 +49,7 @@ def suggest_parameters(trial, space):
 
 
 def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=None,
-                   n_trials=30, timeout=None, seed=42, progress=None, cancel_event=None):
+                   n_trials=30, timeout=None, seed=42, progress=None, cancel_event=None, best_oof=None):
     if not isinstance(n_trials, int) or n_trials < 1 or (timeout is not None and (not np.isfinite(timeout) or timeout <= 0)):
         raise ValueError("Число trials и лимит времени должны быть > 0.")
     # Validate the distribution schema before starting expensive trials.
@@ -62,6 +62,7 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
     study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed),
                                 pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1))
     history = []
+    if best_oof is not None: best_oof.clear()
     started = time.monotonic()
 
     def objective(trial):
@@ -69,12 +70,14 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
         params = sample_configuration(trial,model_name,device,fixed or {},space,suggest_parameters)
         trial.set_user_attr("effective_parameters",params)
         squared, count, fold_scores = 0., 0, []
+        prediction_oof = np.full(len(x), np.nan) if best_oof is not None else None
         for step, (train, valid) in enumerate(splits):
             check_cancel(cancel_event)
             estimator = factory(params)
             estimator.fit(x.iloc[train], y.iloc[train])
             verify_device(estimator, model_name, device)
             prediction = estimator.predict(x.iloc[valid])
+            if prediction_oof is not None: prediction_oof[valid] = prediction
             mse = mean_squared_error(y.iloc[valid], prediction)
             if not np.isfinite(mse):
                 raise ValueError("Получена неконечная ошибка модели.")
@@ -86,7 +89,10 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
             check_cancel(cancel_event)
             if trial.should_prune():
                 raise optuna.TrialPruned()
-        return float(np.sqrt(squared / count))
+        value = float(np.sqrt(squared / count))
+        if best_oof is not None and value < best_oof.get("rmse", float("inf")):
+            best_oof.update(rmse=value, trial=trial.number, predicted=prediction_oof)
+        return value
 
     def callback(study, trial):
         complete = [t.value for t in study.trials if t.state == TrialState.COMPLETE]
@@ -103,4 +109,6 @@ def optimize_model(factory, x, y, splits, *, model_name, device, space, fixed=No
     study.optimize(objective, n_trials=n_trials, timeout=timeout, n_jobs=1,
                    callbacks=[callback], gc_after_trial=True)
     check_cancel(cancel_event)
+    if best_oof is not None and (best_oof.get("trial") != study.best_trial.number or not np.isfinite(best_oof["predicted"]).all()):
+        raise RuntimeError("Не удалось сохранить OOF-прогнозы лучшего trial.")
     return {k:v for k,v in study.best_trial.user_attrs["effective_parameters"].items() if k not in (fixed or {}) or v!=(fixed or {})[k]}, history, float(study.best_value)
